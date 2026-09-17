@@ -19,7 +19,7 @@ object PlatformDetector {
             isDomainOrSubdomain(host, "youtube.com") || isDomainOrSubdomain(host, "youtu.be") -> Platform.YOUTUBE
             isDomainOrSubdomain(host, "facebook.com") || isDomainOrSubdomain(host, "fb.watch") || isDomainOrSubdomain(host, "fb.com") -> Platform.FACEBOOK
             isDomainOrSubdomain(host, "instagram.com") || isDomainOrSubdomain(host, "instagr.am") -> Platform.INSTAGRAM
-            isDomainOrSubdomain(host, "threads.net") -> Platform.THREADS
+            isDomainOrSubdomain(host, "threads.net") || isDomainOrSubdomain(host, "threads.com") -> Platform.THREADS
             isDomainOrSubdomain(host, "twitter.com") || isDomainOrSubdomain(host, "x.com") || isDomainOrSubdomain(host, "t.co") -> Platform.X
             isDomainOrSubdomain(host, "tiktok.com") -> Platform.TIKTOK
             else -> Platform.GENERIC

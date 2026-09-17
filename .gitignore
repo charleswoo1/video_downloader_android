@@ -60,3 +60,7 @@ fastlane/test_output/
 
 # Misc
 .vscode/
+
+# Local runtime AAR artifacts (built reproducibly via scripts/prepare-runtime)
+app/libs/*.aar
+build/runtime-repo/

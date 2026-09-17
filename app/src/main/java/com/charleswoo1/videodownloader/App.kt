@@ -23,13 +23,13 @@ class App : Application() {
         try {
             YoutubeDL.getInstance().init(this)
             DownloadRepository.isInitialized = true
-            val activeVer = YoutubeDL.getInstance().version(this) ?: "bundled"
-            Log.i(TAG, "[Diagnostics] YoutubeDL initialized successfully, active version: $activeVer")
+            val activeVer = YoutubeDL.getInstance().version(this) ?: "2026.08.30.232658"
+            Log.i(TAG, "[Diagnostics] YoutubeDL initialized successfully, packaged version: $activeVer")
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    DownloadRepository.updateRuntime()
+                    com.charleswoo1.videodownloader.data.download.RuntimeDiagnosticsHelper.inspect(this@App)
                 } catch (e: Exception) {
-                    Log.w(TAG, "[Diagnostics] Background update of yt-dlp runtime encountered error", e)
+                    Log.w(TAG, "[Diagnostics] Runtime diagnostics inspection error", e)
                 }
             }
         } catch (e: Exception) {

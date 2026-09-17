@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "spike/**", "feat/**" ]
   pull_request:
     branches: [ "main" ]
 
@@ -27,8 +27,13 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.2.2
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Grant execute permissions
+        run: |
+          chmod +x gradlew
+          chmod +x ./scripts/prepare-runtime.sh
+
+      - name: Prepare Deterministic Runtime AARs
+        run: ./scripts/prepare-runtime.sh
 
       - name: Run Unit Tests
         run: ./gradlew test
@@ -39,14 +44,14 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Prepare Deterministic APK Artifact
+      - name: Prepare Build #6 Debug APK Artifact
         run: |
           mkdir -p build-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-v0.1.0-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-Build6-debug.apk
 
-      - name: Upload Debug APK Artifact
+      - name: Upload Build #6 Debug APK Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: SocialVideoDownloader-Android-CI-v0.1.0-run-${{ github.run_number }}
-          path: build-artifacts/SocialVideoDownloader-Android-v0.1.0-debug.apk
+          name: SocialVideoDownloader-Android-Build6-debug-run-${{ github.run_number }}
+          path: build-artifacts/SocialVideoDownloader-Android-Build6-debug.apk
           retention-days: 7

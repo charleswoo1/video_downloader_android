@@ -41,25 +41,18 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
     }
 
     override suspend fun updateRuntime(): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val status = YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
-            val ver = getRuntimeVersion() ?: "unknown"
-            Log.i(TAG, "[Diagnostics] yt-dlp runtime update status: $status, active version: $ver")
-            Result.success(ver)
-        } catch (e: Exception) {
-            val ver = getRuntimeVersion() ?: "bundled"
-            Log.w(TAG, "[Diagnostics] yt-dlp update to latest stable skipped/failed, keeping version: $ver", e)
-            Result.failure(e)
-        }
+        val ver = getRuntimeVersion() ?: "2026.08.30.232658"
+        Log.i(TAG, "[Diagnostics] Packaged deterministic runtime active: $ver (automatic remote update disabled)")
+        Result.success(ver)
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
-        try {
-            val platform = PlatformDetector.detect(url)
-            if (platform == Platform.THREADS) {
-                return@withContext threadsResolver.extractMediaInfo(url)
-            }
+        val platform = PlatformDetector.detect(url)
+        if (platform == Platform.THREADS) {
+            return@withContext threadsResolver.extractMediaInfo(url)
+        }
 
+        try {
             if (!isInitialized()) {
                 return@withContext Result.failure(
                     IllegalStateException("yt-dlp 引擎尚未初始化，請重新開啟應用程式")
@@ -150,7 +143,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
             Result.success(mediaInfo)
         } catch (e: YoutubeDLException) {
             Log.w(TAG, "extractMediaInfo failed: ${e.message}")
-            Result.failure(mapYoutubeDLError(e))
+            Result.failure(mapYoutubeDLError(e, platform))
         } catch (e: Exception) {
             Log.e(TAG, "extractMediaInfo unexpected error", e)
             Result.failure(e)
@@ -239,7 +232,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
                 Result.failure(InterruptedException("下載已取消"))
             } else {
                 Log.w(TAG, "download failed: ${e.message}")
-                Result.failure(mapYoutubeDLError(e))
+                Result.failure(mapYoutubeDLError(e, platform))
             }
         } catch (e: Exception) {
             if (cancelledProcessIds.contains(processId) || e is InterruptedException || !currentCoroutineContext().isActive) {
@@ -276,36 +269,11 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
         return match?.groupValues?.getOrNull(1)
     }
 
-    private fun mapYoutubeDLError(e: YoutubeDLException): Exception {
-        val msg = e.message ?: ""
-        val isInstagram = msg.contains("instagram", ignoreCase = true)
-        return when {
-            msg.contains("Private video", ignoreCase = true) || msg.contains("This video is private", ignoreCase = true) ->
-                Exception("此影片設為私人內容，無法存取")
-            msg.contains("checkpoint_required", ignoreCase = true) ->
-                Exception("Instagram 要求安全驗證 (checkpoint)，無法直接下載")
-            msg.contains("login_required", ignoreCase = true) ||
-                    msg.contains("Sign in to confirm you’re not a bot", ignoreCase = true) ||
-                    msg.contains("Sign in to view", ignoreCase = true) ->
-                Exception("來源網站需要登入帳號驗證，目前版本不支援登入下載")
-            isInstagram && (msg.contains("Please wait a few minutes", ignoreCase = true) || msg.contains("rate-limit", ignoreCase = true)) ->
-                Exception("Instagram 存取頻率受限 (Rate Limited)，請稍候幾分鐘再試")
-            isInstagram && (msg.contains("Unable to extract", ignoreCase = true) || msg.contains("empty", ignoreCase = true)) -> {
-                val sanitized = msg.lines().firstOrNull { it.isNotBlank() && !it.contains("cookie", ignoreCase = true) } ?: "無法解析貼文內容"
-                Exception("Instagram 頁面解析失敗：$sanitized")
-            }
-            msg.contains("Unsupported URL", ignoreCase = true) ->
-                Exception("不支援的網址或尚未支援該網站之解析")
-            msg.contains("DRM", ignoreCase = true) ->
-                Exception("此內容受 DRM 保護，本工具無法下載")
-            msg.contains("HTTP Error 404", ignoreCase = true) ->
-                Exception("找不到目標影片 (HTTP 404)")
-            msg.contains("Unable to download webpage", ignoreCase = true) ->
-                Exception("無法連線至目標網頁，請檢查網路連線")
-            else -> {
-                val sanitized = msg.lines().firstOrNull { it.isNotBlank() && !it.contains("cookie", ignoreCase = true) } ?: "未知錯誤"
-                Exception("解析或下載發生錯誤：$sanitized")
-            }
+    private fun mapYoutubeDLError(e: YoutubeDLException, platform: Platform? = null): Exception {
+        val parsed = YtDlpErrorParser.parse(e.message, platform)
+        if (parsed.warnings.isNotEmpty()) {
+            Log.d(TAG, "[Diagnostics] yt-dlp warnings during execution: ${parsed.warnings}")
         }
+        return Exception(parsed.userMessage)
     }
 }

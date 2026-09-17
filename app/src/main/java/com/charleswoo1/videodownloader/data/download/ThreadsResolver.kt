@@ -23,8 +23,11 @@ class ThreadsResolver(private val context: Context? = null) {
         private const val TAG = "ThreadsResolver"
         const val BROWSER_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        const val CRAWLER_UA =
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
-        private val POST_ID_PATTERN = Pattern.compile("""/(?:post|t|share)/([A-Za-z0-9_-]+)""")
+        private val POST_ID_PATTERN = Pattern.compile("""/(?:post|t)/([A-Za-z0-9_-]+)""")
+        private val POST_IN_HTML_PATTERN = Pattern.compile("""/(?:post|t)/([A-Za-z0-9_-]+)""")
         private val SCRIPT_JSON_PATTERN = Pattern.compile(
             """<script[^>]*type=["']application/json["'][^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
@@ -73,6 +76,31 @@ class ThreadsResolver(private val context: Context? = null) {
         return if (matcher.find()) matcher.group(1) else null
     }
 
+    fun extractPostUrlFromShareHtml(html: String): String? {
+        val canonicalMatch = CANONICAL_LINK_PATTERN.matcher(html)
+        if (canonicalMatch.find()) {
+            val canonical = canonicalMatch.group(1)
+            if (!canonical.isNullOrBlank() && (canonical.contains("/post/") || canonical.contains("/t/"))) {
+                return normalizeUrl(canonical)
+            }
+        }
+        val ogMatch = OG_URL_PATTERN.matcher(html)
+        if (ogMatch.find()) {
+            val og = ogMatch.group(1)
+            if (!og.isNullOrBlank() && (og.contains("/post/") || og.contains("/t/"))) {
+                return normalizeUrl(og)
+            }
+        }
+        val postMatch = POST_IN_HTML_PATTERN.matcher(html)
+        if (postMatch.find()) {
+            val postCode = postMatch.group(1)
+            if (!postCode.isNullOrBlank()) {
+                return "https://www.threads.com/post/$postCode"
+            }
+        }
+        return null
+    }
+
     suspend fun resolveShareUrl(url: String): String = withContext(Dispatchers.IO) {
         if (!url.contains("/share/")) {
             return@withContext normalizeUrl(url)
@@ -91,7 +119,7 @@ class ThreadsResolver(private val context: Context? = null) {
                     requestMethod = "GET"
                     connectTimeout = 10000
                     readTimeout = 10000
-                    setRequestProperty("User-Agent", BROWSER_UA)
+                    setRequestProperty("User-Agent", CRAWLER_UA)
                     setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 }
 
@@ -105,26 +133,16 @@ class ThreadsResolver(private val context: Context? = null) {
                             location
                         }
                         val normalized = normalizeUrl(currentUrl)
-                        if (normalized.contains("/post/")) {
+                        if (normalized.contains("/post/") || normalized.contains("/t/")) {
                             return@withContext normalized
                         }
                         continue
                     }
                 } else if (code == 200) {
                     val html = conn.inputStream.bufferedReader().use { it.readText() }
-                    val canonicalMatch = CANONICAL_LINK_PATTERN.matcher(html)
-                    if (canonicalMatch.find()) {
-                        val canonical = canonicalMatch.group(1)
-                        if (!canonical.isNullOrBlank()) {
-                            return@withContext normalizeUrl(canonical)
-                        }
-                    }
-                    val ogMatch = OG_URL_PATTERN.matcher(html)
-                    if (ogMatch.find()) {
-                        val og = ogMatch.group(1)
-                        if (!og.isNullOrBlank()) {
-                            return@withContext normalizeUrl(og)
-                        }
+                    val resolved = extractPostUrlFromShareHtml(html)
+                    if (resolved != null) {
+                        return@withContext resolved
                     }
                     break
                 } else {
@@ -244,7 +262,7 @@ class ThreadsResolver(private val context: Context? = null) {
             requestMethod = "GET"
             connectTimeout = 15000
             readTimeout = 15000
-            setRequestProperty("User-Agent", BROWSER_UA)
+            setRequestProperty("User-Agent", CRAWLER_UA)
             setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             setRequestProperty("Accept-Language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7")
             setRequestProperty("Sec-Fetch-Dest", "document")
@@ -288,7 +306,7 @@ class ThreadsResolver(private val context: Context? = null) {
         }
 
         if (targetPost == null) {
-            throw IllegalStateException("Threads 貼文解析失敗，可能為私人內容或需要登入帳號驗證")
+            throw IllegalStateException("Threads 貼文 \"$postId\" 解析失敗，可能為私人內容、需要登入驗證或該貼文不存在")
         }
 
         val progressiveUrls = mutableListOf<String>()

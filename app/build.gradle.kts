@@ -67,9 +67,14 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.coroutines.android)
 
-    // yt-dlp & FFmpeg
-    implementation(libs.youtubedl.library)
-    implementation(libs.youtubedl.ffmpeg)
+    // yt-dlp & FFmpeg runtime (PR #361 + PR #359 pinned reproducible stack)
+    implementation(files("libs/common-release.aar"))
+    implementation(files("libs/library-release.aar"))
+    implementation(files("libs/ffmpeg-release.aar"))
+    implementation(libs.commons.io)
+    implementation(libs.commons.compress)
+    implementation(libs.jackson.databind)
+    implementation(libs.jackson.annotations)
 
     testImplementation(libs.junit)
     testImplementation(libs.json)

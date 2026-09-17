@@ -6,6 +6,10 @@ import com.charleswoo1.videodownloader.data.download.DownloadRepository
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
 class App : Application() {
 
     companion object {
@@ -19,7 +23,15 @@ class App : Application() {
         try {
             YoutubeDL.getInstance().init(this)
             DownloadRepository.isInitialized = true
-            Log.i(TAG, "YoutubeDL initialized successfully")
+            val activeVer = YoutubeDL.getInstance().version(this) ?: "bundled"
+            Log.i(TAG, "[Diagnostics] YoutubeDL initialized successfully, active version: $activeVer")
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    DownloadRepository.updateRuntime()
+                } catch (e: Exception) {
+                    Log.w(TAG, "[Diagnostics] Background update of yt-dlp runtime encountered error", e)
+                }
+            }
         } catch (e: Exception) {
             DownloadRepository.isInitialized = false
             Log.e(TAG, "Failed to initialize YoutubeDL", e)

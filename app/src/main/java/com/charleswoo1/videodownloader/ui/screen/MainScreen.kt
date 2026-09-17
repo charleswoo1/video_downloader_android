@@ -189,6 +189,16 @@ fun MainScreen(
                 downloadState = downloadState,
                 onCancel = { viewModel.cancelDownload(context) }
             )
+
+            val runtimeVersion by viewModel.runtimeVersion.collectAsState()
+            Text(
+                text = "yt-dlp: ${runtimeVersion ?: "loading..."}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(top = 8.dp)
+            )
         }
     }
 }

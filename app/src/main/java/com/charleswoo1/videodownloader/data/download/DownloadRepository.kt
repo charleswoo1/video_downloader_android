@@ -74,6 +74,22 @@ object DownloadRepository {
         completeCancellation()
     }
 
+    fun clearTerminalState() {
+        val current = _downloadState.value
+        if (current is DownloadState.Completed || current is DownloadState.Failed || current is DownloadState.Cancelled) {
+            _downloadState.value = DownloadState.Idle
+            finishDownload()
+        }
+    }
+
+    fun getRuntimeVersion(): String? {
+        return engine?.getRuntimeVersion()
+    }
+
+    suspend fun updateRuntime(): Result<String> {
+        return engine?.updateRuntime() ?: Result.failure(IllegalStateException("DownloadEngine is not initialized"))
+    }
+
     fun reset() {
         _downloadState.value = DownloadState.Idle
         finishDownload()

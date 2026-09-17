@@ -1,4 +1,4 @@
-﻿package com.charleswoo1.videodownloader.data.download
+package com.charleswoo1.videodownloader.data.download
 
 import com.charleswoo1.videodownloader.domain.model.DownloadState
 import org.junit.After
@@ -78,5 +78,34 @@ class DownloadRepositoryTest {
 
         DownloadRepository.finishDownload()
         assertFalse(DownloadRepository.isDownloadActive())
+    }
+
+    @Test
+    fun clearTerminalState_clearsTerminalStatesAndPreservesActiveStates() {
+        // Completed -> Idle
+        DownloadRepository.updateState(DownloadState.Completed("test.mp4"))
+        DownloadRepository.clearTerminalState()
+        assertEquals(DownloadState.Idle, DownloadRepository.downloadState.value)
+
+        // Failed -> Idle
+        DownloadRepository.updateState(DownloadState.Failed("some error"))
+        DownloadRepository.clearTerminalState()
+        assertEquals(DownloadState.Idle, DownloadRepository.downloadState.value)
+
+        // Cancelled -> Idle
+        DownloadRepository.updateState(DownloadState.Cancelled)
+        DownloadRepository.clearTerminalState()
+        assertEquals(DownloadState.Idle, DownloadRepository.downloadState.value)
+
+        // Active state (Downloading) should be preserved
+        val downloading = DownloadState.Downloading(42f)
+        DownloadRepository.updateState(downloading)
+        DownloadRepository.clearTerminalState()
+        assertEquals(downloading, DownloadRepository.downloadState.value)
+
+        // Active state (Preparing) should be preserved
+        DownloadRepository.updateState(DownloadState.Preparing)
+        DownloadRepository.clearTerminalState()
+        assertEquals(DownloadState.Preparing, DownloadRepository.downloadState.value)
     }
 }

@@ -17,4 +17,8 @@ interface DownloadEngine {
     ): Result<File>
 
     fun cancelDownload()
+
+    fun getRuntimeVersion(): String? = null
+
+    suspend fun updateRuntime(): Result<String> = Result.success("bundled")
 }

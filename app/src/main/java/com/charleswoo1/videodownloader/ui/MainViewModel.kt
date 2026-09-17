@@ -38,6 +38,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val downloadState: StateFlow<DownloadState> = DownloadRepository.downloadState
 
+    private val _runtimeVersion = MutableStateFlow<String?>(downloadEngine.getRuntimeVersion())
+    val runtimeVersion: StateFlow<String?> = _runtimeVersion.asStateFlow()
+
+    init {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _runtimeVersion.value = downloadEngine.getRuntimeVersion()
+        }
+    }
+
     fun onUrlInputChanged(newUrl: String) {
         _urlInput.value = newUrl
     }
@@ -49,6 +58,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun handleSharedText(sharedText: String?) {
         if (sharedText.isNullOrBlank()) return
 
+        DownloadRepository.clearTerminalState()
         val extractedUrl = SharedTextUrlExtractor.extractFirstUrl(sharedText)
         if (extractedUrl != null) {
             _urlInput.value = extractedUrl
@@ -65,6 +75,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        DownloadRepository.clearTerminalState()
         val extracted = SharedTextUrlExtractor.extractFirstUrl(url) ?: url
 
         viewModelScope.launch {

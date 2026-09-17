@@ -1,0 +1,62 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Kotlin
+.kotlin/
+
+# Signing / secrets
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+secrets.properties
+
+# Firebase / service credentials
+google-services.json
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+
+# APK / App Bundle outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Native binaries / symbols
+*.so
+*.hprof
+
+# Fastlane generated artifacts
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# Misc
+.vscode/

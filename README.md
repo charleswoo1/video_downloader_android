@@ -6,6 +6,14 @@ Android 版多平台社群影音下載工具。
 
 > 專案目前處於初始化階段，尚未提供可安裝 APK。第一個開發里程碑預計為 `v0.1.0`。
 
+## 開發狀態
+
+Android `v0.1.0` 的第一階段實作規格已固定於：
+
+[`docs/handoffs/HANDOFF_ANDROID_V0.1.0.md`](docs/handoffs/HANDOFF_ANDROID_V0.1.0.md)
+
+該文件是目前交給 Codex / coding agent 的主要實作合約；正式 Release 仍需 repository owner 另外明確授權。
+
 ## 預計核心體驗
 
 ```text
@@ -36,7 +44,7 @@ Social Video Downloader
 - Android MediaStore / 系統儲存機制
 - 背景下載與系統通知
 
-正式 dependency、SDK baseline 與模組結構會在第一階段實作前固定並寫入專案文件。
+目前 v0.1.0 handoff 基線為 `compileSdk 36` / `targetSdk 36` / `minSdk 26`；實際 dependency 與 runtime 版本須以實作 PR 驗證結果為準。
 
 ## 第一階段目標（v0.1.0）
 

@@ -170,7 +170,8 @@ fun MainScreen(
                         onDownload = { viewModel.startDownload(context) },
                         isDownloading = downloadState is DownloadState.Downloading ||
                                 downloadState is DownloadState.Preparing ||
-                                downloadState is DownloadState.PostProcessing
+                                downloadState is DownloadState.PostProcessing ||
+                                downloadState is DownloadState.Cancelling
                     )
                 }
                 AnalysisState.Idle -> {
@@ -466,6 +467,22 @@ fun DownloadProgressSection(
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
+                }
+            }
+        }
+        is DownloadState.Cancelling -> {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(stringResource(R.string.status_cancelling), fontWeight = FontWeight.SemiBold)
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
             }
         }

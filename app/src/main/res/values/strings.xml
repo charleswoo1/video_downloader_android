@@ -14,6 +14,7 @@
     <string name="status_downloading">正在下載… %1$.1f%%</string>
     <string name="status_post_processing">正在處理音視訊合併…</string>
     <string name="status_completed">下載完成！已儲存至 下載/SocialVideoDownloader/</string>
+    <string name="status_cancelling">正在取消下載…</string>
     <string name="status_cancelled">下載已取消</string>
     <string name="status_failed">下載失敗：%1$s</string>
     <string name="error_empty_url">請輸入有效的網址</string>

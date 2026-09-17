@@ -84,7 +84,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDownload(context: Context) {
-        if (DownloadRepository.isDownloadActive()) return
+        val currentState = downloadState.value
+        val isActivelyDownloading = DownloadRepository.isDownloadActive() &&
+                (currentState is DownloadState.Downloading ||
+                 currentState is DownloadState.Preparing ||
+                 currentState is DownloadState.PostProcessing ||
+                 currentState is DownloadState.Cancelling)
+
+        if (isActivelyDownloading) return
 
         val state = _analysisState.value
         if (state !is AnalysisState.Success) return
@@ -100,6 +107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelDownload(context: Context) {
+        DownloadRepository.requestCancel()
         DownloadService.cancelDownload(context)
     }
 

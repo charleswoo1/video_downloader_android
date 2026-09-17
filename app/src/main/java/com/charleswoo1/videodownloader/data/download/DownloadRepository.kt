@@ -20,6 +20,10 @@ object DownloadRepository {
         return isJobRunning.compareAndSet(false, true)
     }
 
+    fun markDownloadStarted() {
+        isJobRunning.set(true)
+    }
+
     fun finishDownload() {
         isJobRunning.set(false)
     }
@@ -37,6 +41,10 @@ object DownloadRepository {
         }
     }
 
+    fun setEngineForTesting(testEngine: DownloadEngine?) {
+        this.engine = testEngine
+    }
+
     fun getEngine(context: Context): DownloadEngine {
         initialize(context)
         return engine!!
@@ -51,9 +59,23 @@ object DownloadRepository {
         _downloadState.value = state
     }
 
-    fun cancel() {
+    fun requestCancel() {
         engine?.cancelDownload()
+        _downloadState.value = DownloadState.Cancelling
+    }
+
+    fun completeCancellation() {
         _downloadState.value = DownloadState.Cancelled
+        finishDownload()
+    }
+
+    fun cancel() {
+        requestCancel()
+        completeCancellation()
+    }
+
+    fun reset() {
+        _downloadState.value = DownloadState.Idle
         finishDownload()
     }
 }

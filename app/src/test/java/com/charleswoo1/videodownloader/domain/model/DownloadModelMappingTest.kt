@@ -63,6 +63,9 @@ class DownloadModelMappingTest {
         assertTrue(state is DownloadState.Completed)
         assertEquals("test.mp4", (state as DownloadState.Completed).fileName)
 
+        state = DownloadState.Cancelling
+        assertEquals(DownloadState.Cancelling, state)
+
         state = DownloadState.Cancelled
         assertEquals(DownloadState.Cancelled, state)
 

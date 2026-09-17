@@ -10,9 +10,12 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLException
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
 
@@ -21,6 +24,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
     }
 
     private var activeProcessId: String? = null
+    private val cancelledProcessIds = ConcurrentHashMap.newKeySet<String>()
 
     override fun isInitialized(): Boolean {
         return DownloadRepository.isInitialized
@@ -133,6 +137,10 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
         activeProcessId = processId
 
         try {
+            if (cancelledProcessIds.contains(processId) || !currentCoroutineContext().isActive) {
+                return@withContext Result.failure(InterruptedException("下載已取消"))
+            }
+
             if (!destDir.exists()) {
                 destDir.mkdirs()
             }
@@ -156,7 +164,17 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
 
             onStatus("正在開始下載…")
 
+            if (cancelledProcessIds.contains(processId) || !currentCoroutineContext().isActive) {
+                return@withContext Result.failure(InterruptedException("下載已取消"))
+            }
+
             val response = YoutubeDL.getInstance().execute(ytRequest, processId) { progress, etaInSeconds, line ->
+                if (cancelledProcessIds.contains(processId)) {
+                    try {
+                        YoutubeDL.getInstance().destroyProcessById(processId)
+                    } catch (_: Exception) {}
+                    return@execute
+                }
                 val speed = extractSpeed(line)
                 if (line.contains("[Merger]") || line.contains("[ExtractAudio]")) {
                     onStatus("正在合併音視訊與後製處理…")
@@ -164,11 +182,15 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
                 onProgress(progress, etaInSeconds, speed)
             }
 
+            if (cancelledProcessIds.contains(processId) || !currentCoroutineContext().isActive) {
+                return@withContext Result.failure(InterruptedException("下載已取消"))
+            }
+
             Log.d(TAG, "Download finished. Exit code: ${response.exitCode}")
 
             // Locate the generated file in destDir
             val downloadedFile = destDir.listFiles()
-                ?.filter { it.isFile && it.lastModified() >= (startTime - 5000) }
+                ?.filter { it.isFile && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") && it.lastModified() >= (startTime - 5000) }
                 ?.maxByOrNull { it.lastModified() }
 
             if (downloadedFile != null && downloadedFile.exists()) {
@@ -177,12 +199,22 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
                 Result.failure(IllegalStateException("找不到已下載的媒體檔案"))
             }
         } catch (e: YoutubeDLException) {
-            Log.w(TAG, "download failed: ${e.message}")
-            Result.failure(mapYoutubeDLError(e))
+            if (cancelledProcessIds.contains(processId) || !currentCoroutineContext().isActive) {
+                Log.d(TAG, "Process was cancelled during download: $processId")
+                Result.failure(InterruptedException("下載已取消"))
+            } else {
+                Log.w(TAG, "download failed: ${e.message}")
+                Result.failure(mapYoutubeDLError(e))
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "download error", e)
-            Result.failure(e)
+            if (cancelledProcessIds.contains(processId) || e is InterruptedException || !currentCoroutineContext().isActive) {
+                Result.failure(InterruptedException("下載已取消"))
+            } else {
+                Log.e(TAG, "download error", e)
+                Result.failure(e)
+            }
         } finally {
+            cancelledProcessIds.remove(processId)
             if (activeProcessId == processId) {
                 activeProcessId = null
             }
@@ -192,6 +224,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
     override fun cancelDownload() {
         val processId = activeProcessId
         if (processId != null) {
+            cancelledProcessIds.add(processId)
             try {
                 YoutubeDL.getInstance().destroyProcessById(processId)
             } catch (e: Exception) {

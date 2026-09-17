@@ -16,6 +16,7 @@ sealed interface DownloadState {
         val contentUri: Uri? = null,
         val filePath: String? = null
     ) : DownloadState
+    data object Cancelling : DownloadState
     data object Cancelled : DownloadState
     data class Failed(
         val errorMessage: String

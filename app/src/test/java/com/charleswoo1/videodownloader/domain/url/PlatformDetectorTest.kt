@@ -54,4 +54,13 @@ class PlatformDetectorTest {
         assertEquals(Platform.GENERIC, PlatformDetector.detect(null))
         assertEquals(Platform.GENERIC, PlatformDetector.detect(""))
     }
+
+    @Test
+    fun detect_doesNotMatchLookalikeDomains() {
+        assertEquals(Platform.GENERIC, PlatformDetector.detect("https://notyoutube.com/watch?v=123"))
+        assertEquals(Platform.GENERIC, PlatformDetector.detect("https://fakefacebook.com/video"))
+        assertEquals(Platform.GENERIC, PlatformDetector.detect("https://notinstagram.com/reel"))
+        assertEquals(Platform.GENERIC, PlatformDetector.detect("https://fake-threads.net/post"))
+        assertEquals(Platform.GENERIC, PlatformDetector.detect("https://faketiktok.com/video"))
+    }
 }

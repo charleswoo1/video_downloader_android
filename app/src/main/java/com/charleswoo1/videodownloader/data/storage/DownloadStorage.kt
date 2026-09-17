@@ -36,7 +36,7 @@ class DownloadStorage(private val context: Context) {
                 val mimeType = getMimeType(ext)
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    saveViaMediaStore(sourceFile, "$sanitizedBase.$ext", mimeType)
+                    saveViaMediaStore(sourceFile, sanitizedBase, ext, mimeType)
                 } else {
                     saveViaLegacyStorage(sourceFile, sanitizedBase, ext, mimeType)
                 }
@@ -49,14 +49,16 @@ class DownloadStorage(private val context: Context) {
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun saveViaMediaStore(
         sourceFile: File,
-        displayName: String,
+        baseName: String,
+        ext: String,
         mimeType: String
     ): Result<SavedMediaResult> {
         val resolver = context.contentResolver
         val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$SUB_DIR"
+        val uniqueName = resolveUniqueDisplayName(baseName, ext, relativePath)
 
         val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.DISPLAY_NAME, uniqueName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
             put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
             put(MediaStore.Downloads.IS_PENDING, 1)
@@ -80,11 +82,42 @@ class DownloadStorage(private val context: Context) {
             // Safely delete temp source
             sourceFile.delete()
 
-            return Result.success(SavedMediaResult(displayName, uri, null))
+            return Result.success(SavedMediaResult(uniqueName, uri, null))
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             return Result.failure(e)
         }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun resolveUniqueDisplayName(baseName: String, ext: String, relativePath: String): String {
+        val resolver = context.contentResolver
+        val projection = arrayOf(MediaStore.Downloads.DISPLAY_NAME)
+        val selection = "${MediaStore.Downloads.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("$relativePath%")
+        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+
+        val existingNames = mutableSetOf<String>()
+        try {
+            resolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(MediaStore.Downloads.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    while (cursor.moveToNext()) {
+                        cursor.getString(nameIndex)?.let { existingNames.add(it) }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to query existing downloads for conflict resolution", e)
+        }
+
+        var candidate = "$baseName.$ext"
+        var counter = 1
+        while (existingNames.contains(candidate)) {
+            candidate = "$baseName ($counter).$ext"
+            counter++
+        }
+        return candidate
     }
 
     @Suppress("DEPRECATION")

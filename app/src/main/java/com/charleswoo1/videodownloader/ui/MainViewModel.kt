@@ -84,6 +84,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDownload(context: Context) {
+        if (DownloadRepository.isDownloadActive()) return
+
         val state = _analysisState.value
         if (state !is AnalysisState.Success) return
 

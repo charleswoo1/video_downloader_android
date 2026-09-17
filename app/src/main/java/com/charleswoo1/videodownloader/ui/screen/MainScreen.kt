@@ -168,7 +168,9 @@ fun MainScreen(
                         selectedQuality = selectedQuality,
                         onSelectQuality = { viewModel.onQualitySelected(it) },
                         onDownload = { viewModel.startDownload(context) },
-                        isDownloading = downloadState is DownloadState.Downloading || downloadState is DownloadState.Preparing
+                        isDownloading = downloadState is DownloadState.Downloading ||
+                                downloadState is DownloadState.Preparing ||
+                                downloadState is DownloadState.PostProcessing
                     )
                 }
                 AnalysisState.Idle -> {
@@ -315,6 +317,7 @@ fun MediaResultCard(
                             .fillMaxWidth()
                             .selectable(
                                 selected = (option.id == selectedQuality?.id),
+                                enabled = !isDownloading,
                                 onClick = { onSelectQuality(option) }
                             )
                             .padding(vertical = 4.dp),
@@ -322,6 +325,7 @@ fun MediaResultCard(
                     ) {
                         RadioButton(
                             selected = (option.id == selectedQuality?.id),
+                            enabled = !isDownloading,
                             onClick = { onSelectQuality(option) }
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -361,7 +365,7 @@ fun DownloadProgressSection(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("正在準備下載…", fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.status_preparing), fontWeight = FontWeight.SemiBold)
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
             }
@@ -383,7 +387,7 @@ fun DownloadProgressSection(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = String.format("下載進度: %.1f%%", downloadState.progress),
+                            text = stringResource(R.string.progress_format, downloadState.progress),
                             fontWeight = FontWeight.SemiBold
                         )
                         if (!downloadState.speedText.isNullOrBlank()) {

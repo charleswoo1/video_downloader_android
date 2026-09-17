@@ -14,6 +14,19 @@ object DownloadRepository {
     private var engine: DownloadEngine? = null
     private var storage: DownloadStorage? = null
     var isInitialized: Boolean = false
+    private val isJobRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun tryStartDownload(): Boolean {
+        return isJobRunning.compareAndSet(false, true)
+    }
+
+    fun finishDownload() {
+        isJobRunning.set(false)
+    }
+
+    fun isDownloadActive(): Boolean {
+        return isJobRunning.get()
+    }
 
     fun initialize(context: Context) {
         if (engine == null) {
@@ -41,5 +54,6 @@ object DownloadRepository {
     fun cancel() {
         engine?.cancelDownload()
         _downloadState.value = DownloadState.Cancelled
+        finishDownload()
     }
 }

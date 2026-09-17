@@ -37,7 +37,7 @@ Social Video Downloader
 - **最低系統版本 (minSdk)：** Android 8.0 (API Level 26)
 - **目標系統版本 (targetSdk)：** Android 16 (API Level 36)
 - **編譯系統版本 (compileSdk)：** Android 16 (API Level 36)
-- **建置工具：** JDK 17, Gradle 8.11+, Android Gradle Plugin 8.8+
+- **建置工具：** JDK 17, Gradle 8.11+, Android Gradle Plugin 8.9.1+ (官方支援 API 36)
 - **開發語言與 UI：** Kotlin, Jetpack Compose, Material 3
 - **核心 Runtime：** `youtubedl-android 0.18.1` (包含 `yt-dlp` 與 `FFmpeg`)
 - **支援架構 (ABIs)：** `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`

@@ -27,6 +27,11 @@
     <string name="notification_downloading">影片下載中</string>
     <string name="notification_completed">影片下載完成</string>
     <string name="notification_failed">下載失敗</string>
+    <string name="status_preparing">正在準備下載…</string>
+    <string name="progress_format">下載進度: %1$.1f%%</string>
+    <string name="error_download_timeout">下載逾時（系統前台傳輸時間配額已用盡）</string>
+    <string name="error_already_downloading">已有進行中的下載任務，請稍候再試</string>
+    <string name="notification_completed_desc">%1$s 已存至 下載/SocialVideoDownloader/</string>
     <string name="quality_best">最佳畫質 (推薦)</string>
     <string name="quality_1080p">1080p Full HD</string>
     <string name="quality_720p">720p HD</string>

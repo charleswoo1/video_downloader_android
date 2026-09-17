@@ -16,13 +16,17 @@ object PlatformDetector {
         }
 
         return when {
-            host.contains("youtube.com") || host == "youtu.be" -> Platform.YOUTUBE
-            host.contains("facebook.com") || host == "fb.watch" || host.endsWith(".facebook.com") || host == "fb.com" -> Platform.FACEBOOK
-            host.contains("instagram.com") || host == "instagr.am" -> Platform.INSTAGRAM
-            host.contains("threads.net") -> Platform.THREADS
-            host == "twitter.com" || host.endsWith(".twitter.com") || host == "x.com" || host.endsWith(".x.com") || host == "t.co" -> Platform.X
-            host.contains("tiktok.com") -> Platform.TIKTOK
+            isDomainOrSubdomain(host, "youtube.com") || isDomainOrSubdomain(host, "youtu.be") -> Platform.YOUTUBE
+            isDomainOrSubdomain(host, "facebook.com") || isDomainOrSubdomain(host, "fb.watch") || isDomainOrSubdomain(host, "fb.com") -> Platform.FACEBOOK
+            isDomainOrSubdomain(host, "instagram.com") || isDomainOrSubdomain(host, "instagr.am") -> Platform.INSTAGRAM
+            isDomainOrSubdomain(host, "threads.net") -> Platform.THREADS
+            isDomainOrSubdomain(host, "twitter.com") || isDomainOrSubdomain(host, "x.com") || isDomainOrSubdomain(host, "t.co") -> Platform.X
+            isDomainOrSubdomain(host, "tiktok.com") -> Platform.TIKTOK
             else -> Platform.GENERIC
         }
+    }
+
+    private fun isDomainOrSubdomain(host: String, domain: String): Boolean {
+        return host == domain || host.endsWith(".$domain")
     }
 }

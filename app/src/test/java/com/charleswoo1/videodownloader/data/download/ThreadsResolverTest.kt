@@ -231,6 +231,38 @@ class ThreadsResolverTest {
     }
 
     @Test
+    fun extractPostUrlFromShareHtml_resolvesFromReversedCanonicalLink() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <link href="https://www.threads.net/@creator_abc/post/REAL_POST_123" rel="canonical" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals("https://www.threads.com/@creator_abc/post/REAL_POST_123", resolved)
+    }
+
+    @Test
+    fun extractPostUrlFromShareHtml_resolvesFromReversedOgUrl() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta content="https://www.threads.net/@creator_xyz/post/REAL_POST_456" property="og:url" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals("https://www.threads.com/@creator_xyz/post/REAL_POST_456", resolved)
+    }
+
+    @Test
     fun extractPostUrlFromShareHtml_resolvesFromHtmlContentFallback() {
         val html = """
             <div>Check out the discussion on <a href="/post/FALLBACK_789">this post</a></div>

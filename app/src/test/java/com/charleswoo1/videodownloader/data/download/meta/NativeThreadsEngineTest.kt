@@ -512,4 +512,49 @@ class NativeThreadsEngineTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun extractCanonicalFromHtml_reversedAttributeOrder_extractsSuccessfully() {
+        val reversedLinkHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <link href="https://www.threads.net/@reverse_user/post/Ddreversed123" rel="canonical" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+        assertEquals(
+            "https://www.threads.com/@reverse_user/post/Ddreversed123",
+            engine.extractCanonicalFromHtml(reversedLinkHtml)
+        )
+
+        val reversedOgHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta content="https://www.threads.net/@reverse_user/post/Ddreversed456" property="og:url" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+        assertEquals(
+            "https://www.threads.com/@reverse_user/post/Ddreversed456",
+            engine.extractCanonicalFromHtml(reversedOgHtml)
+        )
+
+        val nameOgHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta content="https://www.threads.net/@reverse_user/post/Ddreversed789" name="og:url" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+        assertEquals(
+            "https://www.threads.com/@reverse_user/post/Ddreversed789",
+            engine.extractCanonicalFromHtml(nameOgHtml)
+        )
+    }
 }

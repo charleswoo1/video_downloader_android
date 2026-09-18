@@ -499,4 +499,95 @@ class NativeInstagramEngineTest {
         assertFalse("Terminal login-required must not fallback", restricted.canFallback)
         assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
     }
+
+    @Test
+    fun buildFetchUrl_preservesQueryParametersAndNormalizesPath() {
+        val withStkn = "https://www.instagram.com/reel/DdXfJ2nzdtA/?stkn=ZWhiNjI5c2NqcGpn"
+        assertEquals(
+            "https://www.instagram.com/reel/DdXfJ2nzdtA/?stkn=ZWhiNjI5c2NqcGpn",
+            engine.buildFetchUrl(withStkn)
+        )
+
+        val withFragmentAndParam = "https://instagram.com/reel/DdXfJ2nzdtA/?stkn=ZWhiNjI5c2NqcGpn#top"
+        assertEquals(
+            "https://www.instagram.com/reel/DdXfJ2nzdtA/?stkn=ZWhiNjI5c2NqcGpn",
+            engine.buildFetchUrl(withFragmentAndParam)
+        )
+
+        val cleanUrl = "https://www.instagram.com/reel/DdXfJ2nzdtA/"
+        assertEquals(
+            "https://www.instagram.com/reel/DdXfJ2nzdtA/",
+            engine.buildFetchUrl(cleanUrl)
+        )
+    }
+
+    @Test
+    fun extractMediaInfo_preservesStknQueryParameterInFetchUrl() = kotlinx.coroutines.runBlocking {
+        val publicFixtureHtml = loadFixture("single_public_video.html")
+        val requestedUrls = mutableListOf<String>()
+
+        val testSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                requestedUrls.add(url)
+                return Result.success(HttpResponse(200, url, publicFixtureHtml, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = testSession)
+        val inputUrl = "https://www.instagram.com/reel/DdS5sMrxkBq/?stkn=ZWhiNjI5c2NqcGpn"
+        val result = testEngine.extractMediaInfo(inputUrl)
+
+        assertTrue("Expected extraction success", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals(inputUrl, mediaInfo?.sourceUrl)
+        assertTrue("Fetch URL must retain stkn query parameter", requestedUrls.isNotEmpty() && requestedUrls.first().contains("stkn=ZWhiNjI5c2NqcGpn"))
+    }
+
+    @Test
+    fun extractMediaInfo_desktopLoginWall_mobileTechnical_returnsFallbackEligibleTechnical() = kotlinx.coroutines.runBlocking {
+        val loginWallHtml = "<html><head><title>Login • Instagram</title></head><body><a href=\"/accounts/login/\">Login</a></body></html>"
+        val nonLoginNoDataHtml = "<html><head><title>Instagram</title></head><body><div>Just empty container</div></body></html>"
+
+        val testSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val returnedBody = when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> loginWallHtml
+                    else -> nonLoginNoDataHtml
+                }
+                return Result.success(HttpResponse(200, url, returnedBody, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = testSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+
+        assertTrue("Expected failure when all profiles fail", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be MetaExtractionError.Technical when not all profiles are login-gated", error is MetaExtractionError.Technical)
+        val technical = error as MetaExtractionError.Technical
+        assertTrue("Mixed profile failure must allow fallback to yt-dlp", technical.canFallback)
+    }
 }

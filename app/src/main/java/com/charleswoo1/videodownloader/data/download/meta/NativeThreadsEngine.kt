@@ -49,11 +49,11 @@ class NativeThreadsEngine(
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
         private val CANONICAL_LINK_PATTERN = Pattern.compile(
-            """<link[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']""",
+            """<link\b(?=[^>]*\brel=["']canonical["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>""",
             Pattern.CASE_INSENSITIVE
         )
         private val OG_URL_PATTERN = Pattern.compile(
-            """<meta[^>]*property=["']og:url["'][^>]*content=["']([^"']+)["']""",
+            """<meta\b(?=[^>]*\b(?:property|name)=["']og:url["'])(?=[^>]*\bcontent=["']([^"']+)["'])[^>]*>""",
             Pattern.CASE_INSENSITIVE
         )
         private val DASH_BASE_URL_PATTERN = Pattern.compile(

@@ -198,6 +198,16 @@ class NativeInstagramEngine(
         return clean
     }
 
+    /**
+     * Builds the fetch URL preserving essential query parameters (such as signed security tokens like `stkn`),
+     * while normalizing the host and path structure.
+     */
+    fun buildFetchUrl(rawUrl: String): String {
+        val canonical = normalizeUrl(rawUrl)
+        val query = rawUrl.substringAfter('?', missingDelimiterValue = "").substringBefore('#').trim()
+        return if (query.isNotBlank()) "$canonical?$query" else canonical
+    }
+
     fun parseInstagramPage(html: String, targetShortcode: String, canonicalUrl: String): MetaExtractionResult {
         // 1. Check for audience/content restriction
         if (html.contains("This content isn't available to everyone", ignoreCase = true) ||
@@ -530,7 +540,9 @@ class NativeInstagramEngine(
             )
 
         val canonicalUrl = normalizeUrl(url)
+        val fetchUrl = buildFetchUrl(url)
         val profileSteps = mutableListOf<String>()
+        val profileErrors = mutableListOf<MetaExtractionError>()
         val profiles = listOf(
             "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
             "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
@@ -538,12 +550,10 @@ class NativeInstagramEngine(
         )
 
         var successfulMedia: ExtractedMetaMedia? = null
-        var encounteredLoginWall = false
-        var lastError: MetaExtractionError? = null
 
         for ((name, profile) in profiles) {
             profileSteps.add(name)
-            val resp = httpSession.fetch(canonicalUrl, profile)
+            val resp = httpSession.fetch(fetchUrl, profile)
             val html = resp.getOrNull()?.body ?: ""
 
             val parseResult = parseInstagramPage(html, shortcode, canonicalUrl)
@@ -554,11 +564,10 @@ class NativeInstagramEngine(
                 }
                 is MetaExtractionResult.Failure -> {
                     val error = parseResult.error
-                    lastError = error
+                    profileErrors.add(error)
                     when (error) {
                         is MetaExtractionError.Restricted -> {
                             if (error.reason == RestrictionReason.LOGIN_REQUIRED) {
-                                encounteredLoginWall = true
                                 // Retryable during profile escalation: continue to next profile
                             } else {
                                 // AUDIENCE_RESTRICTED or DELETED_OR_PRIVATE: strictly terminal immediately
@@ -584,7 +593,7 @@ class NativeInstagramEngine(
         if (successfulMedia != null) {
             val options = buildQualityOptions(successfulMedia)
             val info = MediaInfo(
-                sourceUrl = canonicalUrl,
+                sourceUrl = fetchUrl,
                 title = successfulMedia.title,
                 platform = Platform.INSTAGRAM,
                 extractor = ENGINE_NAME,
@@ -595,7 +604,11 @@ class NativeInstagramEngine(
             return@withContext Result.success(info)
         }
 
-        if (encounteredLoginWall) {
+        val allProfilesLoginGated = profileErrors.isNotEmpty() && profileErrors.all {
+            it is MetaExtractionError.Restricted && it.reason == RestrictionReason.LOGIN_REQUIRED
+        }
+
+        if (allProfilesLoginGated) {
             return@withContext Result.failure(
                 MetaExtractionError.Restricted(
                     RestrictionReason.LOGIN_REQUIRED,
@@ -604,7 +617,9 @@ class NativeInstagramEngine(
             )
         }
 
-        Result.failure(lastError ?: MetaExtractionError.Technical("All anonymous profiles failed to extract media for $shortcode"))
+        val technicalError = profileErrors.filterIsInstance<MetaExtractionError.Technical>().lastOrNull()
+            ?: MetaExtractionError.Technical("All anonymous profiles failed to extract media for $shortcode")
+        Result.failure(technicalError)
     }
 
     private fun buildQualityOptions(media: ExtractedMetaMedia): List<QualityOption> {

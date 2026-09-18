@@ -56,9 +56,25 @@ This document records owner-supplied real-device test cases for Threads and Inst
 
 ---
 
-## 3. Real-Device A/B Matrix
+## 3. X (Twitter) Cases
 
-| Case ID | Input Shortcode / Share URL | Native Engine Result | yt-dlp Plugin Result | Final Engine Route | Notes |
+### X-CLASSIFY-01
+- **Input URL**: `https://x.com/SmallQQQQQ/status/2099089385958645960`
+- **Observed yt-dlp Baseline Result**: `No video could be found in this tweet`
+- **Native Engine Goal**: Distinguish whether this tweet is a genuine `NO_VIDEO` (text/photo-only) or whether Native X can extract video variants via GraphQL / HTML fallback.
+- **Classification Policy**:
+  - If target post metadata contains only photo or text, classify as terminal `NO_VIDEO` and terminate without yt-dlp fallback loop.
+  - If video variants exist, extract highest bitrate video.
+
+### X-PASS-01
+- **Input URL**: `https://x.com/Twitter/status/1234567890` (Representative video tweet)
+- **Native Engine Goal**: Non-regression verification for public video tweets via GraphQL TweetResultByRestId and highest-bitrate rendition selection.
+
+---
+
+## 4. Real-Device A/B Matrix
+
+| Case ID | Input Shortcode / Status URL | Native Engine Result | yt-dlp Result | Final Engine Route | Notes |
 |---|---|---|---|---|---|
 | `TH-SHARE-PASS-01` | `BAPaySXLil` | PASS | PASS | `NativeThreadsEngine` | Non-regression pass |
 | `TH-SHARE-PASS-02` | `_6syxcd_8` | PASS | PASS | `NativeThreadsEngine` | Non-regression pass |
@@ -67,3 +83,6 @@ This document records owner-supplied real-device test cases for Threads and Inst
 | `IG-PASS-01` | `DdS5sMrxkBq` | PASS | PASS | `NativeInstagramEngine` | Non-regression pass |
 | `IG-EMPTY-MEDIA-01` | `DdXfLoyTs__` | Pending device test | FAIL (empty media) | `PlatformEngineRouter` | Native extraction attempt |
 | `IG-AUDIENCE-01` | `DbtoOl8zwMO` | Audience restriction | Audience restriction | Terminated (no loop) | Expected restriction |
+| `X-CLASSIFY-01` | `2099089385958645960` | Pending device test | `No video could be found` | `NativeXEngine` | Classification test |
+| `X-PASS-01` | Video Tweet | Pending device test | PASS | `NativeXEngine` | Native extraction pass |
+

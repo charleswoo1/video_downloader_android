@@ -80,7 +80,54 @@ This document provides notice of these dependencies, their upstream repositories
 - **License:** Apache License 2.0
 - **License URL:** https://github.com/JetBrains/kotlin/blob/master/license/LICENSE.txt
 
+## 10. 2Xsave/insave
+
+- **Description:** Reference implementation for Native Instagram extraction, URL normalization, and target post isolation.
+- **Repository:** https://github.com/2Xsave/insave
+- **Pinned Commit:** `6454affbd8e7960db012c81ffc1c213b75e8947b`
+- **Role:** Direct engineering reference ported to Kotlin (`NativeInstagramEngine`).
+- **License:** MIT License
+- **License URL:** https://github.com/2Xsave/insave/blob/main/LICENSE
+
+## 11. 2Xsave/trsave
+
+- **Description:** Reference implementation for Native Threads extraction, recursive media discovery, and share URL canonicalization.
+- **Repository:** https://github.com/2Xsave/trsave
+- **Pinned Commit:** `2841945254c24c1ad3f3658410788503bcdced72`
+- **Role:** Direct engineering reference ported to Kotlin (`NativeThreadsEngine`).
+- **License:** MIT License
+- **License URL:** https://github.com/2Xsave/trsave/blob/main/LICENSE
+
+## 12. 2Xsave/twsave
+
+- **Description:** Reference implementation for Native X / Twitter extraction, Bearer/guest token discovery, GraphQL endpoint queries, and HTML fallback.
+- **Repository:** https://github.com/2Xsave/twsave
+- **Pinned Commit:** `0da4dd7db8a0f93445338821309cff736c79b9ec`
+- **Role:** Direct engineering reference ported to Kotlin (`NativeXEngine`).
+- **License:** MIT License
+- **License URL:** https://github.com/2Xsave/twsave/blob/main/LICENSE
+
+## 13. 2Xsave/2xsave_common
+
+- **Description:** Shared HTTP session profiles, coherent browser identity, and retry policy references.
+- **Repository:** https://github.com/2Xsave/2xsave_common
+- **Pinned Commit:** `1d52f56aa214a3c4e3c965d480b52a08b1643281`
+- **Role:** Direct engineering reference ported to Kotlin (`PlatformHttpSession`, `BrowserIdentity`, `RequestProfile`, `RetryPolicy`).
+- **License:** MIT License
+- **License URL:** https://github.com/2Xsave/2xsave_common/blob/main/LICENSE
+
+## 14. 2Xsave/2XsaveTUI
+
+- **Description:** Multi-engine platform dispatch architecture and domain matching logic.
+- **Repository:** https://github.com/2Xsave/2XsaveTUI
+- **Pinned Commit:** `301b6992bb5aa44c8a374ef1125981c77692de56`
+- **Role:** Architecture reference for multi-platform engine routing.
+- **License:** MIT License
+- **License URL:** https://github.com/2Xsave/2XsaveTUI/blob/main/LICENSE
+
 ---
 
 > [!NOTE]
 > Public production releases are gated until overall project repository licensing is formally determined by the project owner.
+> GPL-licensed repositories (InstaDownload, YTDLnis, Seal, NewPipeExtractor) are retained as architectural research references only; NO GPL source code has been copied or directly translated into this repository.
+

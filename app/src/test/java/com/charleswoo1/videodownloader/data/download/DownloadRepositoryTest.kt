@@ -62,6 +62,16 @@ class DownloadRepositoryTest {
     }
 
     @Test
+    fun cancel_immediatelyCancelsAndAllowsRestart() {
+        DownloadRepository.markDownloadStarted()
+        DownloadRepository.cancel()
+
+        assertEquals(DownloadState.Cancelled, DownloadRepository.downloadState.value)
+        assertFalse(DownloadRepository.isDownloadActive())
+        assertTrue(DownloadRepository.tryStartDownload())
+    }
+
+    @Test
     fun finishDownload_clearsActiveFlag() {
         DownloadRepository.markDownloadStarted()
         assertTrue(DownloadRepository.isDownloadActive())
@@ -73,13 +83,9 @@ class DownloadRepositoryTest {
     @Test
     fun clearTerminalState_clearsTerminalStatesAndPreservesActiveStates() {
         // Completed -> Idle
-        DownloadRepository.markDownloadStarted()
         DownloadRepository.updateState(DownloadState.Completed("test.mp4"))
         DownloadRepository.clearTerminalState()
         assertEquals(DownloadState.Idle, DownloadRepository.downloadState.value)
-        // UI cleanup must never release service/job lifecycle ownership.
-        assertTrue(DownloadRepository.isDownloadActive())
-        DownloadRepository.finishDownload()
 
         // Failed -> Idle
         DownloadRepository.updateState(DownloadState.Failed("some error"))

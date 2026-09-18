@@ -51,6 +51,11 @@ android {
             useLegacyPackaging = true
         }
     }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -66,6 +71,7 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
 
     // yt-dlp & FFmpeg
     implementation(libs.youtubedl.library)

@@ -30,6 +30,10 @@ class PlatformDetectorTest {
     @Test
     fun detect_threadsUrls() {
         assertEquals(Platform.THREADS, PlatformDetector.detect("https://www.threads.net/@user/post/C123abc"))
+        assertEquals(Platform.THREADS, PlatformDetector.detect("https://threads.net/@user/post/ABC123"))
+        assertEquals(Platform.THREADS, PlatformDetector.detect("https://www.threads.com/@user/post/ABC123"))
+        assertEquals(Platform.THREADS, PlatformDetector.detect("https://threads.com/share/BATAx_4uRb/"))
+        assertEquals(Platform.THREADS, PlatformDetector.detect("https://www.threads.com/share/BATAx_4uRb/"))
     }
 
     @Test

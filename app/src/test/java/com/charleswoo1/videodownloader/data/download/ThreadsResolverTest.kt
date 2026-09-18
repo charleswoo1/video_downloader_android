@@ -2,6 +2,7 @@ package com.charleswoo1.videodownloader.data.download
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -39,7 +40,8 @@ class ThreadsResolverTest {
     fun extractPostId_extractsFromDifferentPatterns() {
         assertEquals("C_abc123", resolver.extractPostId("https://www.threads.com/@user/post/C_abc123"))
         assertEquals("C_abc123", resolver.extractPostId("https://www.threads.com/t/C_abc123"))
-        assertEquals("DTEST999", resolver.extractPostId("https://www.threads.com/share/DTEST999"))
+        // Share slug must NOT be confused with post ID (strict isolation)
+        assertNull(resolver.extractPostId("https://www.threads.com/share/DTEST999"))
         assertEquals("C_abc123", resolver.extractPostId("https://www.threads.net/@user/post/C_abc123?xmt=AQ"))
     }
 
@@ -163,7 +165,57 @@ class ThreadsResolverTest {
             resolver.parseThreadsPage(html, "TARGET_POST", "https://www.threads.com/@u/post/TARGET_POST")
             fail("Expected IllegalStateException")
         } catch (e: IllegalStateException) {
-            assertTrue(e.message?.contains("Threads 貼文解析失敗") == true)
+            assertTrue(e.message?.contains("TARGET_POST") == true)
+            assertTrue(e.message?.contains("解析失敗") == true)
         }
+    }
+
+    @Test
+    fun extractPostUrlFromShareHtml_resolvesFromCanonicalLink() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <link rel="canonical" href="https://www.threads.net/@creator_abc/post/REAL_POST_123" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals("https://www.threads.com/@creator_abc/post/REAL_POST_123", resolved)
+    }
+
+    @Test
+    fun extractPostUrlFromShareHtml_resolvesFromOgUrl() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta property="og:url" content="https://www.threads.net/@creator_xyz/post/REAL_POST_456" />
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals("https://www.threads.com/@creator_xyz/post/REAL_POST_456", resolved)
+    }
+
+    @Test
+    fun extractPostUrlFromShareHtml_resolvesFromHtmlContentFallback() {
+        val html = """
+            <div>Check out the discussion on <a href="/post/FALLBACK_789">this post</a></div>
+        """.trimIndent()
+
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals("https://www.threads.com/post/FALLBACK_789", resolved)
+    }
+
+    @Test
+    fun extractPostUrlFromShareHtml_returnsNullWhenNoPostLinkFound() {
+        val html = "<html><body>Generic share page with no post link</body></html>"
+        val resolved = resolver.extractPostUrlFromShareHtml(html)
+        assertEquals(null, resolved)
     }
 }

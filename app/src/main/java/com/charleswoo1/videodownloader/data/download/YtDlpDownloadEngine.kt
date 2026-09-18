@@ -10,6 +10,7 @@ import com.charleswoo1.videodownloader.domain.url.PlatformDetector
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLException
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.yausername.youtubedl_android.mapper.VideoInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -41,29 +42,23 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
     }
 
     override suspend fun updateRuntime(): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val status = YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
-            val ver = getRuntimeVersion() ?: "unknown"
-            Log.i(TAG, "[Diagnostics] yt-dlp runtime update status: $status, active version: $ver")
-            Result.success(ver)
-        } catch (e: Exception) {
-            val ver = getRuntimeVersion() ?: "bundled"
-            Log.w(TAG, "[Diagnostics] yt-dlp update to latest stable skipped/failed, keeping version: $ver", e)
-            Result.failure(e)
-        }
+        val ver = getRuntimeVersion() ?: "2026.08.30.232658"
+        Log.i(TAG, "[Diagnostics] Packaged deterministic runtime active: $ver (automatic remote update disabled)")
+        Result.success(ver)
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
-        try {
-            val platform = PlatformDetector.detect(url)
-            if (platform == Platform.THREADS) {
-                return@withContext threadsResolver.extractMediaInfo(url)
-            }
+        val platform = PlatformDetector.detect(url)
 
+        try {
             if (!isInitialized()) {
                 return@withContext Result.failure(
                     IllegalStateException("yt-dlp 引擎尚未初始化，請重新開啟應用程式")
                 )
+            }
+
+            if (platform == Platform.THREADS) {
+                return@withContext extractThreadsMediaInfo(url)
             }
 
             val runtimeVer = getRuntimeVersion() ?: "bundled"
@@ -73,69 +68,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
             request.addOption("--no-playlist")
 
             val videoInfo = YoutubeDL.getInstance().getInfo(request)
-
-            val options = mutableListOf<QualityOption>()
-            options.add(
-                QualityOption(
-                    id = "best",
-                    label = "最佳畫質 (推薦)",
-                    formatSelector = "bestvideo+bestaudio/best"
-                )
-            )
-
-            // Extract available heights from formats
-            val availableHeights = videoInfo.formats
-                ?.mapNotNull { it.height }
-                ?.filter { it > 0 }
-                ?.toSet()
-                ?: emptySet()
-
-            if (availableHeights.any { it >= 1080 }) {
-                options.add(
-                    QualityOption(
-                        id = "1080p",
-                        label = "1080p Full HD",
-                        formatSelector = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-                    )
-                )
-            }
-            if (availableHeights.any { it in 720..1079 }) {
-                options.add(
-                    QualityOption(
-                        id = "720p",
-                        label = "720p HD",
-                        formatSelector = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-                    )
-                )
-            }
-            if (availableHeights.any { it in 480..719 }) {
-                options.add(
-                    QualityOption(
-                        id = "480p",
-                        label = "480p 標清",
-                        formatSelector = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
-                    )
-                )
-            }
-            if (availableHeights.any { it in 360..479 }) {
-                options.add(
-                    QualityOption(
-                        id = "360p",
-                        label = "360p 流暢",
-                        formatSelector = "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
-                    )
-                )
-            }
-
-            // Audio-only option
-            options.add(
-                QualityOption(
-                    id = "audio_only",
-                    label = "僅音訊 (MP3/M4A)",
-                    formatSelector = "bestaudio/best",
-                    isAudioOnly = true
-                )
-            )
+            val options = buildQualityOptions(videoInfo)
 
             val mediaInfo = MediaInfo(
                 sourceUrl = url,
@@ -150,11 +83,135 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
             Result.success(mediaInfo)
         } catch (e: YoutubeDLException) {
             Log.w(TAG, "extractMediaInfo failed: ${e.message}")
-            Result.failure(mapYoutubeDLError(e))
+            Result.failure(mapYoutubeDLError(e, platform))
         } catch (e: Exception) {
             Log.e(TAG, "extractMediaInfo unexpected error", e)
             Result.failure(e)
         }
+    }
+
+    private suspend fun extractThreadsMediaInfo(url: String): Result<MediaInfo> {
+        val pluginInstall = YtDlpPluginManager.ensureInstalled(context)
+        if (pluginInstall.isFailure) {
+            Log.w(TAG, "[Threads] Plugin installation failed, falling back to Kotlin ThreadsResolver", pluginInstall.exceptionOrNull())
+            return threadsResolver.extractMediaInfo(url)
+        }
+
+        val pluginDir = pluginInstall.getOrThrow()
+        try {
+            val request = YoutubeDLRequest(url)
+            request.addOption("--no-playlist")
+            request.addOption("--plugin-dirs", pluginDir.absolutePath)
+
+            Log.d(TAG, "[Diagnostics] Analyzing Threads URL via yt-dlp with plugin-dirs: ${pluginDir.name}")
+            val videoInfo = YoutubeDL.getInstance().getInfo(request)
+
+            val options = buildQualityOptions(videoInfo)
+            val mediaInfo = MediaInfo(
+                sourceUrl = url,
+                title = videoInfo.title ?: "未命名影片",
+                platform = Platform.THREADS,
+                extractor = videoInfo.extractor ?: "Threads",
+                thumbnailUrl = videoInfo.thumbnail,
+                durationSeconds = videoInfo.duration?.toLong(),
+                qualityOptions = options
+            )
+            return Result.success(mediaInfo)
+        } catch (e: YoutubeDLException) {
+            val errorMsg = e.message ?: ""
+            Log.w(TAG, "[Threads] yt-dlp extractMediaInfo failed: $errorMsg")
+
+            // Conservative fallback check:
+            // ONLY fallback if plugin is missing, failed to load, or yt-dlp reports Unsupported URL
+            if (shouldFallbackToKotlinResolver(errorMsg)) {
+                Log.i(TAG, "[Threads] Unsupported URL or plugin load failure detected; falling back to Kotlin ThreadsResolver")
+                return threadsResolver.extractMediaInfo(url)
+            }
+
+            // Do NOT fallback for expected extractor errors (not found, private, deleted, no video, login-gated)
+            return Result.failure(mapYoutubeDLError(e, Platform.THREADS))
+        } catch (e: Exception) {
+            Log.e(TAG, "[Threads] Unexpected exception during extractMediaInfo", e)
+            return Result.failure(e)
+        }
+    }
+
+    private fun shouldFallbackToKotlinResolver(errorMessage: String): Boolean {
+        val lower = errorMessage.lowercase()
+        // Fallback when extractor plugin was clearly not recognized or loaded
+        if (lower.contains("unsupported url")) {
+            return true
+        }
+        if (lower.contains("no module named") || lower.contains("plugin-dirs") || lower.contains("cannot import")) {
+            return true
+        }
+        // Under all other conditions (private, deleted, not found in page data, no video, carousel no video, login-gated), DO NOT FALLBACK
+        return false
+    }
+
+    private fun buildQualityOptions(videoInfo: VideoInfo): List<QualityOption> {
+        val options = mutableListOf<QualityOption>()
+        options.add(
+            QualityOption(
+                id = "best",
+                label = "最佳畫質 (推薦)",
+                formatSelector = "bestvideo+bestaudio/best"
+            )
+        )
+
+        val availableHeights = videoInfo.formats
+            ?.mapNotNull { it.height }
+            ?.filter { it > 0 }
+            ?.toSet()
+            ?: emptySet()
+
+        if (availableHeights.any { it >= 1080 }) {
+            options.add(
+                QualityOption(
+                    id = "1080p",
+                    label = "1080p Full HD",
+                    formatSelector = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+                )
+            )
+        }
+        if (availableHeights.any { it in 720..1079 }) {
+            options.add(
+                QualityOption(
+                    id = "720p",
+                    label = "720p HD",
+                    formatSelector = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+                )
+            )
+        }
+        if (availableHeights.any { it in 480..719 }) {
+            options.add(
+                QualityOption(
+                    id = "480p",
+                    label = "480p 標清",
+                    formatSelector = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+                )
+            )
+        }
+        if (availableHeights.any { it in 360..479 }) {
+            options.add(
+                QualityOption(
+                    id = "360p",
+                    label = "360p 流暢",
+                    formatSelector = "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+                )
+            )
+        }
+
+        options.add(
+            QualityOption(
+                id = "audio_only",
+                label = "僅音訊 (MP3/M4A)",
+                formatSelector = "bestaudio/best",
+                isAudioOnly = true
+            )
+        )
+
+        return options
     }
 
     override suspend fun download(
@@ -165,7 +222,12 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
     ): Result<File> = withContext(Dispatchers.IO) {
         val platform = PlatformDetector.detect(request.url)
         if (platform == Platform.THREADS) {
-            return@withContext threadsResolver.download(request, destDir, onProgress, onStatus)
+            val formatSelector = request.qualityOption.formatSelector
+            // If the formatSelector came from Kotlin ThreadsResolver fallback (direct URL or piped URLs), delegate to threadsResolver
+            if (formatSelector.startsWith("http://") || formatSelector.startsWith("https://") || formatSelector.contains("|")) {
+                Log.d(TAG, "[Threads] Direct stream URL detected; delegating to Kotlin ThreadsResolver download fallback")
+                return@withContext threadsResolver.download(request, destDir, onProgress, onStatus)
+            }
         }
 
         val processId = UUID.randomUUID().toString()
@@ -184,6 +246,13 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
             val ytRequest = YoutubeDLRequest(request.url)
             ytRequest.addOption("--no-playlist")
             ytRequest.addOption("--no-mtime")
+
+            if (platform == Platform.THREADS) {
+                val pluginDir = YtDlpPluginManager.getPluginDir(context)
+                if (pluginDir.exists()) {
+                    ytRequest.addOption("--plugin-dirs", pluginDir.absolutePath)
+                }
+            }
 
             val outTemplate = "${destDir.absolutePath}/%(title).120B-%(id)s.%(ext)s"
             ytRequest.addOption("-o", outTemplate)
@@ -239,7 +308,7 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
                 Result.failure(InterruptedException("下載已取消"))
             } else {
                 Log.w(TAG, "download failed: ${e.message}")
-                Result.failure(mapYoutubeDLError(e))
+                Result.failure(mapYoutubeDLError(e, platform))
             }
         } catch (e: Exception) {
             if (cancelledProcessIds.contains(processId) || e is InterruptedException || !currentCoroutineContext().isActive) {
@@ -276,36 +345,11 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
         return match?.groupValues?.getOrNull(1)
     }
 
-    private fun mapYoutubeDLError(e: YoutubeDLException): Exception {
-        val msg = e.message ?: ""
-        val isInstagram = msg.contains("instagram", ignoreCase = true)
-        return when {
-            msg.contains("Private video", ignoreCase = true) || msg.contains("This video is private", ignoreCase = true) ->
-                Exception("此影片設為私人內容，無法存取")
-            msg.contains("checkpoint_required", ignoreCase = true) ->
-                Exception("Instagram 要求安全驗證 (checkpoint)，無法直接下載")
-            msg.contains("login_required", ignoreCase = true) ||
-                    msg.contains("Sign in to confirm you’re not a bot", ignoreCase = true) ||
-                    msg.contains("Sign in to view", ignoreCase = true) ->
-                Exception("來源網站需要登入帳號驗證，目前版本不支援登入下載")
-            isInstagram && (msg.contains("Please wait a few minutes", ignoreCase = true) || msg.contains("rate-limit", ignoreCase = true)) ->
-                Exception("Instagram 存取頻率受限 (Rate Limited)，請稍候幾分鐘再試")
-            isInstagram && (msg.contains("Unable to extract", ignoreCase = true) || msg.contains("empty", ignoreCase = true)) -> {
-                val sanitized = msg.lines().firstOrNull { it.isNotBlank() && !it.contains("cookie", ignoreCase = true) } ?: "無法解析貼文內容"
-                Exception("Instagram 頁面解析失敗：$sanitized")
-            }
-            msg.contains("Unsupported URL", ignoreCase = true) ->
-                Exception("不支援的網址或尚未支援該網站之解析")
-            msg.contains("DRM", ignoreCase = true) ->
-                Exception("此內容受 DRM 保護，本工具無法下載")
-            msg.contains("HTTP Error 404", ignoreCase = true) ->
-                Exception("找不到目標影片 (HTTP 404)")
-            msg.contains("Unable to download webpage", ignoreCase = true) ->
-                Exception("無法連線至目標網頁，請檢查網路連線")
-            else -> {
-                val sanitized = msg.lines().firstOrNull { it.isNotBlank() && !it.contains("cookie", ignoreCase = true) } ?: "未知錯誤"
-                Exception("解析或下載發生錯誤：$sanitized")
-            }
+    private fun mapYoutubeDLError(e: YoutubeDLException, platform: Platform? = null): Exception {
+        val parsed = YtDlpErrorParser.parse(e.message, platform)
+        if (parsed.warnings.isNotEmpty()) {
+            Log.d(TAG, "[Diagnostics] yt-dlp warnings during execution: ${parsed.warnings}")
         }
+        return Exception(parsed.userMessage)
     }
 }

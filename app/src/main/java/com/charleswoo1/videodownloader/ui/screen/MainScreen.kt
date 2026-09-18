@@ -76,6 +76,7 @@ fun MainScreen(
     val analysisState by viewModel.analysisState.collectAsState()
     val selectedQuality by viewModel.selectedQuality.collectAsState()
     val downloadState by viewModel.downloadState.collectAsState()
+    val engineTrace by viewModel.engineTrace.collectAsState()
 
     Scaffold(
         topBar = {
@@ -190,14 +191,70 @@ fun MainScreen(
                 onCancel = { viewModel.cancelDownload(context) }
             )
 
+            if (engineTrace != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Text(
+                        text = engineTrace!!.toDisplaySummary(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+            }
+
             val runtimeVersion by viewModel.runtimeVersion.collectAsState()
+            val runtimeDiagnostics by viewModel.runtimeDiagnostics.collectAsState()
+
+            RuntimeDiagnosticsSection(
+                diagnostics = runtimeDiagnostics,
+                runtimeVersion = runtimeVersion
+            )
+        }
+    }
+}
+
+@Composable
+fun RuntimeDiagnosticsSection(
+    diagnostics: com.charleswoo1.videodownloader.data.download.RuntimeDiagnostics?,
+    runtimeVersion: String?
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Text(
-                text = "yt-dlp: ${runtimeVersion ?: "loading..."}",
+                text = "Runtime Diagnostics (Build #6)",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            val ytVer = diagnostics?.ytdlpVersion?.takeIf { it != "unknown" } ?: runtimeVersion ?: "loading..."
+            val pyVer = diagnostics?.pythonVersion ?: "loading..."
+            val curlStatus = if (diagnostics?.curlCffiAvailable == true) "Available (${diagnostics.curlCffiVersion ?: "installed"})" else "Not present"
+            val ffmpegVer = diagnostics?.ffmpegVersion ?: "loading..."
+
+            Text(
+                text = "yt-dlp: $ytVer | Python: $pyVer",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 8.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "curl_cffi: $curlStatus | FFmpeg: $ffmpegVer | 16KB Page: Compatible",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

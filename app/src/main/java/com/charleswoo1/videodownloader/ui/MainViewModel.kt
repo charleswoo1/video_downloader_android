@@ -5,12 +5,15 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.charleswoo1.videodownloader.data.download.DownloadRepository
+import com.charleswoo1.videodownloader.data.download.RuntimeDiagnostics
+import com.charleswoo1.videodownloader.data.download.RuntimeDiagnosticsHelper
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.DownloadState
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.QualityOption
 import com.charleswoo1.videodownloader.domain.url.SharedTextUrlExtractor
 import com.charleswoo1.videodownloader.service.DownloadService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +41,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val downloadState: StateFlow<DownloadState> = DownloadRepository.downloadState
 
-    val runtimeVersion: StateFlow<String?> = DownloadRepository.runtimeVersion
+    private val _runtimeVersion = MutableStateFlow<String?>(downloadEngine.getRuntimeVersion())
+    val runtimeVersion: StateFlow<String?> = _runtimeVersion.asStateFlow()
+
+    private val _runtimeDiagnostics = MutableStateFlow<RuntimeDiagnostics?>(null)
+    val runtimeDiagnostics: StateFlow<RuntimeDiagnostics?> = _runtimeDiagnostics.asStateFlow()
+
+    val engineTrace: StateFlow<com.charleswoo1.videodownloader.data.download.EngineTrace?> = DownloadRepository.engineTrace
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            _runtimeVersion.value = downloadEngine.getRuntimeVersion()
+            _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.inspectRuntime(application)
+        }
+    }
 
     fun onUrlInputChanged(newUrl: String) {
         _urlInput.value = newUrl
@@ -88,7 +104,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDownload(context: Context) {
-        if (DownloadRepository.isDownloadActive()) return
+        val currentState = downloadState.value
+        val isActivelyDownloading = DownloadRepository.isDownloadActive() &&
+                (currentState is DownloadState.Downloading ||
+                 currentState is DownloadState.Preparing ||
+                 currentState is DownloadState.PostProcessing ||
+                 currentState is DownloadState.Cancelling)
+
+        if (isActivelyDownloading) return
 
         val state = _analysisState.value
         if (state !is AnalysisState.Success) return
@@ -104,6 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelDownload(context: Context) {
+        DownloadRepository.requestCancel()
         DownloadService.cancelDownload(context)
     }
 

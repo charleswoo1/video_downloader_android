@@ -1,0 +1,41 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "Tweet",
+        "core": {
+          "user_results": {
+            "result": {
+              "legacy": {
+                "screen_name": "GifPoster"
+              }
+            }
+          }
+        },
+        "legacy": {
+          "id_str": "2345678901",
+          "full_text": "Look at this looping GIF!",
+          "extended_entities": {
+            "media": [
+              {
+                "id_str": "888777666",
+                "type": "animated_gif",
+                "media_url_https": "https://pbs.twimg.com/tweet_video_thumb/gif.jpg",
+                "video_info": {
+                  "aspect_ratio": [1, 1],
+                  "variants": [
+                    {
+                      "bitrate": 0,
+                      "content_type": "video/mp4",
+                      "url": "https://video.twimg.com/tweet_video/loop.mp4"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

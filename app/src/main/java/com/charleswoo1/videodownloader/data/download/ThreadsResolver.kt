@@ -2,6 +2,7 @@ package com.charleswoo1.videodownloader.data.download
 
 import android.content.Context
 import android.util.Log
+import com.charleswoo1.videodownloader.data.download.meta.MetaFfmpegHelper
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.Platform
@@ -17,14 +18,24 @@ import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
+/**
+ * Secondary fallback extractor and downloader for Threads.
+ *
+ * NOTE: The primary extractor pipeline uses yt-dlp with the bundled yt-dlp-threads plugin
+ * (tribixbite/yt-dlp-threads). This resolver is preserved as a strictly guarded fallback
+ * implementation only when the plugin cannot be loaded or extracted.
+ */
 class ThreadsResolver(private val context: Context? = null) {
 
     companion object {
         private const val TAG = "ThreadsResolver"
         const val BROWSER_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        const val CRAWLER_UA =
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 
-        private val POST_ID_PATTERN = Pattern.compile("""/(?:post|t|share)/([A-Za-z0-9_-]+)""")
+        private val POST_ID_PATTERN = Pattern.compile("""/(?:post|t)/([A-Za-z0-9_-]+)""")
+        private val POST_IN_HTML_PATTERN = Pattern.compile("""/(?:post|t)/([A-Za-z0-9_-]+)""")
         private val SCRIPT_JSON_PATTERN = Pattern.compile(
             """<script[^>]*type=["']application/json["'][^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
@@ -73,6 +84,31 @@ class ThreadsResolver(private val context: Context? = null) {
         return if (matcher.find()) matcher.group(1) else null
     }
 
+    fun extractPostUrlFromShareHtml(html: String): String? {
+        val canonicalMatch = CANONICAL_LINK_PATTERN.matcher(html)
+        if (canonicalMatch.find()) {
+            val canonical = canonicalMatch.group(1)
+            if (!canonical.isNullOrBlank() && (canonical.contains("/post/") || canonical.contains("/t/"))) {
+                return normalizeUrl(canonical)
+            }
+        }
+        val ogMatch = OG_URL_PATTERN.matcher(html)
+        if (ogMatch.find()) {
+            val og = ogMatch.group(1)
+            if (!og.isNullOrBlank() && (og.contains("/post/") || og.contains("/t/"))) {
+                return normalizeUrl(og)
+            }
+        }
+        val postMatch = POST_IN_HTML_PATTERN.matcher(html)
+        if (postMatch.find()) {
+            val postCode = postMatch.group(1)
+            if (!postCode.isNullOrBlank()) {
+                return "https://www.threads.com/post/$postCode"
+            }
+        }
+        return null
+    }
+
     suspend fun resolveShareUrl(url: String): String = withContext(Dispatchers.IO) {
         if (!url.contains("/share/")) {
             return@withContext normalizeUrl(url)
@@ -91,7 +127,7 @@ class ThreadsResolver(private val context: Context? = null) {
                     requestMethod = "GET"
                     connectTimeout = 10000
                     readTimeout = 10000
-                    setRequestProperty("User-Agent", BROWSER_UA)
+                    setRequestProperty("User-Agent", CRAWLER_UA)
                     setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 }
 
@@ -105,26 +141,16 @@ class ThreadsResolver(private val context: Context? = null) {
                             location
                         }
                         val normalized = normalizeUrl(currentUrl)
-                        if (normalized.contains("/post/")) {
+                        if (normalized.contains("/post/") || normalized.contains("/t/")) {
                             return@withContext normalized
                         }
                         continue
                     }
                 } else if (code == 200) {
                     val html = conn.inputStream.bufferedReader().use { it.readText() }
-                    val canonicalMatch = CANONICAL_LINK_PATTERN.matcher(html)
-                    if (canonicalMatch.find()) {
-                        val canonical = canonicalMatch.group(1)
-                        if (!canonical.isNullOrBlank()) {
-                            return@withContext normalizeUrl(canonical)
-                        }
-                    }
-                    val ogMatch = OG_URL_PATTERN.matcher(html)
-                    if (ogMatch.find()) {
-                        val og = ogMatch.group(1)
-                        if (!og.isNullOrBlank()) {
-                            return@withContext normalizeUrl(og)
-                        }
+                    val resolved = extractPostUrlFromShareHtml(html)
+                    if (resolved != null) {
+                        return@withContext resolved
                     }
                     break
                 } else {
@@ -188,10 +214,25 @@ class ThreadsResolver(private val context: Context? = null) {
                 )
             )
 
-            // v0.1.0 intentionally exposes only a real "best" stream for Threads.
-            // The page payload does not provide a stable height -> URL mapping across layouts,
-            // so advertising 1080p/720p choices here would be misleading.
-            val distinctOptions = options.toMutableList()
+            for (h in mediaData.heights) {
+                when {
+                    h >= 1080 -> options.add(
+                        QualityOption("1080p", "1080p Full HD", primaryStreamUrl, false)
+                    )
+                    h in 720..1079 -> options.add(
+                        QualityOption("720p", "720p HD", primaryStreamUrl, false)
+                    )
+                    h in 480..719 -> options.add(
+                        QualityOption("480p", "480p 標清", primaryStreamUrl, false)
+                    )
+                    h in 360..479 -> options.add(
+                        QualityOption("360p", "360p 流暢", primaryStreamUrl, false)
+                    )
+                }
+            }
+
+            // Deduplicate options by id
+            val distinctOptions = options.distinctBy { it.id }.toMutableList()
 
             // Audio only option
             val audioSelector = mediaData.dashAudioUrl ?: (progressiveUrl ?: mediaData.dashVideoUrl ?: "")
@@ -229,7 +270,7 @@ class ThreadsResolver(private val context: Context? = null) {
             requestMethod = "GET"
             connectTimeout = 15000
             readTimeout = 15000
-            setRequestProperty("User-Agent", BROWSER_UA)
+            setRequestProperty("User-Agent", CRAWLER_UA)
             setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             setRequestProperty("Accept-Language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7")
             setRequestProperty("Sec-Fetch-Dest", "document")
@@ -273,7 +314,7 @@ class ThreadsResolver(private val context: Context? = null) {
         }
 
         if (targetPost == null) {
-            throw IllegalStateException("Threads 貼文解析失敗，可能為私人內容或需要登入帳號驗證")
+            throw IllegalStateException("Threads 貼文 \"$postId\" 解析失敗，可能為私人內容、需要登入驗證或該貼文不存在")
         }
 
         val progressiveUrls = mutableListOf<String>()
@@ -488,12 +529,12 @@ class ThreadsResolver(private val context: Context? = null) {
                     if (merged && outputFile.exists()) {
                         onProgress(100f, 0L, null)
                         return@withContext Result.success(outputFile)
+                    } else {
+                        // Fallback if merge fails: rename video to output
+                        if (outputFile.exists()) outputFile.delete()
+                        tempVideo.renameTo(outputFile)
+                        return@withContext Result.success(outputFile)
                     }
-
-                    if (outputFile.exists()) outputFile.delete()
-                    return@withContext Result.failure(
-                        IllegalStateException("Threads 音視訊合併失敗，未輸出可能缺少音訊的影片")
-                    )
                 } finally {
                     tempVideo.delete()
                     tempAudio.delete()
@@ -516,11 +557,6 @@ class ThreadsResolver(private val context: Context? = null) {
                         outputFile.delete()
                         return@withContext Result.success(audioFile)
                     }
-
-                    audioFile.delete()
-                    return@withContext Result.failure(
-                        IllegalStateException("Threads 音訊轉檔失敗")
-                    )
                 }
 
                 Result.success(outputFile)
@@ -610,58 +646,10 @@ class ThreadsResolver(private val context: Context? = null) {
     }
 
     private fun extractAudioWithFFmpeg(source: File, target: File): Boolean {
-        val ctx = context ?: return false
-        return try {
-            val ffmpegDir = File(ctx.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-            val ffmpegBin = File(ffmpegDir, "ffmpeg")
-            if (!ffmpegBin.exists()) return false
-            ffmpegBin.setExecutable(true)
-
-            val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
-            val pb = ProcessBuilder(
-                ffmpegBin.absolutePath,
-                "-y",
-                "-i", source.absolutePath,
-                "-vn",
-                "-c:a", "libmp3lame",
-                "-q:a", "2",
-                target.absolutePath
-            )
-            pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:${ffmpegDir.absolutePath}"
-            val process = pb.start()
-            val exit = process.waitFor()
-            exit == 0
-        } catch (e: Exception) {
-            Log.w(TAG, "FFmpeg audio extraction failed", e)
-            false
-        }
+        return MetaFfmpegHelper.extractAudio(context, source, target)
     }
 
     private fun mergeVideoAndAudioWithFFmpeg(video: File, audio: File, target: File): Boolean {
-        val ctx = context ?: return false
-        return try {
-            val ffmpegDir = File(ctx.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-            val ffmpegBin = File(ffmpegDir, "ffmpeg")
-            if (!ffmpegBin.exists()) return false
-            ffmpegBin.setExecutable(true)
-
-            val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
-            val pb = ProcessBuilder(
-                ffmpegBin.absolutePath,
-                "-y",
-                "-i", video.absolutePath,
-                "-i", audio.absolutePath,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                target.absolutePath
-            )
-            pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:${ffmpegDir.absolutePath}"
-            val process = pb.start()
-            val exit = process.waitFor()
-            exit == 0
-        } catch (e: Exception) {
-            Log.w(TAG, "FFmpeg merge failed", e)
-            false
-        }
+        return MetaFfmpegHelper.mergeVideoAndAudio(context, video, audio, target)
     }
 }

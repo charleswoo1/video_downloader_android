@@ -27,6 +27,7 @@ class App : Application() {
             Log.i(TAG, "[Diagnostics] YoutubeDL initialized successfully, packaged version: $activeVer")
             CoroutineScope(Dispatchers.IO).launch {
                 try {
+                    com.charleswoo1.videodownloader.data.download.YtDlpPluginManager.ensureInstalled(this@App)
                     com.charleswoo1.videodownloader.data.download.RuntimeDiagnosticsHelper.inspect(this@App)
                 } catch (e: Exception) {
                     Log.w(TAG, "[Diagnostics] Runtime diagnostics inspection error", e)

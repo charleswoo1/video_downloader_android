@@ -1,0 +1,6 @@
+﻿repository=https://github.com/tribixbite/yt-dlp-threads
+commit=c4c44141cb10715f94296a808f5d89a0d24dfe94
+upstream_file=yt_dlp_plugins/extractor/threads.py
+sha256=c28e410b69a0c2377c8530b36f6dca4b973484855b42e281846b97b3305b28ba
+license=Unlicense / Public Domain
+description=yt-dlp extractor plugin for Threads (threads.com / threads.net) utilizing link-preview crawler UA and embedded JSON metadata parsing.

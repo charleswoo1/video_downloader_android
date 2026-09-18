@@ -17,6 +17,13 @@ import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
+/**
+ * Secondary fallback extractor and downloader for Threads.
+ *
+ * NOTE: The primary extractor pipeline uses yt-dlp with the bundled yt-dlp-threads plugin
+ * (tribixbite/yt-dlp-threads). This resolver is preserved as a strictly guarded fallback
+ * implementation only when the plugin cannot be loaded or extracted.
+ */
 class ThreadsResolver(private val context: Context? = null) {
 
     companion object {

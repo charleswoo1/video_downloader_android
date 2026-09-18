@@ -47,11 +47,15 @@ This document provides notice of these dependencies, their upstream repositories
 - **License:** GNU Lesser General Public License (LGPL) version 2.1+ / GNU General Public License (GPL) version 2+ (depending on build configuration)
 - **License URL:** https://www.ffmpeg.org/legal.html
 
-## 6. tribixbite/yt-dlp-threads (Reference)
+## 6. tribixbite/yt-dlp-threads
 
-- **Description:** Threads extraction reference architecture utilizing Googlebot crawler user-agent and lightweight HTML/JSON metadata extraction.
+- **Description:** Threads extractor plugin for yt-dlp utilizing link-preview crawler user-agent and embedded JSON metadata parsing.
 - **Repository:** https://github.com/tribixbite/yt-dlp-threads
-- **License:** MIT License
+- **Role:** Bundled runtime plugin
+- **Pinned Commit:** `c4c44141cb10715f94296a808f5d89a0d24dfe94`
+- **Source File:** `yt_dlp_plugins/extractor/threads.py`
+- **SHA256:** `c28e410b69a0c2377c8530b36f6dca4b973484855b42e281846b97b3305b28ba`
+- **License:** The Unlicense / Public Domain
 - **License URL:** https://github.com/tribixbite/yt-dlp-threads/blob/master/LICENSE
 
 ## 7. AndroidX & Jetpack Compose

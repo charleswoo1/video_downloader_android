@@ -28,7 +28,9 @@ object YtDlpErrorParser {
     private val REPLACEMENTS = listOf(
         Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|token|key)=[^&\s]+""") to "$1=[REDACTED]",
         Regex("""(?i)bearer\s+[a-zA-Z0-9_.-]+""") to "Bearer [REDACTED]",
-        Regex("""(?i)--cookies?\s+[^\s]+""") to "--cookies [REDACTED]"
+        Regex("""(?i)--cookies?\s+[^\s]+""") to "--cookies [REDACTED]",
+        Regex("""(?i)--plugin-dirs\s+[^\s]+""") to "--plugin-dirs [REDACTED]",
+        Regex("""/(?:data/user/\d+|data/data)/[a-zA-Z0-9_.-]+[^\s]*""") to "[PRIVATE_PATH]"
     )
 
     fun sanitize(text: String): String {
@@ -116,8 +118,22 @@ object YtDlpErrorParser {
         val msg = errorMessage
         val isInstagram = platform == Platform.INSTAGRAM || msg.contains("instagram", ignoreCase = true)
         val isX = platform == Platform.X || msg.contains("twitter", ignoreCase = true) || msg.contains("x.com", ignoreCase = true)
+        val isThreads = platform == Platform.THREADS || msg.contains("threads", ignoreCase = true)
 
         return when {
+            isThreads && (msg.contains("was not found in the page data", ignoreCase = true) ||
+                    msg.contains("deleted, private, login-gated", ignoreCase = true)) ->
+                Pair(ErrorCategory.PRIVATE_CONTENT, "Threads 貼文不存在、設為私人內容或需要登入帳號驗證")
+
+            isThreads && msg.contains("has no downloadable video", ignoreCase = true) ->
+                Pair(ErrorCategory.EXTRACTOR_FAILURE, "此 Threads 貼文未包含可下載的影片內容 (可能為純文字或純圖片)")
+
+            isThreads && msg.contains("No video post found", ignoreCase = true) ->
+                Pair(ErrorCategory.EXTRACTOR_FAILURE, "在該 Threads 頁面中找不到有效的影片內容")
+
+            isThreads && msg.contains("carousel post contains no videos", ignoreCase = true) ->
+                Pair(ErrorCategory.EXTRACTOR_FAILURE, "此 Threads 輪播貼文未包含任何影片 (不支援純圖片下載)")
+
             msg.contains("Private video", ignoreCase = true) ||
             msg.contains("This video is private", ignoreCase = true) ->
                 Pair(ErrorCategory.PRIVATE_CONTENT, "此影片設為私人內容，無法存取")

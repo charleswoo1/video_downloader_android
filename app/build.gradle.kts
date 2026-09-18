@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -51,6 +53,11 @@ android {
             useLegacyPackaging = true
         }
     }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -85,4 +92,50 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+}
+
+tasks.register("verifyThreadsPlugin") {
+    group = "verification"
+    description = "Verifies the SHA256 integrity of the bundled yt-dlp-threads plugin source."
+    doLast {
+        val pluginFile = file("src/main/assets/yt-dlp-plugins/yt_dlp_plugins/extractor/threads.py")
+        val metaFile = file("src/main/assets/yt-dlp-plugins/metadata/yt-dlp-threads-source.txt")
+
+        if (!pluginFile.exists()) {
+            throw GradleException("Bundled Threads plugin file missing: ${pluginFile.absolutePath}")
+        }
+        if (!metaFile.exists()) {
+            throw GradleException("Threads plugin metadata file missing: ${metaFile.absolutePath}")
+        }
+
+        val md = MessageDigest.getInstance("SHA-256")
+        val bytes = pluginFile.readBytes()
+        val calculatedHash = md.digest(bytes).joinToString("") { b -> "%02x".format(b) }
+
+        val metaLines = metaFile.readLines()
+        val recordedHash = metaLines.firstOrNull { it.startsWith("sha256=") }
+            ?.substringAfter("sha256=")?.trim()?.lowercase()
+
+        val expectedPinnedHash = "c28e410b69a0c2377c8530b36f6dca4b973484855b42e281846b97b3305b28ba"
+
+        if (calculatedHash != expectedPinnedHash) {
+            throw GradleException(
+                "Threads plugin SHA256 mismatch!\n" +
+                "Calculated: $calculatedHash\n" +
+                "Expected pinned: $expectedPinnedHash"
+            )
+        }
+        if (recordedHash != expectedPinnedHash) {
+            throw GradleException(
+                "Threads plugin metadata recorded SHA256 mismatch!\n" +
+                "Recorded: $recordedHash\n" +
+                "Expected pinned: $expectedPinnedHash"
+            )
+        }
+        println("Threads plugin SHA256 verified successfully: $calculatedHash")
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("verifyThreadsPlugin")
 }

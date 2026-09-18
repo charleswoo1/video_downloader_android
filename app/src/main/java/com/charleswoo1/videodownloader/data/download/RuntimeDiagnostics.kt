@@ -9,6 +9,9 @@ data class RuntimeDiagnostics(
     val ffmpegVersion: String = "unknown",
     val quickJsAvailable: Boolean = false,
     val abi: String = "unknown",
+    val threadsPluginAvailable: Boolean = false,
+    val threadsPluginCommit: String = YtDlpPluginManager.PINNED_COMMIT,
+    val threadsPluginStatus: String = "bundled",
     val details: String? = null
 ) {
     fun toFormattedReport(): String {
@@ -21,6 +24,9 @@ data class RuntimeDiagnostics(
             appendLine("FFmpeg version: $ffmpegVersion")
             appendLine("QuickJS available: ${if (quickJsAvailable) "yes" else "no"}")
             appendLine("ABI: $abi")
+            appendLine("Threads plugin: bundled")
+            appendLine("Plugin commit: $threadsPluginCommit")
+            appendLine("Plugin status: $threadsPluginStatus")
             if (!details.isNullOrBlank()) {
                 appendLine("Details: $details")
             }

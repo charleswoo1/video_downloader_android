@@ -139,6 +139,24 @@ object RuntimeDiagnosticsHelper {
             } catch (_: Exception) {}
         }
 
+        // Check Threads plugin
+        var threadsPluginOk = false
+        var threadsPluginStatus = "uninitialized"
+        try {
+            val installResult = YtDlpPluginManager.ensureInstalled(context)
+            if (installResult.isSuccess) {
+                threadsPluginOk = true
+                threadsPluginStatus = "bundled (commit: ${YtDlpPluginManager.PINNED_COMMIT.take(8)}, available)"
+                Log.d(TAG, "[Diagnostics] Extractor Plugins: ThreadsIE (plugin dir ready)")
+            } else {
+                threadsPluginStatus = "failed (${installResult.exceptionOrNull()?.message})"
+                extraDetails.add("Threads plugin install error: $threadsPluginStatus")
+            }
+        } catch (e: Exception) {
+            threadsPluginStatus = "error (${e.message})"
+            extraDetails.add("Threads plugin check error: $threadsPluginStatus")
+        }
+
         val diag = RuntimeDiagnostics(
             youtubedlSource = "PR #361 (76ed1bf9) + PR #359 (a505022a)",
             ytdlpVersion = ytdlpVer,
@@ -148,6 +166,9 @@ object RuntimeDiagnosticsHelper {
             ffmpegVersion = ffmpegVer,
             quickJsAvailable = quickJsOk,
             abi = abi,
+            threadsPluginAvailable = threadsPluginOk,
+            threadsPluginCommit = YtDlpPluginManager.PINNED_COMMIT,
+            threadsPluginStatus = threadsPluginStatus,
             details = if (extraDetails.isNotEmpty()) extraDetails.joinToString("; ") else null
         )
 

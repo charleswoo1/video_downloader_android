@@ -44,14 +44,14 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Prepare Build #6 Debug APK Artifact
+      - name: Prepare Threads Plugin Debug APK Artifact
         run: |
           mkdir -p build-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-Build6-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-ThreadsPlugin-debug.apk
 
-      - name: Upload Build #6 Debug APK Artifact
+      - name: Upload Threads Plugin Debug APK Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: SocialVideoDownloader-Android-Build6-debug-run-${{ github.run_number }}
-          path: build-artifacts/SocialVideoDownloader-Android-Build6-debug.apk
+          name: SocialVideoDownloader-Android-ThreadsPlugin-debug-run-${{ github.run_number }}
+          path: build-artifacts/SocialVideoDownloader-Android-ThreadsPlugin-debug.apk
           retention-days: 7

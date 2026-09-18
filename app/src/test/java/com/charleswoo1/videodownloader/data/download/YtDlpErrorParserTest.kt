@@ -107,4 +107,47 @@ class YtDlpErrorParserTest {
         assertEquals(YtDlpErrorParser.ErrorCategory.LOGIN_REQUIRED, result.category)
         assertEquals("來源網站需要登入帳號驗證，目前版本不支援登入下載", result.userMessage)
     }
+
+    @Test
+    fun parse_threadsPostNotFound_categorizesCorrectly() {
+        val stderr = "ERROR: Post \"DdYkuglEfkF\" was not found in the page data. It may be deleted, private, login-gated, or Threads changed its layout."
+
+        val result = YtDlpErrorParser.parse(stderr, Platform.THREADS)
+
+        assertEquals(YtDlpErrorParser.ErrorCategory.PRIVATE_CONTENT, result.category)
+        assertEquals("Threads 貼文不存在、設為私人內容或需要登入帳號驗證", result.userMessage)
+    }
+
+    @Test
+    fun parse_threadsNoVideo_categorizesCorrectly() {
+        val stderr = "ERROR: Post \"DdYkuglEfkF\" has no downloadable video (an image post)"
+
+        val result = YtDlpErrorParser.parse(stderr, Platform.THREADS)
+
+        assertEquals(YtDlpErrorParser.ErrorCategory.EXTRACTOR_FAILURE, result.category)
+        assertEquals("此 Threads 貼文未包含可下載的影片內容 (可能為純文字或純圖片)", result.userMessage)
+    }
+
+    @Test
+    fun parse_threadsCarouselNoVideo_categorizesCorrectly() {
+        val stderr = "ERROR: This carousel post contains no videos (images are not supported)"
+
+        val result = YtDlpErrorParser.parse(stderr, Platform.THREADS)
+
+        assertEquals(YtDlpErrorParser.ErrorCategory.EXTRACTOR_FAILURE, result.category)
+        assertEquals("此 Threads 輪播貼文未包含任何影片 (不支援純圖片下載)", result.userMessage)
+    }
+
+    @Test
+    fun parse_threadsSanitizesPluginDirsAndPrivatePaths() {
+        val stderr = """
+            ERROR: Failed
+            WARNING: --plugin-dirs /data/user/0/com.app/noBackupFilesDir/yt-dlp-plugins/c4c44141/ was scanned
+        """.trimIndent()
+
+        val result = YtDlpErrorParser.parse(stderr, Platform.THREADS)
+
+        assertFalse(result.warnings.first().contains("/data/user/0"))
+        assertTrue(result.warnings.first().contains("[REDACTED]") || result.warnings.first().contains("[PRIVATE_PATH]"))
+    }
 }

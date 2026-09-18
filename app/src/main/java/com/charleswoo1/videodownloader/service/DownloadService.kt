@@ -211,83 +211,83 @@ class DownloadService : Service() {
         try {
             if (executionId != currentExecutionId) return
 
-                DownloadRepository.updateState(DownloadState.Preparing)
-                val engine = DownloadRepository.getEngine(this@DownloadService)
-                val storage = DownloadRepository.getStorage(this@DownloadService)
+            DownloadRepository.updateState(DownloadState.Preparing)
+            val engine = DownloadRepository.getEngine(this@DownloadService)
+            val storage = DownloadRepository.getStorage(this@DownloadService)
 
-                val downloadResult = engine.download(
-                    request = request,
-                    destDir = sessionDir,
-                    onProgress = { progress, etaSeconds, speedText ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Downloading(progress, etaSeconds, speedText)
+            val downloadResult = engine.download(
+                request = request,
+                destDir = sessionDir,
+                onProgress = { progress, etaSeconds, speedText ->
+                    if (executionId == currentExecutionId) {
+                        DownloadRepository.updateState(
+                            DownloadState.Downloading(progress, etaSeconds, speedText)
+                        )
+                        notificationManager.notify(
+                            NOTIFICATION_ID,
+                            buildProgressNotification(
+                                request.title,
+                                progress.toInt(),
+                                speedText,
+                                getString(R.string.progress_format, progress)
                             )
-                            notificationManager.notify(
-                                NOTIFICATION_ID,
-                                buildProgressNotification(
-                                    request.title,
-                                    progress.toInt(),
-                                    speedText,
-                                    getString(R.string.progress_format, progress)
-                                )
-                            )
-                        }
-                    },
-                    onStatus = { statusText ->
-                        if (executionId == currentExecutionId) {
-                            if (statusText.contains("合併") || statusText.contains("後製")) {
-                                DownloadRepository.updateState(DownloadState.PostProcessing)
-                            }
-                            notificationManager.notify(
-                                NOTIFICATION_ID,
-                                buildIndeterminateNotification(request.title, statusText)
-                            )
-                        }
+                        )
                     }
-                )
-
-                if (executionId != currentExecutionId) return
-
-                downloadResult.onSuccess { tempFile ->
-                    if (executionId != currentExecutionId) return@onSuccess
-
-                    DownloadRepository.updateState(DownloadState.PostProcessing)
-                    val saveResult = storage.saveToDownloads(tempFile, request.title)
-                    saveResult.onSuccess { saved ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Completed(
-                                    fileName = saved.fileName,
-                                    contentUri = saved.uri,
-                                    filePath = saved.absolutePath
-                                )
-                            )
-                            showCompletionNotification(request.title, saved.fileName)
+                },
+                onStatus = { statusText ->
+                    if (executionId == currentExecutionId) {
+                        if (statusText.contains("合併") || statusText.contains("後製")) {
+                            DownloadRepository.updateState(DownloadState.PostProcessing)
                         }
-                    }.onFailure { error ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Failed("儲存檔案失敗: ${error.message}")
+                        notificationManager.notify(
+                            NOTIFICATION_ID,
+                            buildIndeterminateNotification(request.title, statusText)
+                        )
+                    }
+                }
+            )
+
+            if (executionId != currentExecutionId) return
+
+            downloadResult.onSuccess { tempFile ->
+                if (executionId != currentExecutionId) return@onSuccess
+
+                DownloadRepository.updateState(DownloadState.PostProcessing)
+                val saveResult = storage.saveToDownloads(tempFile, request.title)
+                saveResult.onSuccess { saved ->
+                    if (executionId == currentExecutionId) {
+                        DownloadRepository.updateState(
+                            DownloadState.Completed(
+                                fileName = saved.fileName,
+                                contentUri = saved.uri,
+                                filePath = saved.absolutePath
                             )
-                            showFailureNotification(request.title, "儲存失敗: ${error.message}")
-                        }
+                        )
+                        showCompletionNotification(request.title, saved.fileName)
                     }
                 }.onFailure { error ->
                     if (executionId == currentExecutionId) {
-                        if (error is InterruptedException ||
-                            DownloadRepository.downloadState.value is DownloadState.Cancelling ||
-                            DownloadRepository.downloadState.value is DownloadState.Cancelled
-                        ) {
-                            Log.d(TAG, "Download $executionId was cancelled; skipping error alert")
-                        } else {
-                            DownloadRepository.updateState(
-                                DownloadState.Failed(error.message ?: "下載失敗")
-                            )
-                            showFailureNotification(request.title, error.message ?: "下載失敗")
-                        }
+                        DownloadRepository.updateState(
+                            DownloadState.Failed("儲存檔案失敗: ${error.message}")
+                        )
+                        showFailureNotification(request.title, "儲存失敗: ${error.message}")
                     }
                 }
+            }.onFailure { error ->
+                if (executionId == currentExecutionId) {
+                    if (error is InterruptedException ||
+                        DownloadRepository.downloadState.value is DownloadState.Cancelling ||
+                        DownloadRepository.downloadState.value is DownloadState.Cancelled
+                    ) {
+                        Log.d(TAG, "Download $executionId was cancelled; skipping error alert")
+                    } else {
+                        DownloadRepository.updateState(
+                            DownloadState.Failed(error.message ?: "下載失敗")
+                        )
+                        showFailureNotification(request.title, error.message ?: "下載失敗")
+                    }
+                }
+            }
         } finally {
             sessionDir.deleteRecursively()
             if (executionId == currentExecutionId) {

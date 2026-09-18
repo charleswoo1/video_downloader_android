@@ -2,43 +2,36 @@ package com.charleswoo1.videodownloader.data.download
 
 import android.content.Context
 import android.util.Log
-import com.charleswoo1.videodownloader.data.download.meta.MetaExtractionError
-import com.charleswoo1.videodownloader.data.download.meta.MetaWebClient
 import com.charleswoo1.videodownloader.data.download.meta.NativeInstagramEngine
 import com.charleswoo1.videodownloader.data.download.meta.NativeThreadsEngine
+import com.charleswoo1.videodownloader.data.download.x.NativeXEngine
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.Platform
 import com.charleswoo1.videodownloader.domain.url.PlatformDetector
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
 /**
- * Diagnostic log for A/B engine routing comparisons.
- */
-data class EngineRoutingLog(
-    val platform: Platform,
-    val primaryEngine: String,
-    val primaryResultCategory: String,
-    val fallbackAttempted: Boolean,
-    val fallbackEngine: String? = null,
-    val finalEngine: String,
-    val timestamp: Long = System.currentTimeMillis()
-)
-
-/**
- * Router managing platform engines and fallback logic.
+ * Platform Multi-Engine Router V2.
  *
- * Routes Meta platforms (Instagram and Threads) to dedicated native extraction engines
- * and preserves yt-dlp as generic engine and secondary fallback for technical failures only.
- * Content and access restrictions (audience restricted, login required, deleted/private,
- * and no video) are strictly prohibited from entering a fallback loop.
+ * Routes Instagram, Threads, and X to high-fidelity native engines.
+ * yt-dlp serves as generic engine for YouTube, Facebook, TikTok, and technical fallback
+ * for Instagram, Threads, and X.
+ *
+ * Strictly prevents fallback loops when content/access restrictions or explicit NO_VIDEO
+ * conditions are met.
  */
 class PlatformEngineRouter(
     private val context: Context? = null,
-    private val nativeInstagramEngine: PlatformMediaEngine = NativeInstagramEngine(context, MetaWebClient()),
-    private val nativeThreadsEngine: PlatformMediaEngine = NativeThreadsEngine(context, MetaWebClient()),
+    private val nativeInstagramEngine: PlatformMediaEngine = NativeInstagramEngine(context),
+    private val nativeThreadsEngine: PlatformMediaEngine = NativeThreadsEngine(context),
+    private val nativeXEngine: PlatformMediaEngine = NativeXEngine(context),
     private val ytDlpEngine: DownloadEngine = if (context != null) YtDlpDownloadEngine(context) else StubDownloadEngine
 ) : DownloadEngine {
 
@@ -53,7 +46,10 @@ class PlatformEngineRouter(
         private const val TAG = "PlatformEngineRouter"
     }
 
-    var lastRoutingLog: EngineRoutingLog? = null
+    private val _traceFlow = MutableStateFlow<EngineTrace?>(null)
+    val traceFlow: StateFlow<EngineTrace?> = _traceFlow.asStateFlow()
+
+    var lastTrace: EngineTrace? = null
         private set
 
     override fun isInitialized(): Boolean = ytDlpEngine.isInitialized()
@@ -64,121 +60,214 @@ class PlatformEngineRouter(
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         val platform = PlatformDetector.detect(url)
+        val opId = UUID.randomUUID().toString()
 
         when (platform) {
-            Platform.INSTAGRAM -> routeInstagram(url)
-            Platform.THREADS -> routeThreads(url)
-            else -> routeGeneric(url, platform)
+            Platform.INSTAGRAM -> routeInstagram(url, opId)
+            Platform.THREADS -> routeThreads(url, opId)
+            Platform.X -> routeX(url, opId)
+            else -> routeGeneric(url, platform, opId)
         }
     }
 
-    private suspend fun routeInstagram(url: String): Result<MediaInfo> {
+    private suspend fun routeInstagram(url: String, opId: String): Result<MediaInfo> {
         val primaryEngineName = nativeInstagramEngine.name
         val result = nativeInstagramEngine.extractMediaInfo(url)
+        val profiles = (nativeInstagramEngine as? NativeInstagramEngine)?.lastProfileSequence ?: emptyList()
 
         if (result.isSuccess) {
-            recordLog(
-                EngineRoutingLog(
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
                     platform = Platform.INSTAGRAM,
                     primaryEngine = primaryEngineName,
                     primaryResultCategory = "SUCCESS",
+                    requestProfileSequence = profiles,
                     fallbackAttempted = false,
-                    finalEngine = primaryEngineName
+                    finalEngine = primaryEngineName,
+                    finalResult = "SUCCESS"
                 )
             )
             return result
         }
 
         val error = result.exceptionOrNull()
-        if (error is MetaExtractionError && !error.canFallback) {
-            // Restriction or no-video: STRICTLY DO NOT FALL BACK
-            val category = error::class.java.simpleName
-            recordLog(
-                EngineRoutingLog(
+        if (error is PlatformExtractionError && !error.canFallback) {
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
                     platform = Platform.INSTAGRAM,
                     primaryEngine = primaryEngineName,
-                    primaryResultCategory = category,
+                    primaryResultCategory = error.code.name,
+                    requestProfileSequence = profiles,
                     fallbackAttempted = false,
-                    finalEngine = "$primaryEngineName (TERMINATED)"
+                    finalEngine = "$primaryEngineName (TERMINATED)",
+                    finalResult = error.code.name
                 )
             )
             return Result.failure(error)
         }
 
         // Technical failure: attempt yt-dlp fallback
-        recordLog(
-            EngineRoutingLog(
+        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
+        safeLog("Instagram native extraction failed ($primaryCategory); falling back to yt-dlp")
+        val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
+        recordTrace(
+            EngineTrace(
+                operationId = opId,
                 platform = Platform.INSTAGRAM,
                 primaryEngine = primaryEngineName,
-                primaryResultCategory = "TECHNICAL_FAILURE",
+                primaryResultCategory = primaryCategory,
+                requestProfileSequence = profiles,
                 fallbackAttempted = true,
                 fallbackEngine = "YtDlpDownloadEngine",
-                finalEngine = "YtDlpDownloadEngine"
+                fallbackResultCategory = finalResultStatus,
+                finalEngine = "YtDlpDownloadEngine",
+                finalResult = finalResultStatus
             )
         )
-        safeLog("Instagram native extraction encountered technical failure; falling back to yt-dlp baseline")
-        return ytDlpEngine.extractMediaInfo(url)
+        return fallbackResult
     }
 
-    private suspend fun routeThreads(url: String): Result<MediaInfo> {
+    private suspend fun routeThreads(url: String, opId: String): Result<MediaInfo> {
         val primaryEngineName = nativeThreadsEngine.name
         val result = nativeThreadsEngine.extractMediaInfo(url)
+        val profiles = (nativeThreadsEngine as? NativeThreadsEngine)?.lastProfileSequence ?: emptyList()
 
         if (result.isSuccess) {
-            recordLog(
-                EngineRoutingLog(
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
                     platform = Platform.THREADS,
                     primaryEngine = primaryEngineName,
                     primaryResultCategory = "SUCCESS",
+                    requestProfileSequence = profiles,
                     fallbackAttempted = false,
-                    finalEngine = primaryEngineName
+                    finalEngine = primaryEngineName,
+                    finalResult = "SUCCESS"
                 )
             )
             return result
         }
 
         val error = result.exceptionOrNull()
-        if (error is MetaExtractionError && !error.canFallback) {
-            // Content restriction, deleted/private, or no-video: STRICTLY DO NOT FALL BACK
-            val category = error::class.java.simpleName
-            recordLog(
-                EngineRoutingLog(
+        if (error is PlatformExtractionError && !error.canFallback) {
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
                     platform = Platform.THREADS,
                     primaryEngine = primaryEngineName,
-                    primaryResultCategory = category,
+                    primaryResultCategory = error.code.name,
+                    requestProfileSequence = profiles,
                     fallbackAttempted = false,
-                    finalEngine = "$primaryEngineName (TERMINATED)"
+                    finalEngine = "$primaryEngineName (TERMINATED)",
+                    finalResult = error.code.name
                 )
             )
             return Result.failure(error)
         }
 
-        // Technical failure: fallback to yt-dlp + Threads plugin
-        recordLog(
-            EngineRoutingLog(
+        // Technical failure: attempt yt-dlp fallback
+        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
+        safeLog("Threads native extraction failed ($primaryCategory); falling back to yt-dlp + plugin")
+        val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
+        recordTrace(
+            EngineTrace(
+                operationId = opId,
                 platform = Platform.THREADS,
                 primaryEngine = primaryEngineName,
-                primaryResultCategory = "TECHNICAL_FAILURE",
+                primaryResultCategory = primaryCategory,
+                requestProfileSequence = profiles,
                 fallbackAttempted = true,
                 fallbackEngine = "YtDlpDownloadEngine",
-                finalEngine = "YtDlpDownloadEngine"
+                fallbackResultCategory = finalResultStatus,
+                finalEngine = "YtDlpDownloadEngine",
+                finalResult = finalResultStatus
             )
         )
-        safeLog("Threads native extraction encountered technical failure; falling back to yt-dlp + plugin")
-        return ytDlpEngine.extractMediaInfo(url)
+        return fallbackResult
     }
 
-    private suspend fun routeGeneric(url: String, platform: Platform): Result<MediaInfo> {
-        recordLog(
-            EngineRoutingLog(
-                platform = platform,
-                primaryEngine = "YtDlpDownloadEngine",
-                primaryResultCategory = "DIRECT",
-                fallbackAttempted = false,
-                finalEngine = "YtDlpDownloadEngine"
+    private suspend fun routeX(url: String, opId: String): Result<MediaInfo> {
+        val primaryEngineName = nativeXEngine.name
+        val result = nativeXEngine.extractMediaInfo(url)
+        val profiles = (nativeXEngine as? NativeXEngine)?.lastProfileSequence ?: emptyList()
+
+        if (result.isSuccess) {
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
+                    platform = Platform.X,
+                    primaryEngine = primaryEngineName,
+                    primaryResultCategory = "SUCCESS",
+                    requestProfileSequence = profiles,
+                    fallbackAttempted = false,
+                    finalEngine = primaryEngineName,
+                    finalResult = "SUCCESS"
+                )
+            )
+            return result
+        }
+
+        val error = result.exceptionOrNull()
+        if (error is PlatformExtractionError && !error.canFallback) {
+            recordTrace(
+                EngineTrace(
+                    operationId = opId,
+                    platform = Platform.X,
+                    primaryEngine = primaryEngineName,
+                    primaryResultCategory = error.code.name,
+                    requestProfileSequence = profiles,
+                    fallbackAttempted = false,
+                    finalEngine = "$primaryEngineName (TERMINATED)",
+                    finalResult = error.code.name
+                )
+            )
+            return Result.failure(error)
+        }
+
+        // Technical failure: attempt yt-dlp fallback
+        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
+        safeLog("X native extraction failed ($primaryCategory); falling back to yt-dlp")
+        val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
+        recordTrace(
+            EngineTrace(
+                operationId = opId,
+                platform = Platform.X,
+                primaryEngine = primaryEngineName,
+                primaryResultCategory = primaryCategory,
+                requestProfileSequence = profiles,
+                fallbackAttempted = true,
+                fallbackEngine = "YtDlpDownloadEngine",
+                fallbackResultCategory = finalResultStatus,
+                finalEngine = "YtDlpDownloadEngine",
+                finalResult = finalResultStatus
             )
         )
-        return ytDlpEngine.extractMediaInfo(url)
+        return fallbackResult
+    }
+
+    private suspend fun routeGeneric(url: String, platform: Platform, opId: String): Result<MediaInfo> {
+        val result = ytDlpEngine.extractMediaInfo(url)
+        val status = if (result.isSuccess) "SUCCESS" else "FAILURE"
+        recordTrace(
+            EngineTrace(
+                operationId = opId,
+                platform = platform,
+                primaryEngine = "YtDlpDownloadEngine",
+                primaryResultCategory = status,
+                fallbackAttempted = false,
+                finalEngine = "YtDlpDownloadEngine",
+                finalResult = status
+            )
+        )
+        return result
     }
 
     override suspend fun download(
@@ -192,6 +281,8 @@ class PlatformEngineRouter(
 
         val isDirectMediaUrl = formatSelector.startsWith("http://") ||
                 formatSelector.startsWith("https://") ||
+                formatSelector.startsWith("audio:http://") ||
+                formatSelector.startsWith("audio:https://") ||
                 formatSelector.contains("|")
 
         when {
@@ -211,6 +302,16 @@ class PlatformEngineRouter(
                     res
                 } else {
                     safeLog("Native Threads download failed (${res.exceptionOrNull()?.message}); attempting yt-dlp fallback")
+                    val fallbackRequest = createYtDlpFallbackRequest(request)
+                    ytDlpEngine.download(fallbackRequest, destDir, onProgress, onStatus)
+                }
+            }
+            platform == Platform.X && isDirectMediaUrl -> {
+                val res = nativeXEngine.download(request, destDir, onProgress, onStatus)
+                if (res.isSuccess || res.exceptionOrNull() is InterruptedException) {
+                    res
+                } else {
+                    safeLog("Native X download failed (${res.exceptionOrNull()?.message}); attempting yt-dlp fallback")
                     val fallbackRequest = createYtDlpFallbackRequest(request)
                     ytDlpEngine.download(fallbackRequest, destDir, onProgress, onStatus)
                 }
@@ -235,21 +336,19 @@ class PlatformEngineRouter(
     override fun cancelDownload() {
         nativeInstagramEngine.cancelDownload()
         nativeThreadsEngine.cancelDownload()
+        nativeXEngine.cancelDownload()
         ytDlpEngine.cancelDownload()
     }
 
-    private fun recordLog(log: EngineRoutingLog) {
-        lastRoutingLog = log
-        safeLog(
-            "Platform: ${log.platform}, Primary: ${log.primaryEngine}, " +
-            "Result: ${log.primaryResultCategory}, FallbackAttempted: ${log.fallbackAttempted}, " +
-            "FallbackEngine: ${log.fallbackEngine}, Final: ${log.finalEngine}"
-        )
+    private fun recordTrace(trace: EngineTrace) {
+        lastTrace = trace
+        _traceFlow.value = trace
+        safeLog("[EngineTrace] ${trace.toDisplaySummary()}")
     }
 
     private fun safeLog(msg: String) {
         try {
-            Log.d(TAG, "[A/B Diagnostics] $msg")
+            Log.d(TAG, msg)
         } catch (_: Exception) {
             println("[$TAG] $msg")
         }

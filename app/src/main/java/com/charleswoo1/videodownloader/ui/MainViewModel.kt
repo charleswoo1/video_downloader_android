@@ -47,6 +47,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _runtimeDiagnostics = MutableStateFlow<RuntimeDiagnostics?>(null)
     val runtimeDiagnostics: StateFlow<RuntimeDiagnostics?> = _runtimeDiagnostics.asStateFlow()
 
+    val engineTrace: StateFlow<com.charleswoo1.videodownloader.data.download.EngineTrace?> = DownloadRepository.engineTrace
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             _runtimeVersion.value = downloadEngine.getRuntimeVersion()

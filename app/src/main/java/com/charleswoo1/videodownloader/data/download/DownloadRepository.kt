@@ -11,10 +11,15 @@ object DownloadRepository {
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
+    private val _fallbackTrace = MutableStateFlow<EngineTrace?>(null)
+
     private var engine: DownloadEngine? = null
     private var storage: DownloadStorage? = null
     var isInitialized: Boolean = false
     private val isJobRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    val engineTrace: StateFlow<EngineTrace?>
+        get() = (engine as? PlatformEngineRouter)?.traceFlow ?: _fallbackTrace
 
     fun tryStartDownload(): Boolean {
         return isJobRunning.compareAndSet(false, true)

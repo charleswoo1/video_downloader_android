@@ -158,7 +158,7 @@ object RuntimeDiagnosticsHelper {
         }
 
         val router = DownloadRepository.getEngine(context) as? PlatformEngineRouter
-        val lastRoute = router?.lastRoutingLog?.let {
+        val lastRoute = router?.lastTrace?.let {
             "${it.platform} -> Primary: ${it.primaryEngine}, Result: ${it.primaryResultCategory}, Fallback: ${it.fallbackAttempted}, Final: ${it.finalEngine}"
         }
 

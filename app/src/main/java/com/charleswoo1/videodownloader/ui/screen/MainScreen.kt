@@ -76,6 +76,7 @@ fun MainScreen(
     val analysisState by viewModel.analysisState.collectAsState()
     val selectedQuality by viewModel.selectedQuality.collectAsState()
     val downloadState by viewModel.downloadState.collectAsState()
+    val engineTrace by viewModel.engineTrace.collectAsState()
 
     Scaffold(
         topBar = {
@@ -189,6 +190,22 @@ fun MainScreen(
                 downloadState = downloadState,
                 onCancel = { viewModel.cancelDownload(context) }
             )
+
+            if (engineTrace != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Text(
+                        text = engineTrace!!.toDisplaySummary(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+            }
 
             val runtimeVersion by viewModel.runtimeVersion.collectAsState()
             val runtimeDiagnostics by viewModel.runtimeDiagnostics.collectAsState()

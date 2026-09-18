@@ -1,6 +1,5 @@
 package com.charleswoo1.videodownloader.data.download
 
-import android.content.Context
 import com.charleswoo1.videodownloader.data.download.meta.MetaExtractionError
 import com.charleswoo1.videodownloader.data.download.meta.RestrictionReason
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
@@ -82,6 +81,7 @@ class PlatformEngineRouterTest {
 
     private lateinit var fakeInstagramEngine: FakeMediaEngine
     private lateinit var fakeThreadsEngine: FakeMediaEngine
+    private lateinit var fakeXEngine: FakeMediaEngine
     private lateinit var fakeYtDlpEngine: FakeYtDlpEngine
     private lateinit var router: PlatformEngineRouter
 
@@ -89,12 +89,14 @@ class PlatformEngineRouterTest {
     fun setUp() {
         fakeInstagramEngine = FakeMediaEngine("NativeInstagramEngine", Platform.INSTAGRAM)
         fakeThreadsEngine = FakeMediaEngine("NativeThreadsEngine", Platform.THREADS)
+        fakeXEngine = FakeMediaEngine("NativeXEngine", Platform.X)
         fakeYtDlpEngine = FakeYtDlpEngine()
 
         router = PlatformEngineRouter(
             context = null,
             nativeInstagramEngine = fakeInstagramEngine,
             nativeThreadsEngine = fakeThreadsEngine,
+            nativeXEngine = fakeXEngine,
             ytDlpEngine = fakeYtDlpEngine
         )
     }
@@ -120,8 +122,9 @@ class PlatformEngineRouterTest {
         assertEquals("IG Reel", result.getOrNull()?.title)
         assertTrue(fakeInstagramEngine.extractCalled)
         assertFalse(fakeYtDlpEngine.extractCalled)
-        assertEquals("NativeInstagramEngine", router.lastRoutingLog?.finalEngine)
-        assertFalse(router.lastRoutingLog?.fallbackAttempted ?: true)
+        assertEquals("NativeInstagramEngine", router.lastTrace?.finalEngine)
+        assertFalse(router.lastTrace?.fallbackAttempted ?: true)
+        assertTrue(router.lastTrace?.toDisplaySummary()?.contains("fallback: no") == true)
     }
 
     @Test
@@ -138,13 +141,14 @@ class PlatformEngineRouterTest {
         assertTrue("Should report failure", result.isFailure)
         assertTrue(fakeInstagramEngine.extractCalled)
         assertFalse("MUST NOT fallback to yt-dlp on audience restriction!", fakeYtDlpEngine.extractCalled)
-        assertFalse(router.lastRoutingLog?.fallbackAttempted ?: true)
+        assertFalse(router.lastTrace?.fallbackAttempted ?: true)
+        assertEquals("AUDIENCE_RESTRICTED", router.lastTrace?.primaryResultCategory)
     }
 
     @Test
     fun extractMediaInfo_instagramNoVideo_terminatesImmediatelyWithoutFallback() = runBlocking {
         fakeInstagramEngine.extractResult = Result.failure(
-            MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (不支援純圖片下載)")
+            PlatformExtractionError.NoVideo("此 Instagram 貼文未包含任何影片")
         )
 
         val result = router.extractMediaInfo("https://www.instagram.com/p/DdXphotoOnly/")
@@ -152,13 +156,14 @@ class PlatformEngineRouterTest {
         assertTrue("Should report failure", result.isFailure)
         assertTrue(fakeInstagramEngine.extractCalled)
         assertFalse("MUST NOT fallback to yt-dlp on photo-only post!", fakeYtDlpEngine.extractCalled)
-        assertFalse(router.lastRoutingLog?.fallbackAttempted ?: true)
+        assertFalse(router.lastTrace?.fallbackAttempted ?: true)
+        assertEquals("NO_VIDEO", router.lastTrace?.primaryResultCategory)
     }
 
     @Test
     fun extractMediaInfo_instagramTechnicalFailure_fallsBackToYtDlp() = runBlocking {
         fakeInstagramEngine.extractResult = Result.failure(
-            MetaExtractionError.Technical("Schema changed")
+            PlatformExtractionError.ParseError("Schema changed")
         )
         val ytdlpInfo = createMediaInfo(Platform.INSTAGRAM, "yt-dlp IG Reel")
         fakeYtDlpEngine.extractResult = Result.success(ytdlpInfo)
@@ -169,8 +174,9 @@ class PlatformEngineRouterTest {
         assertEquals("yt-dlp IG Reel", result.getOrNull()?.title)
         assertTrue(fakeInstagramEngine.extractCalled)
         assertTrue("MUST attempt yt-dlp fallback on technical failure", fakeYtDlpEngine.extractCalled)
-        assertTrue(router.lastRoutingLog?.fallbackAttempted ?: false)
-        assertEquals("YtDlpDownloadEngine", router.lastRoutingLog?.finalEngine)
+        assertTrue(router.lastTrace?.fallbackAttempted ?: false)
+        assertEquals("YtDlpDownloadEngine", router.lastTrace?.finalEngine)
+        assertEquals("PARSE_ERROR", router.lastTrace?.primaryResultCategory)
     }
 
     @Test
@@ -184,16 +190,13 @@ class PlatformEngineRouterTest {
         assertEquals("Threads Video", result.getOrNull()?.title)
         assertTrue(fakeThreadsEngine.extractCalled)
         assertFalse(fakeYtDlpEngine.extractCalled)
-        assertEquals("NativeThreadsEngine", router.lastRoutingLog?.finalEngine)
+        assertEquals("NativeThreadsEngine", router.lastTrace?.finalEngine)
     }
 
     @Test
     fun extractMediaInfo_threadsPrivateOrDeleted_terminatesImmediatelyWithoutFallback() = runBlocking {
         fakeThreadsEngine.extractResult = Result.failure(
-            MetaExtractionError.Restricted(
-                RestrictionReason.DELETED_OR_PRIVATE,
-                "Threads 貼文不存在、設為私人內容或需要登入帳號驗證"
-            )
+            PlatformExtractionError.DeletedOrNotFound("Threads 貼文不存在或已刪除")
         )
 
         val result = router.extractMediaInfo("https://www.threads.com/@user/post/DdZprivate")
@@ -201,12 +204,13 @@ class PlatformEngineRouterTest {
         assertTrue(result.isFailure)
         assertTrue(fakeThreadsEngine.extractCalled)
         assertFalse("MUST NOT fallback on private/deleted content!", fakeYtDlpEngine.extractCalled)
+        assertEquals("DELETED_OR_NOT_FOUND", router.lastTrace?.primaryResultCategory)
     }
 
     @Test
     fun extractMediaInfo_threadsTechnicalFailure_fallsBackToYtDlp() = runBlocking {
         fakeThreadsEngine.extractResult = Result.failure(
-            MetaExtractionError.Technical("Target shortcode missing")
+            PlatformExtractionError.TargetNotInPageData("Target shortcode missing")
         )
         val ytdlpInfo = createMediaInfo(Platform.THREADS, "yt-dlp Threads Video")
         fakeYtDlpEngine.extractResult = Result.success(ytdlpInfo)
@@ -216,6 +220,55 @@ class PlatformEngineRouterTest {
         assertTrue(result.isSuccess)
         assertTrue(fakeThreadsEngine.extractCalled)
         assertTrue("MUST fallback to yt-dlp on technical missing target", fakeYtDlpEngine.extractCalled)
+        assertEquals("TARGET_NOT_IN_PAGE_DATA", router.lastTrace?.primaryResultCategory)
+        assertEquals("YtDlpDownloadEngine", router.lastTrace?.finalEngine)
+    }
+
+    @Test
+    fun extractMediaInfo_xNativeSuccess_returnsNativeAndNoFallback() = runBlocking {
+        val expectedInfo = createMediaInfo(Platform.X, "X Video Tweet")
+        fakeXEngine.extractResult = Result.success(expectedInfo)
+
+        val result = router.extractMediaInfo("https://x.com/Twitter/status/1234567890")
+
+        assertTrue(result.isSuccess)
+        assertEquals("X Video Tweet", result.getOrNull()?.title)
+        assertTrue(fakeXEngine.extractCalled)
+        assertFalse(fakeYtDlpEngine.extractCalled)
+        assertEquals("NativeXEngine", router.lastTrace?.finalEngine)
+        assertFalse(router.lastTrace?.fallbackAttempted ?: true)
+    }
+
+    @Test
+    fun extractMediaInfo_xNoVideo_terminatesImmediatelyWithoutFallback() = runBlocking {
+        fakeXEngine.extractResult = Result.failure(
+            PlatformExtractionError.NoVideo("此 X 貼文為純文字，未包含影片")
+        )
+
+        val result = router.extractMediaInfo("https://x.com/SmallQQQQQ/status/2099089385958645960")
+
+        assertTrue(result.isFailure)
+        assertTrue(fakeXEngine.extractCalled)
+        assertFalse("MUST NOT fallback to yt-dlp on explicit NO_VIDEO!", fakeYtDlpEngine.extractCalled)
+        assertFalse(router.lastTrace?.fallbackAttempted ?: true)
+        assertEquals("NO_VIDEO", router.lastTrace?.primaryResultCategory)
+    }
+
+    @Test
+    fun extractMediaInfo_xTechnicalFailure_fallsBackToYtDlp() = runBlocking {
+        fakeXEngine.extractResult = Result.failure(
+            PlatformExtractionError.ApiError(403, "API access blocked")
+        )
+        val ytdlpInfo = createMediaInfo(Platform.X, "yt-dlp X Video")
+        fakeYtDlpEngine.extractResult = Result.success(ytdlpInfo)
+
+        val result = router.extractMediaInfo("https://x.com/user/status/9876543210")
+
+        assertTrue(result.isSuccess)
+        assertTrue(fakeXEngine.extractCalled)
+        assertTrue("MUST fallback to yt-dlp on technical API error", fakeYtDlpEngine.extractCalled)
+        assertEquals("API_ERROR", router.lastTrace?.primaryResultCategory)
+        assertEquals("YtDlpDownloadEngine", router.lastTrace?.finalEngine)
     }
 
     @Test
@@ -229,8 +282,9 @@ class PlatformEngineRouterTest {
         assertEquals("YouTube Video", result.getOrNull()?.title)
         assertFalse("Instagram engine must not be called for YouTube", fakeInstagramEngine.extractCalled)
         assertFalse("Threads engine must not be called for YouTube", fakeThreadsEngine.extractCalled)
+        assertFalse("X engine must not be called for YouTube", fakeXEngine.extractCalled)
         assertTrue(fakeYtDlpEngine.extractCalled)
-        assertEquals("YtDlpDownloadEngine", router.lastRoutingLog?.finalEngine)
+        assertEquals("YtDlpDownloadEngine", router.lastTrace?.finalEngine)
     }
 
     @Test
@@ -249,18 +303,38 @@ class PlatformEngineRouterTest {
     }
 
     @Test
-    fun download_ytdlpSelector_dispatchesToYtDlpEngine() = runBlocking {
+    fun download_nativeXDirectMedia_dispatchesToNativeXEngine() = runBlocking {
         val req = DownloadRequest(
-            url = "https://www.youtube.com/watch?v=123",
-            title = "Test",
-            qualityOption = QualityOption("best", "Best", "bestvideo+bestaudio/best")
+            url = "https://x.com/user/status/123",
+            title = "X Video",
+            qualityOption = QualityOption("best", "Best", "https://video.twimg.com/stream.mp4")
         )
         val dest = File("/tmp")
 
         router.download(req, dest, { _, _, _ -> }, {})
 
-        assertFalse(fakeInstagramEngine.downloadCalled)
+        assertTrue(fakeXEngine.downloadCalled)
+        assertFalse(fakeYtDlpEngine.downloadCalled)
+    }
+
+    @Test
+    fun download_nativeXFailure_fallsBackToYtDlp() = runBlocking {
+        fakeXEngine.downloadResult = Result.failure(IllegalStateException("Stream download failed"))
+        fakeYtDlpEngine.downloadResult = Result.success(File("/tmp/fallback_x.mp4"))
+
+        val req = DownloadRequest(
+            url = "https://x.com/user/status/123",
+            title = "X Video",
+            qualityOption = QualityOption("best", "Best", "https://video.twimg.com/stream.mp4")
+        )
+        val dest = File("/tmp")
+
+        val result = router.download(req, dest, { _, _, _ -> }, {})
+
+        assertTrue(result.isSuccess)
+        assertTrue(fakeXEngine.downloadCalled)
         assertTrue(fakeYtDlpEngine.downloadCalled)
+        assertEquals("bestvideo+bestaudio/best", fakeYtDlpEngine.lastDownloadRequest?.qualityOption?.formatSelector)
     }
 
     @Test
@@ -317,6 +391,7 @@ class PlatformEngineRouterTest {
 
         assertTrue(fakeInstagramEngine.cancelCalled)
         assertTrue(fakeThreadsEngine.cancelCalled)
+        assertTrue(fakeXEngine.cancelCalled)
         assertTrue(fakeYtDlpEngine.cancelCalled)
     }
 }

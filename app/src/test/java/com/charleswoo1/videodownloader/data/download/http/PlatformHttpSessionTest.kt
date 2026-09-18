@@ -100,6 +100,29 @@ class PlatformHttpSessionTest {
     }
 
     @Test
+    fun platformCookieJar_hostOnlyCookie_doesNotMatchParentDomain() {
+        val jar = PlatformCookieJar()
+        val apiUrl = "https://api.x.com/1.1/guest/activate.json".toHttpUrl()
+
+        val hostOnlyCookie = Cookie.Builder()
+            .hostOnlyDomain("api.x.com")
+            .path("/")
+            .name("gt")
+            .value("host_only_token_value")
+            .build()
+
+        jar.saveFromResponse(apiUrl, listOf(hostOnlyCookie))
+
+        // Querying for parent domain x.com MUST return null for host-only cookie
+        val parentValue = jar.getCookieValue("x.com", "gt")
+        assertNull("Host-only cookie for api.x.com must not be returned for parent domain x.com", parentValue)
+
+        // Querying for exact host api.x.com MUST return the value
+        val exactValue = jar.getCookieValue("api.x.com", "gt")
+        assertEquals("host_only_token_value", exactValue)
+    }
+
+    @Test
     fun retryPolicy_computesBoundedExponentialDelay() {
         val policy = RetryPolicy(maxRetries = 3, initialBackoffMs = 200L, backoffMultiplier = 2.0, maxBackoffMs = 1000L)
 

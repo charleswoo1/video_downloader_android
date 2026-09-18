@@ -25,7 +25,7 @@ import java.util.regex.Pattern
  * (tribixbite/yt-dlp-threads). This resolver is preserved as a strictly guarded fallback
  * implementation only when the plugin cannot be loaded or extracted.
  */
-class ThreadsResolver(private val context: Context? = null) {
+open class ThreadsResolver(private val context: Context? = null) {
 
     companion object {
         private const val TAG = "ThreadsResolver"
@@ -279,30 +279,10 @@ class ThreadsResolver(private val context: Context? = null) {
                 )
             )
 
-            for (h in mediaData.heights) {
-                when {
-                    h >= 1080 -> options.add(
-                        QualityOption("1080p", "1080p Full HD", primaryStreamUrl, false)
-                    )
-                    h in 720..1079 -> options.add(
-                        QualityOption("720p", "720p HD", primaryStreamUrl, false)
-                    )
-                    h in 480..719 -> options.add(
-                        QualityOption("480p", "480p 標清", primaryStreamUrl, false)
-                    )
-                    h in 360..479 -> options.add(
-                        QualityOption("360p", "360p 流暢", primaryStreamUrl, false)
-                    )
-                }
-            }
-
-            // Deduplicate options by id
-            val distinctOptions = options.distinctBy { it.id }.toMutableList()
-
             // Audio only option
             val audioSelector = mediaData.dashAudioUrl ?: (progressiveUrl ?: mediaData.dashVideoUrl ?: "")
             if (audioSelector.isNotBlank()) {
-                distinctOptions.add(
+                options.add(
                     QualityOption(
                         id = "audio_only",
                         label = "僅音訊 (MP3/M4A)",
@@ -311,6 +291,9 @@ class ThreadsResolver(private val context: Context? = null) {
                     )
                 )
             }
+
+            // Deduplicate options by id
+            val distinctOptions = options.distinctBy { it.id }.toMutableList()
 
             val mediaInfo = MediaInfo(
                 sourceUrl = canonicalUrl,
@@ -329,7 +312,7 @@ class ThreadsResolver(private val context: Context? = null) {
         }
     }
 
-    private fun fetchWebpage(targetUrl: String): String {
+    internal open fun fetchWebpage(targetUrl: String): String {
         val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             requestMethod = "GET"
@@ -617,12 +600,12 @@ class ThreadsResolver(private val context: Context? = null) {
         onStatus: (String) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
         isCancelled.set(false)
+        val cleanTitle = request.title.replace(Regex("""[^\w\u4e00-\u9fa5\s.-]"""), "_").trim()
+        val outputFile = File(destDir, "$cleanTitle.mp4")
         try {
             if (!destDir.exists()) destDir.mkdirs()
 
             val targetStreamUrl = request.qualityOption.formatSelector
-            val cleanTitle = request.title.replace(Regex("""[^\w\u4e00-\u9fa5\s.-]"""), "_").trim()
-            val outputFile = File(destDir, "$cleanTitle.mp4")
 
             if (targetStreamUrl.contains("|") && !request.qualityOption.isAudioOnly) {
                 val parts = targetStreamUrl.split("|", limit = 2)
@@ -655,10 +638,8 @@ class ThreadsResolver(private val context: Context? = null) {
                         onProgress(100f, 0L, null)
                         return@withContext Result.success(outputFile)
                     } else {
-                        // Fallback if merge fails: rename video to output
                         if (outputFile.exists()) outputFile.delete()
-                        tempVideo.renameTo(outputFile)
-                        return@withContext Result.success(outputFile)
+                        return@withContext Result.failure(IllegalStateException("FFmpeg 視訊與音訊合併失敗"))
                     }
                 } finally {
                     tempVideo.delete()
@@ -668,6 +649,7 @@ class ThreadsResolver(private val context: Context? = null) {
                 onStatus("正在開始下載 Threads 媒體…")
                 val downloadSuccess = downloadStream(targetStreamUrl, outputFile, onProgress)
                 if (!downloadSuccess) {
+                    outputFile.delete()
                     if (isCancelled.get()) {
                         return@withContext Result.failure(InterruptedException("下載已取消"))
                     }
@@ -678,15 +660,19 @@ class ThreadsResolver(private val context: Context? = null) {
                     onStatus("正在轉檔為純音訊…")
                     val audioFile = File(destDir, "$cleanTitle.mp3")
                     val extracted = extractAudioWithFFmpeg(outputFile, audioFile)
+                    outputFile.delete()
                     if (extracted && audioFile.exists()) {
-                        outputFile.delete()
                         return@withContext Result.success(audioFile)
+                    } else {
+                        if (audioFile.exists()) audioFile.delete()
+                        return@withContext Result.failure(IllegalStateException("FFmpeg 音訊轉檔失敗"))
                     }
                 }
 
                 Result.success(outputFile)
             }
         } catch (e: Exception) {
+            outputFile.delete()
             if (isCancelled.get() || e is InterruptedException) {
                 Result.failure(InterruptedException("下載已取消"))
             } else {
@@ -696,7 +682,7 @@ class ThreadsResolver(private val context: Context? = null) {
         }
     }
 
-    private fun downloadStream(
+    internal open fun downloadStream(
         streamUrl: String,
         destination: File,
         onProgress: (Float, Long?, String?) -> Unit

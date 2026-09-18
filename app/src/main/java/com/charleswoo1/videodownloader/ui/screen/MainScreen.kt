@@ -236,7 +236,7 @@ fun RuntimeDiagnosticsSection(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
-                text = "Runtime Diagnostics (Build #6)",
+                text = "執行階段診斷 (Runtime Diagnostics)",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -252,7 +252,7 @@ fun RuntimeDiagnosticsSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                text = "curl_cffi: $curlStatus | FFmpeg: $ffmpegVer | 16KB Page: Compatible",
+                text = "curl_cffi: $curlStatus | FFmpeg: $ffmpegVer | 16KB Page: Unverified / known FFmpeg limitation",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

@@ -49,7 +49,7 @@ class PlatformCookieJar : CookieJar {
         val cleanTarget = domain.removePrefix(".")
         val now = System.currentTimeMillis()
 
-        // 1. Direct domain match
+        // 1. Direct host/domain match
         val directStore = cookieStore[cleanTarget]
         val directCookie = directStore?.get(name)
         if (directCookie != null) {
@@ -60,13 +60,13 @@ class PlatformCookieJar : CookieJar {
             }
         }
 
-        // 2. Parent or subdomain match
+        // 2. Parent domain match (only domain cookies, never host-only cookies)
         for ((storeDomain, store) in cookieStore) {
-            if (cleanTarget == storeDomain || cleanTarget.endsWith(".$storeDomain") || storeDomain.endsWith(".$cleanTarget")) {
+            if (cleanTarget.endsWith(".$storeDomain", ignoreCase = true)) {
                 val cookie = store[name] ?: continue
                 if (cookie.expiresAt < now) {
                     store.remove(name)
-                } else {
+                } else if (!cookie.hostOnly) {
                     return cookie.value
                 }
             }

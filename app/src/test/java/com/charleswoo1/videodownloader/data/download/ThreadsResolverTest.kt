@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 
 class ThreadsResolverTest {
 
@@ -244,5 +245,119 @@ class ThreadsResolverTest {
         val html = "<html><body>Generic share page with no post link</body></html>"
         val resolved = resolver.extractPostUrlFromShareHtml(html)
         assertEquals(null, resolved)
+    }
+
+    private class TestThreadsResolver(
+        private val mockHtml: String = ""
+    ) : ThreadsResolver(context = null) {
+        var simulateDownloadSuccess = true
+
+        override fun fetchWebpage(targetUrl: String): String {
+            if (mockHtml.isNotBlank()) return mockHtml
+            return super.fetchWebpage(targetUrl)
+        }
+
+        override fun downloadStream(
+            streamUrl: String,
+            destination: File,
+            onProgress: (Float, Long?, String?) -> Unit
+        ): Boolean {
+            if (!simulateDownloadSuccess) return false
+            destination.parentFile?.mkdirs()
+            destination.writeText("dummy stream data")
+            return true
+        }
+    }
+
+    @Test
+    fun download_dashMergeFailure_returnsFailureAndCleansOutputFiles() = kotlinx.coroutines.runBlocking {
+        val testResolver = TestThreadsResolver()
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_dash_fail_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+
+        try {
+            val dashOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                id = "best",
+                label = "最佳畫質",
+                formatSelector = "https://cdn.threads.com/v.mp4|https://cdn.threads.com/a.mp4",
+                isAudioOnly = false
+            )
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@u/post/C_dash123",
+                title = "Dash Video",
+                qualityOption = dashOption
+            )
+
+            val result = testResolver.download(request, tempDir, { _, _, _ -> }, {})
+
+            // FFmpeg merge fails because context is null
+            assertTrue("DASH merge failure must return Result.failure", result.isFailure)
+            val files = tempDir.listFiles() ?: emptyArray()
+            assertTrue("No partial output or part files should remain after merge failure, found: ${files.map { it.name }}", files.isEmpty())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun download_audioExtractionFailure_returnsFailureAndCleansOutputFiles() = kotlinx.coroutines.runBlocking {
+        val testResolver = TestThreadsResolver()
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_audio_fail_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+
+        try {
+            val audioOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                id = "audio_only",
+                label = "僅音訊",
+                formatSelector = "https://cdn.threads.com/v.mp4",
+                isAudioOnly = true
+            )
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@u/post/C_audio123",
+                title = "Audio Post",
+                qualityOption = audioOption
+            )
+
+            val result = testResolver.download(request, tempDir, { _, _, _ -> }, {})
+
+            // FFmpeg audio conversion fails because context is null
+            assertTrue("Audio extraction failure must return Result.failure", result.isFailure)
+            val files = tempDir.listFiles() ?: emptyArray()
+            assertTrue("No mp4 or invalid mp3 should remain after extraction failure, found: ${files.map { it.name }}", files.isEmpty())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun extractMediaInfo_onlyExposesGenuineBestAndAudioOptionsWithoutFakeResolutionTiers() = kotlinx.coroutines.runBlocking {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "code": "C_distinctTiers",
+              "user": { "username": "creator" },
+              "caption": { "text": "Genuine options test" },
+              "video_versions": [
+                { "url": "https://cdn.threads.com/video.mp4", "height": 1080 }
+              ]
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val testResolver = TestThreadsResolver(mockHtml = html)
+        val result = testResolver.extractMediaInfo("https://www.threads.com/@creator/post/C_distinctTiers")
+
+        assertTrue("Expected extractMediaInfo success", result.isSuccess)
+        val options = result.getOrNull()?.qualityOptions ?: emptyList()
+
+        // Should ONLY have "best" and "audio_only", NO fake "1080p", "720p", "480p", "360p"
+        val optionIds = options.map { it.id }
+        assertEquals(listOf("best", "audio_only"), optionIds)
+        assertEquals("https://cdn.threads.com/video.mp4", options.first { it.id == "best" }.formatSelector)
     }
 }

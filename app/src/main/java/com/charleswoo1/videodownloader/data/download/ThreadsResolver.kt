@@ -188,25 +188,10 @@ class ThreadsResolver(private val context: Context? = null) {
                 )
             )
 
-            for (h in mediaData.heights) {
-                when {
-                    h >= 1080 -> options.add(
-                        QualityOption("1080p", "1080p Full HD", primaryStreamUrl, false)
-                    )
-                    h in 720..1079 -> options.add(
-                        QualityOption("720p", "720p HD", primaryStreamUrl, false)
-                    )
-                    h in 480..719 -> options.add(
-                        QualityOption("480p", "480p 標清", primaryStreamUrl, false)
-                    )
-                    h in 360..479 -> options.add(
-                        QualityOption("360p", "360p 流暢", primaryStreamUrl, false)
-                    )
-                }
-            }
-
-            // Deduplicate options by id
-            val distinctOptions = options.distinctBy { it.id }.toMutableList()
+            // v0.1.0 intentionally exposes only a real "best" stream for Threads.
+            // The page payload does not provide a stable height -> URL mapping across layouts,
+            // so advertising 1080p/720p choices here would be misleading.
+            val distinctOptions = options.toMutableList()
 
             // Audio only option
             val audioSelector = mediaData.dashAudioUrl ?: (progressiveUrl ?: mediaData.dashVideoUrl ?: "")
@@ -503,12 +488,12 @@ class ThreadsResolver(private val context: Context? = null) {
                     if (merged && outputFile.exists()) {
                         onProgress(100f, 0L, null)
                         return@withContext Result.success(outputFile)
-                    } else {
-                        // Fallback if merge fails: rename video to output
-                        if (outputFile.exists()) outputFile.delete()
-                        tempVideo.renameTo(outputFile)
-                        return@withContext Result.success(outputFile)
                     }
+
+                    if (outputFile.exists()) outputFile.delete()
+                    return@withContext Result.failure(
+                        IllegalStateException("Threads 音視訊合併失敗，未輸出可能缺少音訊的影片")
+                    )
                 } finally {
                     tempVideo.delete()
                     tempAudio.delete()
@@ -531,6 +516,11 @@ class ThreadsResolver(private val context: Context? = null) {
                         outputFile.delete()
                         return@withContext Result.success(audioFile)
                     }
+
+                    audioFile.delete()
+                    return@withContext Result.failure(
+                        IllegalStateException("Threads 音訊轉檔失敗")
+                    )
                 }
 
                 Result.success(outputFile)

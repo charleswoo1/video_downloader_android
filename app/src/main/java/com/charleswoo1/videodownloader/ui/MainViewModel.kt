@@ -38,14 +38,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val downloadState: StateFlow<DownloadState> = DownloadRepository.downloadState
 
-    private val _runtimeVersion = MutableStateFlow<String?>(downloadEngine.getRuntimeVersion())
-    val runtimeVersion: StateFlow<String?> = _runtimeVersion.asStateFlow()
-
-    init {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            _runtimeVersion.value = downloadEngine.getRuntimeVersion()
-        }
-    }
+    val runtimeVersion: StateFlow<String?> = DownloadRepository.runtimeVersion
 
     fun onUrlInputChanged(newUrl: String) {
         _urlInput.value = newUrl
@@ -95,14 +88,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDownload(context: Context) {
-        val currentState = downloadState.value
-        val isActivelyDownloading = DownloadRepository.isDownloadActive() &&
-                (currentState is DownloadState.Downloading ||
-                 currentState is DownloadState.Preparing ||
-                 currentState is DownloadState.PostProcessing ||
-                 currentState is DownloadState.Cancelling)
-
-        if (isActivelyDownloading) return
+        if (DownloadRepository.isDownloadActive()) return
 
         val state = _analysisState.value
         if (state !is AnalysisState.Success) return
@@ -118,7 +104,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelDownload(context: Context) {
-        DownloadRepository.requestCancel()
         DownloadService.cancelDownload(context)
     }
 

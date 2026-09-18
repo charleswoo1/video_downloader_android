@@ -17,7 +17,7 @@ Social Video Downloader
   ↓
 自動擷取 HTTP/HTTPS 網址
   ↓
-辨識平台並呼叫 yt-dlp 解析資訊
+辨識平台並使用 yt-dlp／原生解析器取得媒體資訊
   ↓
 顯示縮圖、標題、長度與畫質選項 (或僅音訊)
   ↓
@@ -140,6 +140,8 @@ Downloads/SocialVideoDownloader/
 - **登入與 Cookie：** `v0.1.0` 目前不支援帳號登入或匯入 Cookie；需要登入之成人或私人內容將回傳錯誤提示。
 - **DRM 保護內容：** 本工具嚴格遵守原則，不提供任何 DRM 繞過或破解功能。
 - **非單一檔案 / 播放清單：** 目前版本僅支援單一影片／音訊下載，尚未支援播放清單批次佇列。
+- **Threads 畫質選項：** `v0.1.0` 僅提供「最佳畫質」與「僅音訊」，避免在 Threads 頁面資料無穩定畫質對應時顯示無法保證的 1080p／720p 選項。
+- **16 KB page size：** 目前 `youtubedl-android 0.18.1` 內含的部分 FFmpeg/WebP native library 仍可能只有 4 KB ELF alignment；在採用 16 KB memory page 的 Android 裝置上，FFmpeg 合併／轉檔功能尚未宣告相容，正式廣泛發布前仍需上游修正或實機驗證。
 
 ---
 

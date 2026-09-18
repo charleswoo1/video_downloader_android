@@ -23,7 +23,7 @@ class App : Application() {
         try {
             YoutubeDL.getInstance().init(this)
             DownloadRepository.isInitialized = true
-            val activeVer = YoutubeDL.getInstance().version(this) ?: "bundled"
+            val activeVer = DownloadRepository.refreshRuntimeVersion() ?: "bundled"
             Log.i(TAG, "[Diagnostics] YoutubeDL initialized successfully, active version: $activeVer")
             CoroutineScope(Dispatchers.IO).launch {
                 try {

@@ -11,6 +11,9 @@ object DownloadRepository {
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
+    private val _runtimeVersion = MutableStateFlow<String?>(null)
+    val runtimeVersion: StateFlow<String?> = _runtimeVersion.asStateFlow()
+
     private var engine: DownloadEngine? = null
     private var storage: DownloadStorage? = null
     var isInitialized: Boolean = false
@@ -69,25 +72,35 @@ object DownloadRepository {
         finishDownload()
     }
 
-    fun cancel() {
-        requestCancel()
-        completeCancellation()
-    }
-
     fun clearTerminalState() {
         val current = _downloadState.value
         if (current is DownloadState.Completed || current is DownloadState.Failed || current is DownloadState.Cancelled) {
             _downloadState.value = DownloadState.Idle
-            finishDownload()
         }
     }
 
+    fun refreshRuntimeVersion(): String? {
+        val version = engine?.getRuntimeVersion()
+        _runtimeVersion.value = version
+        return version
+    }
+
     fun getRuntimeVersion(): String? {
-        return engine?.getRuntimeVersion()
+        return _runtimeVersion.value ?: refreshRuntimeVersion()
     }
 
     suspend fun updateRuntime(): Result<String> {
-        return engine?.updateRuntime() ?: Result.failure(IllegalStateException("DownloadEngine is not initialized"))
+        val currentEngine = engine
+            ?: return Result.failure(IllegalStateException("DownloadEngine is not initialized"))
+
+        val result = currentEngine.updateRuntime()
+        val activeVersion = currentEngine.getRuntimeVersion()
+        _runtimeVersion.value = activeVersion
+
+        return result.fold(
+            onSuccess = { Result.success(activeVersion ?: it) },
+            onFailure = { Result.failure(it) }
+        )
     }
 
     fun reset() {

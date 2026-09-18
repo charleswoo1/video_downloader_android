@@ -247,7 +247,7 @@ class DownloadService : Service() {
                     }
                 )
 
-                if (executionId != currentExecutionId) return@launch
+                if (executionId != currentExecutionId) return
 
                 downloadResult.onSuccess { tempFile ->
                     if (executionId != currentExecutionId) return@onSuccess

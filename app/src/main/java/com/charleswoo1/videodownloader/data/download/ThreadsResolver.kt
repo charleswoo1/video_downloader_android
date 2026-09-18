@@ -2,6 +2,7 @@ package com.charleswoo1.videodownloader.data.download
 
 import android.content.Context
 import android.util.Log
+import com.charleswoo1.videodownloader.data.download.meta.MetaFfmpegHelper
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.Platform
@@ -645,58 +646,10 @@ class ThreadsResolver(private val context: Context? = null) {
     }
 
     private fun extractAudioWithFFmpeg(source: File, target: File): Boolean {
-        val ctx = context ?: return false
-        return try {
-            val ffmpegDir = File(ctx.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-            val ffmpegBin = File(ffmpegDir, "ffmpeg")
-            if (!ffmpegBin.exists()) return false
-            ffmpegBin.setExecutable(true)
-
-            val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
-            val pb = ProcessBuilder(
-                ffmpegBin.absolutePath,
-                "-y",
-                "-i", source.absolutePath,
-                "-vn",
-                "-c:a", "libmp3lame",
-                "-q:a", "2",
-                target.absolutePath
-            )
-            pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:${ffmpegDir.absolutePath}"
-            val process = pb.start()
-            val exit = process.waitFor()
-            exit == 0
-        } catch (e: Exception) {
-            Log.w(TAG, "FFmpeg audio extraction failed", e)
-            false
-        }
+        return MetaFfmpegHelper.extractAudio(context, source, target)
     }
 
     private fun mergeVideoAndAudioWithFFmpeg(video: File, audio: File, target: File): Boolean {
-        val ctx = context ?: return false
-        return try {
-            val ffmpegDir = File(ctx.noBackupFilesDir, "youtubedl-android/packages/ffmpeg")
-            val ffmpegBin = File(ffmpegDir, "ffmpeg")
-            if (!ffmpegBin.exists()) return false
-            ffmpegBin.setExecutable(true)
-
-            val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
-            val pb = ProcessBuilder(
-                ffmpegBin.absolutePath,
-                "-y",
-                "-i", video.absolutePath,
-                "-i", audio.absolutePath,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                target.absolutePath
-            )
-            pb.environment()["LD_LIBRARY_PATH"] = "$nativeLibDir:${ffmpegDir.absolutePath}"
-            val process = pb.start()
-            val exit = process.waitFor()
-            exit == 0
-        } catch (e: Exception) {
-            Log.w(TAG, "FFmpeg merge failed", e)
-            false
-        }
+        return MetaFfmpegHelper.mergeVideoAndAudio(context, video, audio, target)
     }
 }

@@ -1,5 +1,8 @@
 package com.charleswoo1.videodownloader.data.download.meta
 
+import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
+import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
+import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -163,30 +166,43 @@ class NativeThreadsEngineTest {
         assertTrue("Should contain 1080 resolution", media.heights.contains(1080))
     }
 
-    private class FakeThreadsWebClient(
+    private class FakePlatformHttpSession(
         private val browserHtml: String = "",
+        private val mobileHtml: String = "",
         private val crawlerHtml: String = "",
         private val downloadSuccess: Boolean = true
-    ) : MetaWebClient() {
-        var browserFetchCount = 0
+    ) : PlatformHttpSession() {
+        var desktopFetchCount = 0
+        var mobileFetchCount = 0
         var crawlerFetchCount = 0
         var downloadedDestinations = mutableListOf<java.io.File>()
 
         override fun fetch(
             url: String,
             profile: RequestProfile,
+            identity: BrowserIdentity,
+            origin: String?,
+            referer: String?,
             customHeaders: Map<String, String>,
-            followRedirects: Boolean
+            followRedirects: Boolean,
+            body: ByteArray?,
+            contentType: String?,
+            method: String
         ): Result<HttpResponse> {
             return when (profile) {
-                RequestProfile.BROWSER -> {
-                    browserFetchCount++
+                RequestProfile.DESKTOP_NAVIGATION -> {
+                    desktopFetchCount++
                     Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
                 }
-                RequestProfile.CRAWLER -> {
+                RequestProfile.MOBILE_NAVIGATION -> {
+                    mobileFetchCount++
+                    Result.success(HttpResponse(200, url, mobileHtml, emptyMap()))
+                }
+                RequestProfile.CRAWLER_NAVIGATION -> {
                     crawlerFetchCount++
                     Result.success(HttpResponse(200, url, crawlerHtml, emptyMap()))
                 }
+                else -> Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
             }
         }
 
@@ -212,14 +228,15 @@ class NativeThreadsEngineTest {
         val browserHtml = loadFixture("malformed.html")
         val crawlerHtml = loadFixture("target_post_video_versions.html")
 
-        val fakeWebClient = FakeThreadsWebClient(browserHtml = browserHtml, crawlerHtml = crawlerHtml)
-        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = browserHtml, mobileHtml = browserHtml, crawlerHtml = crawlerHtml)
+        val customEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZtargetPost")
 
         assertTrue("Expected extraction to succeed after crawler retry", result.isSuccess)
-        assertEquals(1, fakeWebClient.browserFetchCount)
-        assertEquals("Crawler MUST be retried once on technical failure even with non-empty HTML", 1, fakeWebClient.crawlerFetchCount)
+        assertEquals(1, fakeSession.desktopFetchCount)
+        assertEquals(1, fakeSession.mobileFetchCount)
+        assertEquals("Crawler MUST be retried once on technical failure even with non-empty HTML", 1, fakeSession.crawlerFetchCount)
         val mediaInfo = result.getOrNull()
         assertEquals("Check out this Threads video", mediaInfo?.title)
     }
@@ -228,22 +245,22 @@ class NativeThreadsEngineTest {
     fun extractMediaInfo_noCrawlerRetryOnRestriction() = kotlinx.coroutines.runBlocking {
         // HTML containing deleted / private marker
         val restrictedHtml = "<html><body>Sorry, this page isn't available.</body></html>"
-        val fakeWebClient = FakeThreadsWebClient(browserHtml = restrictedHtml, crawlerHtml = "not used")
-        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = restrictedHtml, crawlerHtml = "not used")
+        val customEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZdeleted")
 
         assertTrue("Expected failure on restriction", result.isFailure)
         val error = result.exceptionOrNull()
         assertTrue(error is MetaExtractionError.Restricted)
-        assertEquals(1, fakeWebClient.browserFetchCount)
-        assertEquals("Crawler MUST NOT be retried on restriction", 0, fakeWebClient.crawlerFetchCount)
+        assertEquals(1, fakeSession.desktopFetchCount)
+        assertEquals("Crawler MUST NOT be retried on restriction", 0, fakeSession.crawlerFetchCount)
     }
 
     @Test
     fun download_dashMergeFailure_deletesTempFilesAndReturnsFailure() = kotlinx.coroutines.runBlocking {
-        val fakeWebClient = FakeThreadsWebClient(downloadSuccess = true)
-        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(downloadSuccess = true)
+        val customEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
         val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_dash_${System.currentTimeMillis()}")
         tempDir.mkdirs()
 
@@ -278,8 +295,8 @@ class NativeThreadsEngineTest {
 
     @Test
     fun download_audioOnly_usesSeparateSourceFileAndFailsOnFfmpegError() = kotlinx.coroutines.runBlocking {
-        val fakeWebClient = FakeThreadsWebClient(downloadSuccess = true)
-        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(downloadSuccess = true)
+        val customEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
         val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_audio_${System.currentTimeMillis()}")
         tempDir.mkdirs()
 
@@ -299,8 +316,8 @@ class NativeThreadsEngineTest {
             val result = customEngine.download(request, tempDir, { _, _, _ -> }, {})
 
             assertTrue("FFmpeg extraction failure must result in failure", result.isFailure)
-            assertTrue("Must have downloaded stream to temp source", fakeWebClient.downloadedDestinations.isNotEmpty())
-            val downloadedSource = fakeWebClient.downloadedDestinations.first()
+            assertTrue("Must have downloaded stream to temp source", fakeSession.downloadedDestinations.isNotEmpty())
+            val downloadedSource = fakeSession.downloadedDestinations.first()
             assertTrue("Source file MUST use .source.mp4 naming", downloadedSource.name.endsWith(".source.mp4"))
             assertFalse("Source temporary file must be cleaned up", downloadedSource.exists())
 
@@ -314,8 +331,8 @@ class NativeThreadsEngineTest {
     @Test
     fun buildQualityOptions_mapsResolutionTiersToExactRenditionUrls() = kotlinx.coroutines.runBlocking {
         val html = loadFixture("target_post_video_versions.html")
-        val fakeWebClient = FakeThreadsWebClient(browserHtml = html)
-        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = html)
+        val customEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZtargetPost")
         assertTrue(result.isSuccess)

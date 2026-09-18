@@ -50,8 +50,27 @@ try {
 
     Write-Host "Patching gradle configuration for build reproducibility..."
     (Get-Content "buildSrc\build.gradle.kts") -replace '8\.13\.0', '8.9.1' | Set-Content "buildSrc\build.gradle.kts"
-    (Get-Content "build.gradle.kts") -replace '8\.13\.0', '8.9.1' -replace 'kotlin_version by extra\("1.7.22"\)', 'kotlin_version by extra("2.0.21")' | Where-Object { $_ -notmatch 'jcenter' -and $_ -notmatch 'bintray' } | Set-Content "build.gradle.kts"
     (Get-Content "settings.gradle.kts") | Where-Object { $_ -notmatch 'jcenter' } | Set-Content "settings.gradle.kts"
+
+    $bg = Get-Content "build.gradle.kts" -Raw
+    $bg = $bg -replace '8\.13\.0', '8.9.1'
+    $bg = $bg -replace 'kotlin_version by extra\("1.7.22"\)', 'kotlin_version by extra("2.0.21")'
+    $bg = [regex]::Replace($bg, '(?s)maven\s*\{[^}]*(?:jcenter|bintray)[^}]*\}', '')
+    Set-Content -Path "build.gradle.kts" -Value $bg -NoNewline
+
+    # Sanity validation on build.gradle.kts
+    $checkBg = Get-Content "build.gradle.kts" -Raw
+    if ($checkBg -match 'jcenter' -or $checkBg -match 'bintray') {
+        throw "Sanity validation failed: jcenter or bintray still present in build.gradle.kts"
+    }
+    $mavenBlocks = [regex]::Matches($checkBg, '(?s)maven\s*\{([^}]*)\}')
+    foreach ($m in $mavenBlocks) {
+        $body = $m.Groups[1].Value
+        if ($body -notmatch 'url' -and $body -notmatch 'uri') {
+            throw "Sanity validation failed: URL-less maven repository block found: $($m.Value)"
+        }
+    }
+    Write-Host "Sanity validation passed: build.gradle.kts contains no empty/URL-less maven repositories."
 
     $opt = @"
     compileOptions {

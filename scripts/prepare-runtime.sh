@@ -39,11 +39,31 @@ echo "yt-dlp checksum verified: ${ACTUAL_SHA256}"
 
 echo "Patching gradle configuration for build reproducibility..."
 sed -i 's/8\.13\.0/8.9.1/g' buildSrc/build.gradle.kts
-sed -i 's/8\.13\.0/8.9.1/g' build.gradle.kts
-sed -i 's/kotlin_version by extra("1.7.22")/kotlin_version by extra("2.0.21")/g' build.gradle.kts
-sed -i '/jcenter/d' build.gradle.kts || true
-sed -i '/bintray/d' build.gradle.kts || true
 sed -i '/jcenter/d' settings.gradle.kts || true
+
+python3 -c "
+import re, sys
+
+content = open('build.gradle.kts').read()
+content = content.replace('8.13.0', '8.9.1')
+content = content.replace('kotlin_version by extra(\"1.7.22\")', 'kotlin_version by extra(\"2.0.21\")')
+# Remove entire legacy JCenter maven block
+content = re.sub(r'(?s)maven\s*\{[^}]*(?:jcenter|bintray)[^}]*\}', '', content)
+open('build.gradle.kts', 'w').write(content)
+
+# Sanity validation: ensure no jcenter/bintray and no URL-less maven blocks
+if 'jcenter' in content or 'bintray' in content:
+    print('ERROR: jcenter/bintray still present in build.gradle.kts', file=sys.stderr)
+    sys.exit(1)
+
+for m in re.finditer(r'(?s)maven\s*\{([^}]*)\}', content):
+    body = m.group(1)
+    if 'url' not in body and 'uri' not in body:
+        print(f'ERROR: URL-less maven repository block found: {m.group(0)}', file=sys.stderr)
+        sys.exit(1)
+
+print('Sanity validation passed: build.gradle.kts has no empty or URL-less maven blocks.')
+"
 
 for mod in common library ffmpeg; do
     python3 -c "

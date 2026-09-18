@@ -125,4 +125,21 @@ class NativeXEngineTest {
         assertEquals("https://video.twimg.com/ext_tw_video/567/pu/vid/720x1280/fallback_video.mp4", media?.renditions?.firstOrNull()?.url)
         assertEquals(1280000, media?.renditions?.firstOrNull()?.width)
     }
+
+    @Test
+    fun generateTransactionId_returnsSlashSeparatedBase64Parts() {
+        val txId = NativeXEngine.generateTransactionId()
+        assertEquals("Transaction ID must be 34 characters (22 base64 + '/' + 11 base64)", 34, txId.length)
+        assertEquals("Separator at index 22 must be '/'", '/', txId[22])
+
+        val part1 = txId.substring(0, 22)
+        val part2 = txId.substring(23)
+        assertEquals(22, part1.length)
+        assertEquals(11, part2.length)
+
+        val decoded1 = java.util.Base64.getDecoder().decode(part1)
+        val decoded2 = java.util.Base64.getDecoder().decode(part2)
+        assertEquals(16, decoded1.size)
+        assertEquals(8, decoded2.size)
+    }
 }

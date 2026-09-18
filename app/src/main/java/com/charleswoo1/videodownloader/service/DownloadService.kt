@@ -110,48 +110,48 @@ class DownloadService : Service() {
 
     private fun startOrRestartDownload(request: DownloadRequest, startId: Int) {
         val currentState = DownloadRepository.downloadState.value
-        val isActivelyRunning = downloadJob?.isActive == true &&
-                (currentState is DownloadState.Downloading ||
-                 currentState is DownloadState.Preparing ||
-                 currentState is DownloadState.PostProcessing)
-
-        if (isActivelyRunning) {
-            Log.w(TAG, "Download already actively running; ignoring duplicate start request")
+        if (DownloadRepository.isDownloadActive() ||
+            downloadJob?.isActive == true ||
+            currentState is DownloadState.Cancelling
+        ) {
+            Log.w(TAG, "Download lifecycle is still active; ignoring duplicate/restart request")
             return
         }
 
-        val oldJob = downloadJob
+        if (!DownloadRepository.tryStartDownload()) {
+            Log.w(TAG, "Download repository rejected duplicate start request")
+            return
+        }
+
         val executionId = ++currentExecutionId
-
-        DownloadRepository.markDownloadStarted()
-
         downloadJob = serviceScope.launch {
-            if (oldJob != null && oldJob.isActive) {
-                DownloadRepository.updateState(DownloadState.Cancelling)
-                DownloadRepository.getEngine(this@DownloadService).cancelDownload()
-                oldJob.cancelAndJoin()
-            }
-
-            if (executionId != currentExecutionId) {
-                return@launch
-            }
-
             executeDownload(request, executionId, startId)
         }
     }
 
     private fun handleCancel(startId: Int? = null) {
-        val executionId = ++currentExecutionId
-        DownloadRepository.requestCancel()
+        if (DownloadRepository.downloadState.value is DownloadState.Cancelling) {
+            Log.d(TAG, "Cancellation already in progress; ignoring duplicate cancel request")
+            return
+        }
+
         val jobToCancel = downloadJob
-        downloadJob = null
+        if (jobToCancel == null || !DownloadRepository.isDownloadActive()) {
+            Log.d(TAG, "No active download job to cancel")
+            return
+        }
+
+        val cancellationId = ++currentExecutionId
+        DownloadRepository.requestCancel()
 
         serviceScope.launch {
             try {
-                DownloadRepository.getEngine(this@DownloadService).cancelDownload()
-                jobToCancel?.cancelAndJoin()
+                jobToCancel.cancelAndJoin()
             } finally {
-                if (executionId == currentExecutionId) {
+                if (cancellationId == currentExecutionId) {
+                    if (downloadJob === jobToCancel) {
+                        downloadJob = null
+                    }
                     DownloadRepository.completeCancellation()
                     stopForegroundSafely()
                     if (startId != null) {
@@ -167,16 +167,18 @@ class DownloadService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) {
         super.onTimeout(startId, fgsType)
         Log.w(TAG, "Foreground service timed out for fgsType $fgsType, startId $startId")
-        val executionId = ++currentExecutionId
+        val timeoutId = ++currentExecutionId
         val jobToCancel = downloadJob
-        downloadJob = null
+        DownloadRepository.getEngine(this@DownloadService).cancelDownload()
 
         serviceScope.launch {
             try {
-                DownloadRepository.getEngine(this@DownloadService).cancelDownload()
                 jobToCancel?.cancelAndJoin()
             } finally {
-                if (executionId == currentExecutionId) {
+                if (timeoutId == currentExecutionId) {
+                    if (downloadJob === jobToCancel) {
+                        downloadJob = null
+                    }
                     DownloadRepository.finishDownload()
                     DownloadRepository.updateState(
                         DownloadState.Failed(getString(R.string.error_download_timeout))
@@ -189,7 +191,7 @@ class DownloadService : Service() {
         }
     }
 
-    private fun executeDownload(
+    private suspend fun executeDownload(
         request: DownloadRequest,
         executionId: Long,
         startId: Int
@@ -206,94 +208,93 @@ class DownloadService : Service() {
             )
         )
 
-        downloadJob = serviceScope.launch {
-            try {
-                if (executionId != currentExecutionId) return@launch
+        try {
+            if (executionId != currentExecutionId) return
 
-                DownloadRepository.updateState(DownloadState.Preparing)
-                val engine = DownloadRepository.getEngine(this@DownloadService)
-                val storage = DownloadRepository.getStorage(this@DownloadService)
+            DownloadRepository.updateState(DownloadState.Preparing)
+            val engine = DownloadRepository.getEngine(this@DownloadService)
+            val storage = DownloadRepository.getStorage(this@DownloadService)
 
-                val downloadResult = engine.download(
-                    request = request,
-                    destDir = sessionDir,
-                    onProgress = { progress, etaSeconds, speedText ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Downloading(progress, etaSeconds, speedText)
+            val downloadResult = engine.download(
+                request = request,
+                destDir = sessionDir,
+                onProgress = { progress, etaSeconds, speedText ->
+                    if (executionId == currentExecutionId) {
+                        DownloadRepository.updateState(
+                            DownloadState.Downloading(progress, etaSeconds, speedText)
+                        )
+                        notificationManager.notify(
+                            NOTIFICATION_ID,
+                            buildProgressNotification(
+                                request.title,
+                                progress.toInt(),
+                                speedText,
+                                getString(R.string.progress_format, progress)
                             )
-                            notificationManager.notify(
-                                NOTIFICATION_ID,
-                                buildProgressNotification(
-                                    request.title,
-                                    progress.toInt(),
-                                    speedText,
-                                    getString(R.string.progress_format, progress)
-                                )
-                            )
-                        }
-                    },
-                    onStatus = { statusText ->
-                        if (executionId == currentExecutionId) {
-                            if (statusText.contains("合併") || statusText.contains("後製")) {
-                                DownloadRepository.updateState(DownloadState.PostProcessing)
-                            }
-                            notificationManager.notify(
-                                NOTIFICATION_ID,
-                                buildIndeterminateNotification(request.title, statusText)
-                            )
-                        }
+                        )
                     }
-                )
-
-                if (executionId != currentExecutionId) return@launch
-
-                downloadResult.onSuccess { tempFile ->
-                    if (executionId != currentExecutionId) return@onSuccess
-
-                    DownloadRepository.updateState(DownloadState.PostProcessing)
-                    val saveResult = storage.saveToDownloads(tempFile, request.title)
-                    saveResult.onSuccess { saved ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Completed(
-                                    fileName = saved.fileName,
-                                    contentUri = saved.uri,
-                                    filePath = saved.absolutePath
-                                )
-                            )
-                            showCompletionNotification(request.title, saved.fileName)
+                },
+                onStatus = { statusText ->
+                    if (executionId == currentExecutionId) {
+                        if (statusText.contains("合併") || statusText.contains("後製")) {
+                            DownloadRepository.updateState(DownloadState.PostProcessing)
                         }
-                    }.onFailure { error ->
-                        if (executionId == currentExecutionId) {
-                            DownloadRepository.updateState(
-                                DownloadState.Failed("儲存檔案失敗: ${error.message}")
+                        notificationManager.notify(
+                            NOTIFICATION_ID,
+                            buildIndeterminateNotification(request.title, statusText)
+                        )
+                    }
+                }
+            )
+
+            if (executionId != currentExecutionId) return
+
+            downloadResult.onSuccess { tempFile ->
+                if (executionId != currentExecutionId) return@onSuccess
+
+                DownloadRepository.updateState(DownloadState.PostProcessing)
+                val saveResult = storage.saveToDownloads(tempFile, request.title)
+                saveResult.onSuccess { saved ->
+                    if (executionId == currentExecutionId) {
+                        DownloadRepository.updateState(
+                            DownloadState.Completed(
+                                fileName = saved.fileName,
+                                contentUri = saved.uri,
+                                filePath = saved.absolutePath
                             )
-                            showFailureNotification(request.title, "儲存失敗: ${error.message}")
-                        }
+                        )
+                        showCompletionNotification(request.title, saved.fileName)
                     }
                 }.onFailure { error ->
                     if (executionId == currentExecutionId) {
-                        if (error is InterruptedException ||
-                            DownloadRepository.downloadState.value is DownloadState.Cancelling ||
-                            DownloadRepository.downloadState.value is DownloadState.Cancelled
-                        ) {
-                            Log.d(TAG, "Download $executionId was cancelled; skipping error alert")
-                        } else {
-                            DownloadRepository.updateState(
-                                DownloadState.Failed(error.message ?: "下載失敗")
-                            )
-                            showFailureNotification(request.title, error.message ?: "下載失敗")
-                        }
+                        DownloadRepository.updateState(
+                            DownloadState.Failed("儲存檔案失敗: ${error.message}")
+                        )
+                        showFailureNotification(request.title, "儲存失敗: ${error.message}")
                     }
                 }
-            } finally {
-                sessionDir.deleteRecursively()
+            }.onFailure { error ->
                 if (executionId == currentExecutionId) {
-                    DownloadRepository.finishDownload()
-                    stopForegroundSafely()
-                    stopSelf(startId)
+                    if (error is InterruptedException ||
+                        DownloadRepository.downloadState.value is DownloadState.Cancelling ||
+                        DownloadRepository.downloadState.value is DownloadState.Cancelled
+                    ) {
+                        Log.d(TAG, "Download $executionId was cancelled; skipping error alert")
+                    } else {
+                        DownloadRepository.updateState(
+                            DownloadState.Failed(error.message ?: "下載失敗")
+                        )
+                        showFailureNotification(request.title, error.message ?: "下載失敗")
+                    }
                 }
+            }
+        } finally {
+            sessionDir.deleteRecursively()
+            if (executionId == currentExecutionId) {
+                DownloadRepository.finishDownload()
+                downloadJob = null
+                stopForegroundSafely()
+                stopSelf(startId)
             }
         }
     }

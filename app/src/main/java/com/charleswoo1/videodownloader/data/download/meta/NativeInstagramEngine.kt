@@ -17,7 +17,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
@@ -68,18 +67,67 @@ class NativeInstagramEngine(
         }
 
         /**
+         * Decodes XML entities like &amp;, &quot;, &lt;, &gt;, &apos;.
+         */
+        fun unescapeXml(text: String): String {
+            return text
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&apos;", "'")
+        }
+
+        /**
+         * RFC 3986 compliant percent-decoder:
+         * Decodes %XX sequences as UTF-8 bytes while strictly preserving literal '+' characters
+         * to avoid corrupting signed Meta CDN security query parameters (e.g. stkn, sig).
+         */
+        fun percentDecode(input: String): String {
+            val out = StringBuilder(input.length)
+            val byteBuf = java.io.ByteArrayOutputStream()
+            var i = 0
+            val n = input.length
+            while (i < n) {
+                val c = input[i]
+                if (c == '%' && i + 2 < n) {
+                    val d1 = Character.digit(input[i + 1], 16)
+                    val d2 = Character.digit(input[i + 2], 16)
+                    if (d1 != -1 && d2 != -1) {
+                        byteBuf.write((d1 shl 4) or d2)
+                        i += 3
+                        continue
+                    }
+                }
+                if (byteBuf.size() > 0) {
+                    out.append(byteBuf.toString("UTF-8"))
+                    byteBuf.reset()
+                }
+                out.append(c)
+                i++
+            }
+            if (byteBuf.size() > 0) {
+                out.append(byteBuf.toString("UTF-8"))
+                byteBuf.reset()
+            }
+            return out.toString()
+        }
+
+        /**
          * Normalizes Meta CDN URLs per 2Xsave/insave:
          * 1. Unescapes slashes (\/ -> /)
-         * 2. Decodes \uXXXX unicode escapes across entire URL
-         * 3. Decodes percent-encoded components
+         * 2. Unescapes XML entities (&amp; -> &)
+         * 3. Decodes \uXXXX unicode escapes across entire URL
+         * 4. Decodes percent-encoded components preserving literal '+'
          */
         fun normalizeCdnUrl(rawUrl: String): String {
             val unescapedSlashes = rawUrl.replace("\\/", "/")
+            val xmlUnescaped = unescapeXml(unescapedSlashes)
             val sb = StringBuilder()
             var i = 0
-            while (i < unescapedSlashes.length) {
-                if (unescapedSlashes[i] == '\\' && i + 5 < unescapedSlashes.length && unescapedSlashes[i + 1] == 'u') {
-                    val hex = unescapedSlashes.substring(i + 2, i + 6)
+            while (i < xmlUnescaped.length) {
+                if (xmlUnescaped[i] == '\\' && i + 5 < xmlUnescaped.length && xmlUnescaped[i + 1] == 'u') {
+                    val hex = xmlUnescaped.substring(i + 2, i + 6)
                     val code = hex.toIntOrNull(16)
                     if (code != null) {
                         sb.append(code.toChar())
@@ -87,15 +135,11 @@ class NativeInstagramEngine(
                         continue
                     }
                 }
-                sb.append(unescapedSlashes[i])
+                sb.append(xmlUnescaped[i])
                 i++
             }
             val unicodeDecoded = sb.toString()
-            return try {
-                URLDecoder.decode(unicodeDecoded, "UTF-8")
-            } catch (_: Exception) {
-                unicodeDecoded
-            }
+            return percentDecode(unicodeDecoded)
         }
 
         /**
@@ -239,6 +283,22 @@ class NativeInstagramEngine(
                 if (raw.startsWith("{")) {
                     val ld = JSONObject(raw)
                     if (ld.optString("@type") == "VideoObject") {
+                        val candidateIdentifiers = listOf(
+                            ld.optString("url"),
+                            ld.optString("contentUrl"),
+                            ld.optString("embedUrl"),
+                            ld.optString("@id")
+                        )
+                        val belongsToTarget = candidateIdentifiers.any { identifier ->
+                            identifier.isNotBlank() && (
+                                identifier.contains(targetShortcode) ||
+                                (targetId > 0 && identifier.contains(targetId.toString()))
+                            )
+                        }
+                        if (!belongsToTarget) {
+                            continue
+                        }
+
                         val contentUrl = normalizeCdnUrl(ld.optString("contentUrl"))
                         if (contentUrl.isNotBlank() && isMetaVideoUrl(contentUrl)) {
                             val title = ld.optString("name").ifBlank {
@@ -288,11 +348,13 @@ class NativeInstagramEngine(
             if (xdt != null) {
                 val items = xdt.optJSONArray("items")
                 if (items != null && items.length() > 0) {
-                    val item = items.optJSONObject(0)
-                    if (item != null) {
+                    for (i in 0 until items.length()) {
+                        val item = items.optJSONObject(i) ?: continue
                         val code = item.optString("code").ifBlank { item.optString("shortcode") }
                         val id = item.optString("id").ifBlank { item.optString("pk") }
-                        if (code.isBlank() || code == shortcode || (targetId > 0 && id.startsWith(targetId.toString()))) {
+                        val isCodeMatch = code.isNotBlank() && code == shortcode
+                        val isIdMatch = targetId > 0 && id.isNotBlank() && (id == targetId.toString() || id.startsWith(targetId.toString()))
+                        if (isCodeMatch || isIdMatch) {
                             return item
                         }
                     }

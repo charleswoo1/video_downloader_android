@@ -53,9 +53,74 @@ class ThreadsResolver(private val context: Context? = null) {
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
         private val DASH_ADAPTATION_PATTERN = Pattern.compile(
-            """<AdaptationSet\b(?<attrs>[^>]*)>(?<body>.*?)</AdaptationSet\s*>""",
+            """<AdaptationSet\b([^>]*)>(.*?)</AdaptationSet\s*>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
+        private val DASH_REPRESENTATION_PATTERN = Pattern.compile(
+            """<Representation\b([^>]*)>(.*?)</Representation\s*>""",
+            Pattern.CASE_INSENSITIVE or Pattern.DOTALL
+        )
+
+        fun unescapeXml(text: String): String {
+            return text
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&apos;", "'")
+        }
+
+        fun percentDecode(input: String): String {
+            val out = StringBuilder(input.length)
+            val byteBuf = java.io.ByteArrayOutputStream()
+            var i = 0
+            val n = input.length
+            while (i < n) {
+                val c = input[i]
+                if (c == '%' && i + 2 < n) {
+                    val d1 = Character.digit(input[i + 1], 16)
+                    val d2 = Character.digit(input[i + 2], 16)
+                    if (d1 != -1 && d2 != -1) {
+                        byteBuf.write((d1 shl 4) or d2)
+                        i += 3
+                        continue
+                    }
+                }
+                if (byteBuf.size() > 0) {
+                    out.append(byteBuf.toString("UTF-8"))
+                    byteBuf.reset()
+                }
+                out.append(c)
+                i++
+            }
+            if (byteBuf.size() > 0) {
+                out.append(byteBuf.toString("UTF-8"))
+                byteBuf.reset()
+            }
+            return out.toString()
+        }
+
+        fun normalizeCdnUrl(rawUrl: String): String {
+            val unescapedSlashes = rawUrl.replace("\\/", "/")
+            val xmlUnescaped = unescapeXml(unescapedSlashes)
+            val sb = StringBuilder()
+            var i = 0
+            while (i < xmlUnescaped.length) {
+                if (xmlUnescaped[i] == '\\' && i + 5 < xmlUnescaped.length && xmlUnescaped[i + 1] == 'u') {
+                    val hex = xmlUnescaped.substring(i + 2, i + 6)
+                    val code = hex.toIntOrNull(16)
+                    if (code != null) {
+                        sb.append(code.toChar())
+                        i += 6
+                        continue
+                    }
+                }
+                sb.append(xmlUnescaped[i])
+                i++
+            }
+            val unicodeDecoded = sb.toString()
+            return percentDecode(unicodeDecoded)
+        }
     }
 
     private val isCancelled = AtomicBoolean(false)
@@ -446,43 +511,103 @@ class ThreadsResolver(private val context: Context? = null) {
     }
 
     private fun decodeUrl(value: String): String {
-        return value.replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
+        return normalizeCdnUrl(value)
     }
 
-    fun parseDashManifest(manifest: String): Pair<String?, String?> {
-        val decoded = decodeUrl(manifest)
-        var videoUrl: String? = null
-        var audioUrl: String? = null
+    private data class DashCandidate(
+        val url: String,
+        val width: Int = 0,
+        val height: Int = 0,
+        val bandwidth: Long = 0L
+    )
 
-        val adaptationMatcher = DASH_ADAPTATION_PATTERN.matcher(decoded)
+    fun parseDashManifest(manifest: String): Pair<String?, String?> {
+        val videoCandidates = mutableListOf<DashCandidate>()
+        val audioCandidates = mutableListOf<DashCandidate>()
+
+        val adaptationMatcher = DASH_ADAPTATION_PATTERN.matcher(manifest)
         while (adaptationMatcher.find()) {
-            val attrs = adaptationMatcher.group(1) ?: ""
-            val body = adaptationMatcher.group(2) ?: ""
-            val baseMatcher = DASH_BASE_URL_PATTERN.matcher(body)
-            if (baseMatcher.find()) {
-                val rawBase = baseMatcher.group(1)?.trim() ?: ""
-                val url = decodeUrl(rawBase)
-                if (url.startsWith("http")) {
-                    if (attrs.contains("audio") || attrs.contains("audio/mp4")) {
-                        if (audioUrl == null) audioUrl = url
-                    } else {
-                        if (videoUrl == null) videoUrl = url
+            val setAttrs = adaptationMatcher.group(1) ?: ""
+            val setBody = adaptationMatcher.group(2) ?: ""
+
+            val setLowerAttrs = setAttrs.lowercase()
+            val isSetVideo = setLowerAttrs.contains("contenttype=\"video\"") || setLowerAttrs.contains("mimetype=\"video/")
+            val isSetAudio = setLowerAttrs.contains("contenttype=\"audio\"") || setLowerAttrs.contains("mimetype=\"audio/")
+
+            var foundRep = false
+            val repMatcher = DASH_REPRESENTATION_PATTERN.matcher(setBody)
+            while (repMatcher.find()) {
+                foundRep = true
+                val repAttrs = repMatcher.group(1) ?: ""
+                val repBody = repMatcher.group(2) ?: ""
+
+                val repLowerAttrs = repAttrs.lowercase()
+                val isRepVideo = isSetVideo || repLowerAttrs.contains("mimetype=\"video/") || repLowerAttrs.contains("contenttype=\"video\"")
+                val isRepAudio = isSetAudio || repLowerAttrs.contains("mimetype=\"audio/") || repLowerAttrs.contains("contenttype=\"audio\"")
+
+                val width = Regex("""\bwidth\s*=\s*["'](\d+)["']""", RegexOption.IGNORE_CASE).find(repAttrs)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val height = Regex("""\bheight\s*=\s*["'](\d+)["']""", RegexOption.IGNORE_CASE).find(repAttrs)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val bandwidth = Regex("""\bbandwidth\s*=\s*["'](\d+)["']""", RegexOption.IGNORE_CASE).find(repAttrs)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+
+                val baseMatcher = DASH_BASE_URL_PATTERN.matcher(repBody)
+                if (baseMatcher.find()) {
+                    val rawUrl = baseMatcher.group(1)?.trim() ?: ""
+                    if (rawUrl.isNotBlank()) {
+                        val normalized = normalizeCdnUrl(rawUrl)
+                        if (normalized.startsWith("http")) {
+                            val candidate = DashCandidate(normalized, width, height, bandwidth)
+                            if (isRepVideo || (!isRepAudio && (width > 0 || height > 0))) {
+                                videoCandidates.add(candidate)
+                            } else if (isRepAudio) {
+                                audioCandidates.add(candidate)
+                            } else {
+                                if (width > 0 || height > 0) videoCandidates.add(candidate)
+                                else audioCandidates.add(candidate)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!foundRep || (isSetVideo && videoCandidates.isEmpty()) || (isSetAudio && audioCandidates.isEmpty())) {
+                val baseMatcher = DASH_BASE_URL_PATTERN.matcher(setBody)
+                if (baseMatcher.find()) {
+                    val rawUrl = baseMatcher.group(1)?.trim() ?: ""
+                    if (rawUrl.isNotBlank()) {
+                        val normalized = normalizeCdnUrl(rawUrl)
+                        if (normalized.startsWith("http")) {
+                            val candidate = DashCandidate(normalized)
+                            if (isSetVideo && videoCandidates.isEmpty()) videoCandidates.add(candidate)
+                            else if (isSetAudio && audioCandidates.isEmpty()) audioCandidates.add(candidate)
+                        }
                     }
                 }
             }
         }
 
-        if (videoUrl == null) {
-            val anyBase = DASH_BASE_URL_PATTERN.matcher(decoded)
-            if (anyBase.find()) {
-                val rawBase = anyBase.group(1)?.trim() ?: ""
-                videoUrl = decodeUrl(rawBase)
+        if (videoCandidates.isEmpty() && audioCandidates.isEmpty()) {
+            val baseMatcher = DASH_BASE_URL_PATTERN.matcher(manifest)
+            if (baseMatcher.find()) {
+                val rawUrl = baseMatcher.group(1)?.trim() ?: ""
+                if (rawUrl.isNotBlank()) {
+                    val normalized = normalizeCdnUrl(rawUrl)
+                    if (normalized.startsWith("http")) {
+                        videoCandidates.add(DashCandidate(normalized))
+                    }
+                }
             }
         }
 
-        return Pair(videoUrl, audioUrl)
+        val bestVideo = videoCandidates.maxWithOrNull(
+            compareBy<DashCandidate> { it.width * it.height }
+                .thenBy { it.bandwidth }
+        )?.url
+
+        val bestAudio = audioCandidates.maxWithOrNull(
+            compareBy<DashCandidate> { it.bandwidth }
+        )?.url
+
+        return Pair(bestVideo, bestAudio)
     }
 
     suspend fun download(

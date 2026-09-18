@@ -71,6 +71,35 @@ class PlatformHttpSessionTest {
     }
 
     @Test
+    fun platformCookieJar_preservesCookieDomainSemantics_fromSubdomainToParentDomain() {
+        val jar = PlatformCookieJar()
+        val apiUrl = "https://api.x.com/1.1/guest/activate.json".toHttpUrl()
+
+        // Set-Cookie received from api.x.com with Domain=.x.com
+        val cookie = Cookie.Builder()
+            .domain("x.com")
+            .path("/")
+            .name("gt")
+            .value("guest_token_abc_123")
+            .build()
+
+        jar.saveFromResponse(apiUrl, listOf(cookie))
+
+        // NativeXEngine queries getCookieValue("x.com", "gt")
+        val retrievedValue = jar.getCookieValue("x.com", "gt")
+        assertEquals("guest_token_abc_123", retrievedValue)
+
+        // Loading for request to x.com or api.x.com should find the cookie
+        val loadedForXCom = jar.loadForRequest("https://x.com/status/123".toHttpUrl())
+        assertEquals(1, loadedForXCom.size)
+        assertEquals("guest_token_abc_123", loadedForXCom[0].value)
+
+        val loadedForApiXCom = jar.loadForRequest("https://api.x.com/graphql/abc".toHttpUrl())
+        assertEquals(1, loadedForApiXCom.size)
+        assertEquals("guest_token_abc_123", loadedForApiXCom[0].value)
+    }
+
+    @Test
     fun retryPolicy_computesBoundedExponentialDelay() {
         val policy = RetryPolicy(maxRetries = 3, initialBackoffMs = 200L, backoffMultiplier = 2.0, maxBackoffMs = 1000L)
 

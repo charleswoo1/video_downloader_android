@@ -356,4 +356,69 @@ class NativeThreadsEngineTest {
         assertEquals(null, opt480)
         assertEquals(null, opt360)
     }
+
+    @Test
+    fun parseThreadsPage_escapedJsonPayload_extractsSuccessfully() {
+        val html = loadFixture("escaped_json_payload.html")
+        val shortcode = "EscapedPostCode"
+        val canonical = "https://www.threads.com/@escaped_author/post/$shortcode"
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for escaped JSON payload", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertEquals("escaped_author", media.uploader)
+        assertEquals("Video from escaped JSON", media.title)
+        assertTrue(media.progressiveVideoUrls.isNotEmpty())
+        assertEquals("https://threads.net/cdn/escaped_1080.mp4?sig=abc+123&stkn=tok+456", media.progressiveVideoUrls.first())
+    }
+
+    @Test
+    fun parseDashManifest_multipleVideoRepresentations_selectsHighestResolutionAndPreservesLiterals() {
+        val manifest = """
+            <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v480" width="480" height="854" bandwidth="1000000">
+                    <BaseURL>https://threads.net/cdn/v480.mp4?sig=low+res&amp;stkn=tok+1</BaseURL>
+                  </Representation>
+                  <Representation id="v1080" width="1080" height="1920" bandwidth="4500000">
+                    <BaseURL>https://threads.net/cdn/v1080.mp4?sig=high+res%2Bopt&amp;stkn=tok+2</BaseURL>
+                  </Representation>
+                  <Representation id="v720" width="720" height="1280" bandwidth="2200000">
+                    <BaseURL>https://threads.net/cdn/v720.mp4?sig=med+res&amp;stkn=tok+3</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+                <AdaptationSet mimeType="audio/mp4" contentType="audio">
+                  <Representation id="a64" bandwidth="64000">
+                    <BaseURL>https://threads.net/cdn/a64.mp4?token=low</BaseURL>
+                  </Representation>
+                  <Representation id="a128" bandwidth="128000">
+                    <BaseURL>https://threads.net/cdn/a128.mp4?token=high+qual&amp;stkn=tok+4</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        """.trimIndent()
+
+        val (videoUrl, audioUrl) = engine.parseDashManifest(manifest)
+        assertEquals(
+            "Expected 1080p stream with preserved literal '+' and unescaped '&amp;'",
+            "https://threads.net/cdn/v1080.mp4?sig=high+res+opt&stkn=tok+2",
+            videoUrl
+        )
+        assertEquals(
+            "Expected 128k audio stream with preserved literal '+' and unescaped '&amp;'",
+            "https://threads.net/cdn/a128.mp4?token=high+qual&stkn=tok+4",
+            audioUrl
+        )
+    }
+
+    @Test
+    fun normalizeCdnUrl_preservesLiteralPlusInQueryTokens() {
+        val raw = "https:\\/\\/video.fbcdn.net\\/v.mp4?token=abc+def%2B123&amp;stkn=tok+xyz\\u0026name=%E6%B8%AC%E8%A9%A6"
+        val normalized = NativeThreadsEngine.normalizeCdnUrl(raw)
+        assertEquals("https://video.fbcdn.net/v.mp4?token=abc+def+123&stkn=tok+xyz&name=測試", normalized)
+    }
 }

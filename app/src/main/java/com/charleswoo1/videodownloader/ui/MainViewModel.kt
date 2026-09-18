@@ -41,8 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val downloadState: StateFlow<DownloadState> = DownloadRepository.downloadState
 
-    private val _runtimeVersion = MutableStateFlow<String?>(downloadEngine.getRuntimeVersion())
-    val runtimeVersion: StateFlow<String?> = _runtimeVersion.asStateFlow()
+    val runtimeVersion: StateFlow<String?> = DownloadRepository.runtimeVersion
 
     private val _runtimeDiagnostics = MutableStateFlow<RuntimeDiagnostics?>(null)
     val runtimeDiagnostics: StateFlow<RuntimeDiagnostics?> = _runtimeDiagnostics.asStateFlow()
@@ -51,17 +50,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            _runtimeVersion.value = downloadEngine.getRuntimeVersion()
-            _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.inspectRuntime(application)
+            _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.collectDiagnostics(application)
         }
     }
 
     fun onUrlInputChanged(newUrl: String) {
         _urlInput.value = newUrl
+        if (_analysisState.value is AnalysisState.Error) {
+            _analysisState.value = AnalysisState.Idle
+        }
     }
 
     fun onQualitySelected(option: QualityOption) {
         _selectedQuality.value = option
+    }
+
+    fun onEngineTraceDismiss() {
+        // Trace dismissal logic if needed
     }
 
     fun handleSharedText(sharedText: String?) {
@@ -71,16 +76,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val extractedUrl = SharedTextUrlExtractor.extractFirstUrl(sharedText)
         if (extractedUrl != null) {
             _urlInput.value = extractedUrl
-            analyzeCurrentUrl()
+            startAnalysis(extractedUrl)
         } else {
             _analysisState.value = AnalysisState.Error("分享文字中未偵測到有效的 HTTP/HTTPS 影片網址")
         }
     }
 
     fun analyzeCurrentUrl() {
-        val url = _urlInput.value.trim()
+        startAnalysis(_urlInput.value.trim())
+    }
+
+    fun startAnalysis(url: String) {
         if (url.isBlank()) {
-            _analysisState.value = AnalysisState.Error("請先輸入或貼上網址")
+            _analysisState.value = AnalysisState.Error("請輸入有效的影片網址")
             return
         }
 
@@ -104,14 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startDownload(context: Context) {
-        val currentState = downloadState.value
-        val isActivelyDownloading = DownloadRepository.isDownloadActive() &&
-                (currentState is DownloadState.Downloading ||
-                 currentState is DownloadState.Preparing ||
-                 currentState is DownloadState.PostProcessing ||
-                 currentState is DownloadState.Cancelling)
-
-        if (isActivelyDownloading) return
+        if (DownloadRepository.isDownloadActive()) return
 
         val state = _analysisState.value
         if (state !is AnalysisState.Success) return
@@ -127,7 +128,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelDownload(context: Context) {
-        DownloadRepository.requestCancel()
         DownloadService.cancelDownload(context)
     }
 

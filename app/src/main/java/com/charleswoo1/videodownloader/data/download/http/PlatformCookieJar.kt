@@ -15,9 +15,9 @@ class PlatformCookieJar : CookieJar {
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         if (cookies.isEmpty()) return
-        val host = url.host
-        val hostStore = cookieStore.computeIfAbsent(host) { ConcurrentHashMap() }
         for (cookie in cookies) {
+            val domainKey = cookie.domain.removePrefix(".").ifBlank { url.host }
+            val hostStore = cookieStore.computeIfAbsent(domainKey) { ConcurrentHashMap() }
             hostStore[cookie.name] = cookie
         }
     }
@@ -46,17 +46,37 @@ class PlatformCookieJar : CookieJar {
     }
 
     fun getCookieValue(domain: String, name: String): String? {
-        val store = cookieStore[domain] ?: return null
-        val cookie = store[name] ?: return null
-        if (cookie.expiresAt < System.currentTimeMillis()) {
-            store.remove(name)
-            return null
+        val cleanTarget = domain.removePrefix(".")
+        val now = System.currentTimeMillis()
+
+        // 1. Direct domain match
+        val directStore = cookieStore[cleanTarget]
+        val directCookie = directStore?.get(name)
+        if (directCookie != null) {
+            if (directCookie.expiresAt < now) {
+                directStore.remove(name)
+            } else {
+                return directCookie.value
+            }
         }
-        return cookie.value
+
+        // 2. Parent or subdomain match
+        for ((storeDomain, store) in cookieStore) {
+            if (cleanTarget == storeDomain || cleanTarget.endsWith(".$storeDomain") || storeDomain.endsWith(".$cleanTarget")) {
+                val cookie = store[name] ?: continue
+                if (cookie.expiresAt < now) {
+                    store.remove(name)
+                } else {
+                    return cookie.value
+                }
+            }
+        }
+        return null
     }
 
     fun putCookie(url: HttpUrl, cookie: Cookie) {
-        val hostStore = cookieStore.computeIfAbsent(url.host) { ConcurrentHashMap() }
+        val domainKey = cookie.domain.removePrefix(".").ifBlank { url.host }
+        val hostStore = cookieStore.computeIfAbsent(domainKey) { ConcurrentHashMap() }
         hostStore[cookie.name] = cookie
     }
 

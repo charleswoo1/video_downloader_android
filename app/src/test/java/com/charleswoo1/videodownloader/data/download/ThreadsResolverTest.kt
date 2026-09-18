@@ -70,6 +70,33 @@ class ThreadsResolverTest {
     }
 
     @Test
+    fun parseDashManifest_multipleRepresentations_selectsHighestResolutionAndPreservesLiterals() {
+        val manifest = """
+            <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="1" width="720" height="1280" bandwidth="2000000">
+                    <BaseURL>https://video.threads.com/720.mp4?token=med+res&amp;stkn=tok+1</BaseURL>
+                  </Representation>
+                  <Representation id="2" width="1080" height="1920" bandwidth="4500000">
+                    <BaseURL>https://video.threads.com/1080.mp4?token=high+res%2Bopt&amp;stkn=tok+2</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+                <AdaptationSet mimeType="audio/mp4" contentType="audio">
+                  <Representation id="3" bandwidth="128000">
+                    <BaseURL>https://audio.threads.com/dash_audio.mp4?token=aud+128&amp;stkn=tok+3</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        """.trimIndent()
+
+        val (videoUrl, audioUrl) = resolver.parseDashManifest(manifest)
+        assertEquals("https://video.threads.com/1080.mp4?token=high+res+opt&stkn=tok+2", videoUrl)
+        assertEquals("https://audio.threads.com/dash_audio.mp4?token=aud+128&stkn=tok+3", audioUrl)
+    }
+
+    @Test
     fun parseThreadsPage_extractsPostWithProgressiveVideo() {
         val html = """
             <!DOCTYPE html>

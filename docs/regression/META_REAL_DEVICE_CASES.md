@@ -67,8 +67,10 @@ This document records owner-supplied real-device test cases for Threads and Inst
   - If video variants exist, extract highest bitrate video.
 
 ### X-PASS-01
-- **Input URL**: `https://x.com/Twitter/status/1234567890` (Representative video tweet)
-- **Native Engine Goal**: Non-regression verification for public video tweets via GraphQL TweetResultByRestId and highest-bitrate rendition selection.
+- **Input URL**: `https://x.com/Twitter/status/1234567890` (Verified via offline sanitized fixture `video_tweet_graphql.json`)
+- **yt-dlp Baseline Result**: PASS (Baseline)
+- **Native Engine Goal**: Non-regression verification for public video tweets via GraphQL `TweetResultByRestId` and highest-bitrate rendition selection.
+- **Verification Status**: Unit test with offline fixture PASSED; live network extraction marked as `NEEDS OWNER DEVICE TEST`.
 
 ---
 
@@ -76,13 +78,13 @@ This document records owner-supplied real-device test cases for Threads and Inst
 
 | Case ID | Input Shortcode / Status URL | Native Engine Result | yt-dlp Result | Final Engine Route | Notes |
 |---|---|---|---|---|---|
-| `TH-SHARE-PASS-01` | `BAPaySXLil` | PASS | PASS | `NativeThreadsEngine` | Non-regression pass |
-| `TH-SHARE-PASS-02` | `_6syxcd_8` | PASS | PASS | `NativeThreadsEngine` | Non-regression pass |
-| `TH-SHARE-FAIL-PAGEDATA-01` | `_2DcaFS7L` (`DdZEpoeGbro`) | Pending device test | FAIL (page data missing) | `PlatformEngineRouter` | Native extraction attempt |
-| `TH-SHARE-FAIL-PAGEDATA-02` | `BAYRqEnpRR` (`DdY8E2dABUv`) | Pending device test | FAIL (page data missing) | `PlatformEngineRouter` | Native extraction attempt |
-| `IG-PASS-01` | `DdS5sMrxkBq` | PASS | PASS | `NativeInstagramEngine` | Non-regression pass |
-| `IG-EMPTY-MEDIA-01` | `DdXfLoyTs__` | Pending device test | FAIL (empty media) | `PlatformEngineRouter` | Native extraction attempt |
-| `IG-AUDIENCE-01` | `DbtoOl8zwMO` | Audience restriction | Audience restriction | Terminated (no loop) | Expected restriction |
-| `X-CLASSIFY-01` | `2099089385958645960` | Pending device test | `No video could be found` | `NativeXEngine` | Classification test |
-| `X-PASS-01` | Video Tweet | Pending device test | PASS | `NativeXEngine` | Native extraction pass |
+| `TH-SHARE-PASS-01` | `BAPaySXLil` | `NEEDS OWNER DEVICE TEST` | PASS | `NativeThreadsEngine` | Offline fixture verified; requires owner device test |
+| `TH-SHARE-PASS-02` | `_6syxcd_8` | `NEEDS OWNER DEVICE TEST` | PASS | `NativeThreadsEngine` | Offline fixture verified; requires owner device test |
+| `TH-SHARE-FAIL-PAGEDATA-01` | `_2DcaFS7L` (`DdZEpoeGbro`) | `NEEDS OWNER DEVICE TEST` | FAIL (page data missing) | `PlatformEngineRouter` | Native extraction attempt on live device |
+| `TH-SHARE-FAIL-PAGEDATA-02` | `BAYRqEnpRR` (`DdY8E2dABUv`) | `NEEDS OWNER DEVICE TEST` | FAIL (page data missing) | `PlatformEngineRouter` | Native extraction attempt on live device |
+| `IG-PASS-01` | `DdS5sMrxkBq` | `NEEDS OWNER DEVICE TEST` | PASS | `NativeInstagramEngine` | Offline fixture verified; requires owner device test |
+| `IG-EMPTY-MEDIA-01` | `DdXfLoyTs__` | `NEEDS OWNER DEVICE TEST` | FAIL (empty media) | `PlatformEngineRouter` | Offline fixture verified; requires owner device test |
+| `IG-AUDIENCE-01` | `DbtoOl8zwMO` | `NEEDS OWNER DEVICE TEST` | Audience restriction | Terminated (no loop) | Expected restriction; offline fixture verified |
+| `X-CLASSIFY-01` | `2099089385958645960` | `NEEDS OWNER DEVICE TEST` | `No video could be found` | `NativeXEngine` | Classification test; requires owner device test |
+| `X-PASS-01` | `1234567890` (Fixture) | `NEEDS OWNER DEVICE TEST` | PASS | `NativeXEngine` | Offline fixture unit test PASSED; live requires owner device test |
 

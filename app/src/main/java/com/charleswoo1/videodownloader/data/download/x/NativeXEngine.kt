@@ -68,7 +68,7 @@ class NativeXEngine(
             val part1 = java.util.Base64.getEncoder().withoutPadding().encodeToString(b1)
             val b2 = ByteArray(8).apply { SECURE_RANDOM.nextBytes(this) }
             val part2 = java.util.Base64.getEncoder().withoutPadding().encodeToString(b2)
-            return "$part1$part2"
+            return "$part1/$part2"
         }
 
         fun extractBearerTokenFromHtml(html: String): String? {

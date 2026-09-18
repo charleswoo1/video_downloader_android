@@ -18,6 +18,7 @@ object RuntimeDiagnosticsHelper {
     fun getCachedDiagnostics(): RuntimeDiagnostics? = cachedDiagnostics
 
     suspend fun inspectRuntime(context: Context): RuntimeDiagnostics = inspect(context)
+    suspend fun collectDiagnostics(context: Context): RuntimeDiagnostics = inspect(context)
 
     suspend fun inspect(context: Context): RuntimeDiagnostics = withContext(Dispatchers.IO) {
         val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"

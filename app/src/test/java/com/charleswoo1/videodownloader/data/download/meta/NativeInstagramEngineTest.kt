@@ -339,4 +339,93 @@ class NativeInstagramEngineTest {
         assertNotNull(opt720)
         assertEquals("https://instagram.com/cdn/video_720.mp4", opt720?.formatSelector)
     }
+
+    @Test
+    fun normalizeCdnUrl_preservesLiteralPlusAndDecodesEntities() {
+        val raw = "https:\\/\\/scontent.cdninstagram.com\\/o1\\/v\\/t2\\/f2\\/m\\/test?token=abc+def%2B123&amp;stkn=tok+xyz\\u0026name=%E6%B8%AC%E8%A9%A6"
+        val normalized = NativeInstagramEngine.normalizeCdnUrl(raw)
+        assertEquals("https://scontent.cdninstagram.com/o1/v/t2/f2/m/test?token=abc+def+123&stkn=tok+xyz&name=測試", normalized)
+    }
+
+    @Test
+    fun parseInstagramPage_targetAbsentXdtItem_doesNotMatchUnrelated() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "xdt_api__v1__media__shortcode__web_info": {
+                "items": [
+                  {
+                    "code": "UnrelatedCode",
+                    "id": "999999999999",
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/unrelated.mp4", "width": 1080, "height": 1920}
+                    ]
+                  }
+                ]
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "TargetShortcode", "https://www.instagram.com/reel/TargetShortcode/")
+        assertTrue("Target-absent XDT item must fail extraction", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Expected Technical error allowing fallback", error is MetaExtractionError.Technical)
+    }
+
+    @Test
+    fun parseInstagramPage_schemaOrgVideoObject_unrelatedVideo_doesNotMatch() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "VideoObject",
+              "name": "Unrelated Video",
+              "url": "https://www.instagram.com/reel/UnrelatedShortcode/",
+              "contentUrl": "https://instagram.com/cdn/unrelated.mp4"
+            }
+            </script>
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "TargetShortcode", "https://www.instagram.com/reel/TargetShortcode/")
+        assertTrue("Unrelated schema.org VideoObject must not match target post", result is MetaExtractionResult.Failure)
+    }
+
+    @Test
+    fun parseInstagramPage_schemaOrgVideoObject_matchingTarget_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "VideoObject",
+              "name": "Target Video",
+              "embedUrl": "https://www.instagram.com/p/TargetShortcode/embed",
+              "contentUrl": "https://instagram.com/cdn/target_video.mp4?stkn=tok+123"
+            }
+            </script>
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "TargetShortcode", "https://www.instagram.com/reel/TargetShortcode/")
+        assertTrue("Matching schema.org VideoObject must succeed", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("TargetShortcode", media.postId)
+        assertEquals("https://instagram.com/cdn/target_video.mp4?stkn=tok+123", media.progressiveVideoUrls.first())
+    }
 }

@@ -57,6 +57,18 @@ sealed class MetaExtractionError(
 }
 
 /**
+ * Represents a specific video stream rendition with dimension metadata.
+ */
+data class NativeMediaRendition(
+    val url: String,
+    val width: Int = 0,
+    val height: Int = 0
+) {
+    val resolution: Int
+        get() = if (width > 0 && height > 0) minOf(width, height) else maxOf(width, height, 0)
+}
+
+/**
  * Normalized media info extracted natively from Instagram or Threads.
  */
 data class ExtractedMetaMedia(
@@ -65,7 +77,8 @@ data class ExtractedMetaMedia(
     val title: String,
     val uploader: String,
     val thumbnailUrl: String?,
-    val progressiveVideoUrls: List<String>,
+    val progressiveVideoUrls: List<String> = emptyList(),
+    val renditions: List<NativeMediaRendition> = emptyList(),
     val dashVideoUrl: String? = null,
     val dashAudioUrl: String? = null,
     val heights: List<Int> = emptyList(),

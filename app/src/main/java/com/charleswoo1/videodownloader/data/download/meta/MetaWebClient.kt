@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * Implements deterministic timeouts, request profiles, redirect resolution,
  * body size limits, sanitized logging, and direct media stream downloads.
  */
-class MetaWebClient(
+open class MetaWebClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -62,7 +62,7 @@ class MetaWebClient(
         val headers: Map<String, String>
     )
 
-    fun fetch(
+    open fun fetch(
         url: String,
         profile: RequestProfile = RequestProfile.BROWSER,
         customHeaders: Map<String, String> = emptyMap(),
@@ -131,41 +131,41 @@ class MetaWebClient(
      * Resolves redirects for share URLs (e.g. threads.com/share/... or instagram.com/share/...)
      * Returning the final canonical location URL.
      */
-    fun resolveRedirectUrl(url: String, profile: RequestProfile = RequestProfile.CRAWLER): Result<String> {
+    open fun resolveRedirectUrl(url: String, profile: RequestProfile = RequestProfile.CRAWLER): Result<String> {
         val nonRedirectClient = client.newBuilder()
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
 
         var currentUrl = url
-        var hops = 0
-        val maxHops = 5
+        var redirectCount = 0
+        val maxRedirects = 10
 
-        while (hops < maxHops) {
-            hops++
+        while (redirectCount < maxRedirects) {
+            val requestBuilder = Request.Builder()
+                .url(currentUrl)
+                .head()
+
+            when (profile) {
+                RequestProfile.BROWSER -> requestBuilder.header("User-Agent", BROWSER_UA)
+                RequestProfile.CRAWLER -> requestBuilder.header("User-Agent", CRAWLER_UA)
+            }
+
             try {
-                val reqBuilder = Request.Builder().url(currentUrl)
-                reqBuilder.header("User-Agent", if (profile == RequestProfile.CRAWLER) CRAWLER_UA else BROWSER_UA)
-                reqBuilder.header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-
-                nonRedirectClient.newCall(reqBuilder.build()).execute().use { resp ->
-                    val code = resp.code
-                    if (code in 300..399) {
-                        val location = resp.header("Location")
+                nonRedirectClient.newCall(requestBuilder.build()).execute().use { response ->
+                    if (response.isRedirect) {
+                        val location = response.header("Location")
                         if (!location.isNullOrBlank()) {
-                            currentUrl = if (location.startsWith("/")) {
-                                val uri = currentUrl.toHttpUrlOrNull()
-                                if (uri != null) "${uri.scheme}://${uri.host}$location" else location
-                            } else {
-                                location
-                            }
-                            if (currentUrl.contains("/post/") || currentUrl.contains("/t/") || currentUrl.contains("/p/") || currentUrl.contains("/reel/")) {
-                                return Result.success(currentUrl)
-                            }
-                            return@use
+                            val nextUrl = currentUrl.toHttpUrlOrNull()?.resolve(location)?.toString() ?: location
+                            safeLog(TAG, "Redirect $redirectCount: ${sanitizeUrl(currentUrl)} -> ${sanitizeUrl(nextUrl)}")
+                            currentUrl = nextUrl
+                            redirectCount++
+                        } else {
+                            return Result.success(currentUrl)
                         }
+                    } else {
+                        return Result.success(currentUrl)
                     }
-                    return Result.success(currentUrl)
                 }
             } catch (e: Exception) {
                 return Result.failure(e)
@@ -178,7 +178,7 @@ class MetaWebClient(
      * Streams a media file directly to disk with progress callback, speed calculation,
      * cancellation checks, and atomic file renaming upon completion.
      */
-    fun downloadMediaStream(
+    open fun downloadMediaStream(
         streamUrl: String,
         destination: File,
         referer: String? = null,

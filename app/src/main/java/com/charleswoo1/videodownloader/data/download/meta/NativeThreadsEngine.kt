@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
@@ -195,6 +196,21 @@ class NativeThreadsEngine(
         return null
     }
 
+    private fun extractRenditions(videoVersions: JSONArray?): List<NativeMediaRendition> {
+        if (videoVersions == null || videoVersions.length() == 0) return emptyList()
+        val renditions = mutableListOf<NativeMediaRendition>()
+        for (i in 0 until videoVersions.length()) {
+            val v = videoVersions.optJSONObject(i) ?: continue
+            val u = v.optString("url")
+            val w = v.optInt("width", 0)
+            val h = v.optInt("height", 0)
+            if (u.isNotBlank()) {
+                renditions.add(NativeMediaRendition(url = u, width = w, height = h))
+            }
+        }
+        return renditions.sortedByDescending { it.resolution }
+    }
+
     private fun extractMediaFromPost(
         post: JSONObject,
         targetShortcode: String,
@@ -213,34 +229,20 @@ class NativeThreadsEngine(
             ?.optString("url")
 
         // Case A: Direct progressive video_versions in target post
-        val videoVersions = post.optJSONArray("video_versions")
-        if (videoVersions != null && videoVersions.length() > 0) {
-            val progressiveUrls = mutableListOf<String>()
-            val heights = mutableListOf<Int>()
-            for (i in 0 until videoVersions.length()) {
-                val v = videoVersions.optJSONObject(i) ?: continue
-                val u = v.optString("url")
-                val w = v.optInt("width", 0)
-                val h = v.optInt("height", 0)
-                val res = if (w > 0 && h > 0) minOf(w, h) else if (h > 0) h else w
-                if (u.isNotBlank()) {
-                    progressiveUrls.add(u)
-                    if (res > 0) heights.add(res)
-                }
-            }
-            if (progressiveUrls.isNotEmpty()) {
-                return MetaExtractionResult.Success(
-                    ExtractedMetaMedia(
-                        postId = targetShortcode,
-                        canonicalUrl = canonicalUrl,
-                        title = title,
-                        uploader = uploader,
-                        thumbnailUrl = thumb,
-                        progressiveVideoUrls = progressiveUrls,
-                        heights = heights.distinct().sortedDescending()
-                    )
+        val directRenditions = extractRenditions(post.optJSONArray("video_versions"))
+        if (directRenditions.isNotEmpty()) {
+            return MetaExtractionResult.Success(
+                ExtractedMetaMedia(
+                    postId = targetShortcode,
+                    canonicalUrl = canonicalUrl,
+                    title = title,
+                    uploader = uploader,
+                    thumbnailUrl = thumb,
+                    progressiveVideoUrls = directRenditions.map { it.url },
+                    renditions = directRenditions,
+                    heights = directRenditions.map { it.resolution }.filter { it > 0 }.distinct()
                 )
-            }
+            )
         }
 
         // Case B: Carousel media containing video
@@ -248,71 +250,68 @@ class NativeThreadsEngine(
         if (carousel != null && carousel.length() > 0) {
             for (i in 0 until carousel.length()) {
                 val cItem = carousel.optJSONObject(i) ?: continue
-                val cVersions = cItem.optJSONArray("video_versions")
-                if (cVersions != null && cVersions.length() > 0) {
-                    val progressiveUrls = mutableListOf<String>()
-                    val heights = mutableListOf<Int>()
-                    for (j in 0 until cVersions.length()) {
-                        val v = cVersions.optJSONObject(j) ?: continue
-                        val u = v.optString("url")
-                        val w = v.optInt("width", 0)
-                        val h = v.optInt("height", 0)
-                        val res = if (w > 0 && h > 0) minOf(w, h) else if (h > 0) h else w
-                        if (u.isNotBlank()) {
-                            progressiveUrls.add(u)
-                            if (res > 0) heights.add(res)
-                        }
-                    }
-                    if (progressiveUrls.isNotEmpty()) {
-                        return MetaExtractionResult.Success(
-                            ExtractedMetaMedia(
-                                postId = targetShortcode,
-                                canonicalUrl = canonicalUrl,
-                                title = title,
-                                uploader = uploader,
-                                thumbnailUrl = thumb,
-                                progressiveVideoUrls = progressiveUrls,
-                                heights = heights.distinct().sortedDescending()
-                            )
-                        )
-                    }
-                }
-            }
-        }
-
-        // Case C: Quoted/reposted post wrapped inside target post
-        val quotedPost = post.optJSONObject("text_post_app_info")
-            ?.optJSONObject("share_info")
-            ?.optJSONObject("quoted_post")
-        if (quotedPost != null) {
-            val qVersions = quotedPost.optJSONArray("video_versions")
-            if (qVersions != null && qVersions.length() > 0) {
-                val progressiveUrls = mutableListOf<String>()
-                val heights = mutableListOf<Int>()
-                for (i in 0 until qVersions.length()) {
-                    val v = qVersions.optJSONObject(i) ?: continue
-                    val u = v.optString("url")
-                    val w = v.optInt("width", 0)
-                    val h = v.optInt("height", 0)
-                    val res = if (w > 0 && h > 0) minOf(w, h) else if (h > 0) h else w
-                    if (u.isNotBlank()) {
-                        progressiveUrls.add(u)
-                        if (res > 0) heights.add(res)
-                    }
-                }
-                if (progressiveUrls.isNotEmpty()) {
+                val cRenditions = extractRenditions(cItem.optJSONArray("video_versions"))
+                if (cRenditions.isNotEmpty()) {
+                    val cThumb = cItem.optJSONObject("image_versions2")
+                        ?.optJSONArray("candidates")?.optJSONObject(0)?.optString("url") ?: thumb
                     return MetaExtractionResult.Success(
                         ExtractedMetaMedia(
                             postId = targetShortcode,
                             canonicalUrl = canonicalUrl,
                             title = title,
                             uploader = uploader,
-                            thumbnailUrl = thumb,
-                            progressiveVideoUrls = progressiveUrls,
-                            heights = heights.distinct().sortedDescending()
+                            thumbnailUrl = cThumb,
+                            progressiveVideoUrls = cRenditions.map { it.url },
+                            renditions = cRenditions,
+                            heights = cRenditions.map { it.resolution }.filter { it > 0 }.distinct()
                         )
                     )
                 }
+            }
+        }
+
+        // Case C: Quoted/reposted/wrapped media strictly attached to target post
+        val wrappedCandidates = mutableListOf<JSONObject>()
+        val shareInfo = post.optJSONObject("text_post_app_info")?.optJSONObject("share_info")
+        shareInfo?.optJSONObject("quoted_post")?.let { wrappedCandidates.add(it) }
+        shareInfo?.optJSONObject("quoted_attachment_post")?.let { wrappedCandidates.add(it) }
+        post.optJSONObject("text_post_app_info")?.optJSONObject("quoted_attachment_post")?.let { wrappedCandidates.add(it) }
+        post.optJSONObject("quoted_attachment_post")?.let { wrappedCandidates.add(it) }
+
+        val inlineMedia = post.optJSONObject("text_post_app_info")?.opt("linked_inline_media")
+            ?: shareInfo?.opt("linked_inline_media")
+            ?: post.opt("linked_inline_media")
+
+        if (inlineMedia is JSONObject) {
+            wrappedCandidates.add(inlineMedia)
+            inlineMedia.optJSONObject("media")?.let { wrappedCandidates.add(it) }
+        } else if (inlineMedia is JSONArray) {
+            for (i in 0 until inlineMedia.length()) {
+                val item = inlineMedia.optJSONObject(i)
+                if (item != null) {
+                    wrappedCandidates.add(item)
+                    item.optJSONObject("media")?.let { wrappedCandidates.add(it) }
+                }
+            }
+        }
+
+        for (wrapped in wrappedCandidates) {
+            val wRenditions = extractRenditions(wrapped.optJSONArray("video_versions"))
+            if (wRenditions.isNotEmpty()) {
+                val wThumb = wrapped.optJSONObject("image_versions2")
+                    ?.optJSONArray("candidates")?.optJSONObject(0)?.optString("url") ?: thumb
+                return MetaExtractionResult.Success(
+                    ExtractedMetaMedia(
+                        postId = targetShortcode,
+                        canonicalUrl = canonicalUrl,
+                        title = title,
+                        uploader = uploader,
+                        thumbnailUrl = wThumb,
+                        progressiveVideoUrls = wRenditions.map { it.url },
+                        renditions = wRenditions,
+                        heights = wRenditions.map { it.resolution }.filter { it > 0 }.distinct()
+                    )
+                )
             }
         }
 
@@ -376,11 +375,12 @@ class NativeThreadsEngine(
             )
 
         val response = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.BROWSER)
-        var html = response.getOrNull()?.body ?: ""
+        val html = response.getOrNull()?.body ?: ""
 
         var parseResult = parseThreadsPage(html, postId, canonicalUrl)
 
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error.canFallback && html.isBlank()) {
+        // If technical failure with browser profile (even if html is non-empty), retry with crawler profile
+        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
             val crawlerResponse = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.CRAWLER)
             val crawlerHtml = crawlerResponse.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
@@ -411,35 +411,48 @@ class NativeThreadsEngine(
 
     private fun buildQualityOptions(media: ExtractedMetaMedia): List<QualityOption> {
         val options = mutableListOf<QualityOption>()
-        val primaryStreamUrl = media.progressiveVideoUrls.firstOrNull() ?: run {
-            if (media.dashVideoUrl != null && media.dashAudioUrl != null) {
-                "${media.dashVideoUrl}|${media.dashAudioUrl}"
-            } else {
-                media.dashVideoUrl ?: ""
-            }
-        }
+        val renditions = media.renditions.sortedByDescending { it.resolution }
 
-        options.add(
-            QualityOption(
-                id = "best",
-                label = "最佳畫質 (推薦)",
-                formatSelector = primaryStreamUrl
+        if (renditions.isNotEmpty()) {
+            val bestRendition = renditions.first()
+            options.add(
+                QualityOption(
+                    id = "best",
+                    label = "最佳畫質 (推薦)",
+                    formatSelector = bestRendition.url
+                )
             )
-        )
-
-        for (h in media.heights) {
-            when {
-                h >= 1080 -> options.add(QualityOption("1080p", "1080p Full HD", primaryStreamUrl))
-                h in 720..1079 -> options.add(QualityOption("720p", "720p HD", primaryStreamUrl))
-                h in 480..719 -> options.add(QualityOption("480p", "480p 標清", primaryStreamUrl))
-                h in 360..479 -> options.add(QualityOption("360p", "360p 流暢", primaryStreamUrl))
+            val r1080 = renditions.firstOrNull { it.resolution >= 1080 }
+            if (r1080 != null) options.add(QualityOption("1080p", "1080p Full HD", r1080.url))
+            val r720 = renditions.firstOrNull { it.resolution in 720..1079 }
+            if (r720 != null) options.add(QualityOption("720p", "720p HD", r720.url))
+            val r480 = renditions.firstOrNull { it.resolution in 480..719 }
+            if (r480 != null) options.add(QualityOption("480p", "480p 標清", r480.url))
+            val r360 = renditions.firstOrNull { it.resolution in 360..479 }
+            if (r360 != null) options.add(QualityOption("360p", "360p 流暢", r360.url))
+        } else if (media.dashVideoUrl != null && media.dashAudioUrl != null) {
+            val dashSelector = "${media.dashVideoUrl}|${media.dashAudioUrl}"
+            options.add(
+                QualityOption(
+                    id = "best",
+                    label = "最佳畫質 (推薦)",
+                    formatSelector = dashSelector
+                )
+            )
+            for (h in media.heights) {
+                when {
+                    h >= 1080 -> options.add(QualityOption("1080p", "1080p Full HD", dashSelector))
+                    h in 720..1079 -> options.add(QualityOption("720p", "720p HD", dashSelector))
+                    h in 480..719 -> options.add(QualityOption("480p", "480p 標清", dashSelector))
+                    h in 360..479 -> options.add(QualityOption("360p", "360p 流暢", dashSelector))
+                }
             }
         }
 
         val distinctOptions = options.distinctBy { it.id }.toMutableList()
 
-        val audioSelector = media.dashAudioUrl ?: (media.progressiveVideoUrls.firstOrNull() ?: media.dashVideoUrl ?: "")
-        if (audioSelector.isNotBlank()) {
+        val audioSelector = media.dashAudioUrl ?: renditions.firstOrNull()?.url ?: media.progressiveVideoUrls.firstOrNull()
+        if (!audioSelector.isNullOrBlank()) {
             distinctOptions.add(
                 QualityOption(
                     id = "audio_only",
@@ -464,18 +477,45 @@ class NativeThreadsEngine(
             if (!destDir.exists()) destDir.mkdirs()
 
             val cleanTitle = request.title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(80)
-            val ext = if (request.qualityOption.isAudioOnly) "mp3" else "mp4"
-            val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.$ext")
-
             val targetStreamUrl = request.qualityOption.formatSelector
 
-            // DASH dual stream
-            if (targetStreamUrl.contains("|") && !request.qualityOption.isAudioOnly) {
+            if (request.qualityOption.isAudioOnly) {
+                val tempSource = File(destDir, "${UUID.randomUUID()}.source.mp4")
+                val finalAudio = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp3")
+                try {
+                    onStatus("正在下載 Threads 音訊來源…")
+                    val downloadOk = webClient.downloadMediaStream(
+                        streamUrl = targetStreamUrl,
+                        destination = tempSource,
+                        referer = "https://www.threads.com/",
+                        onProgress = onProgress,
+                        isCancelled = { isCancelled.get() }
+                    )
+
+                    if (!downloadOk) {
+                        if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
+                        return@withContext Result.failure(IllegalStateException("下載 Threads 音訊來源失敗"))
+                    }
+
+                    onStatus("正在轉檔為純音訊…")
+                    val extracted = MetaFfmpegHelper.extractAudio(context, tempSource, finalAudio)
+                    if (extracted && finalAudio.exists() && finalAudio.length() > 0L) {
+                        return@withContext Result.success(finalAudio)
+                    } else {
+                        if (finalAudio.exists()) finalAudio.delete()
+                        return@withContext Result.failure(IllegalStateException("FFmpeg 音訊轉檔失敗"))
+                    }
+                } finally {
+                    if (tempSource.exists()) tempSource.delete()
+                }
+            } else if (targetStreamUrl.contains("|")) {
+                // DASH dual stream
                 val parts = targetStreamUrl.split("|", limit = 2)
                 val videoUrl = parts[0]
                 val audioUrl = parts[1]
                 val tempVideo = File(destDir, "${cleanTitle}_video.part")
                 val tempAudio = File(destDir, "${cleanTitle}_audio.part")
+                val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp4")
 
                 try {
                     onStatus("正在下載 Threads 視訊串流…")
@@ -500,19 +540,19 @@ class NativeThreadsEngine(
 
                     onStatus("正在合併音視訊…")
                     val merged = MetaFfmpegHelper.mergeVideoAndAudio(context, tempVideo, tempAudio, outputFile)
-                    if (merged && outputFile.exists()) {
+                    if (merged && outputFile.exists() && outputFile.length() > 0L) {
                         onProgress(100f, 0L, null)
                         return@withContext Result.success(outputFile)
                     } else {
                         if (outputFile.exists()) outputFile.delete()
-                        tempVideo.renameTo(outputFile)
-                        return@withContext Result.success(outputFile)
+                        return@withContext Result.failure(IllegalStateException("FFmpeg 合併音視訊失敗"))
                     }
                 } finally {
                     tempVideo.delete()
                     tempAudio.delete()
                 }
             } else {
+                val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp4")
                 onStatus("正在開始下載 Threads 媒體…")
                 val downloadSuccess = webClient.downloadMediaStream(
                     streamUrl = targetStreamUrl,
@@ -525,16 +565,6 @@ class NativeThreadsEngine(
                 if (!downloadSuccess) {
                     if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
                     return@withContext Result.failure(IllegalStateException("下載 Threads 串流失敗"))
-                }
-
-                if (request.qualityOption.isAudioOnly) {
-                    onStatus("正在轉檔為純音訊…")
-                    val audioFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp3")
-                    val extracted = MetaFfmpegHelper.extractAudio(context, outputFile, audioFile)
-                    if (extracted && audioFile.exists()) {
-                        outputFile.delete()
-                        return@withContext Result.success(audioFile)
-                    }
                 }
 
                 Result.success(outputFile)

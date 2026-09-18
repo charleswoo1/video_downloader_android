@@ -26,6 +26,7 @@ class PlatformEngineRouterTest {
         var downloadCalled = false
         var cancelCalled = false
 
+        var downloadResult: Result<File> = Result.success(File("/tmp/fake_out.mp4"))
         override fun supports(platform: Platform): Boolean = platform == supportedPlatform
 
         override suspend fun extractMediaInfo(url: String): Result<MediaInfo> {
@@ -40,7 +41,7 @@ class PlatformEngineRouterTest {
             onStatus: (String) -> Unit
         ): Result<File> {
             downloadCalled = true
-            return Result.success(File(destDir, "fake_out.mp4"))
+            return downloadResult
         }
 
         override fun cancelDownload() {
@@ -53,6 +54,8 @@ class PlatformEngineRouterTest {
         var extractCalled = false
         var downloadCalled = false
         var cancelCalled = false
+        var downloadResult: Result<File> = Result.success(File("/tmp/ytdlp_out.mp4"))
+        var lastDownloadRequest: DownloadRequest? = null
 
         override fun isInitialized(): Boolean = true
 
@@ -68,7 +71,8 @@ class PlatformEngineRouterTest {
             onStatus: (String) -> Unit
         ): Result<File> {
             downloadCalled = true
-            return Result.success(File(destDir, "ytdlp_out.mp4"))
+            lastDownloadRequest = request
+            return downloadResult
         }
 
         override fun cancelDownload() {
@@ -257,6 +261,54 @@ class PlatformEngineRouterTest {
 
         assertFalse(fakeInstagramEngine.downloadCalled)
         assertTrue(fakeYtDlpEngine.downloadCalled)
+    }
+
+    @Test
+    fun download_nativeThreadsFailure_fallsBackToYtDlp() = runBlocking {
+        fakeThreadsEngine.downloadResult = Result.failure(IllegalStateException("FFmpeg merge failure"))
+        fakeYtDlpEngine.downloadResult = Result.success(File("/tmp/fallback_threads.mp4"))
+
+        val req = DownloadRequest(
+            url = "https://www.threads.com/@user/post/123",
+            title = "Threads Test",
+            qualityOption = QualityOption("best", "Best", "https://threads.net/v.mp4|https://threads.net/a.mp4")
+        )
+        val dest = File("/tmp")
+
+        val result = router.download(req, dest, { _, _, _ -> }, {})
+
+        assertTrue(result.isSuccess)
+        assertTrue("Native engine must have been attempted", fakeThreadsEngine.downloadCalled)
+        assertTrue("yt-dlp engine must have been invoked as fallback", fakeYtDlpEngine.downloadCalled)
+        assertEquals(
+            "Fallback selector should be normalized for yt-dlp",
+            "bestvideo+bestaudio/best",
+            fakeYtDlpEngine.lastDownloadRequest?.qualityOption?.formatSelector
+        )
+    }
+
+    @Test
+    fun download_nativeInstagramFailure_fallsBackToYtDlp() = runBlocking {
+        fakeInstagramEngine.downloadResult = Result.failure(IllegalStateException("Stream download failed"))
+        fakeYtDlpEngine.downloadResult = Result.success(File("/tmp/fallback_ig.mp4"))
+
+        val req = DownloadRequest(
+            url = "https://www.instagram.com/reel/123",
+            title = "IG Test",
+            qualityOption = QualityOption("best", "Best", "https://instagram.com/v.mp4")
+        )
+        val dest = File("/tmp")
+
+        val result = router.download(req, dest, { _, _, _ -> }, {})
+
+        assertTrue(result.isSuccess)
+        assertTrue("Native Instagram engine must have been attempted", fakeInstagramEngine.downloadCalled)
+        assertTrue("yt-dlp engine must have been invoked as fallback", fakeYtDlpEngine.downloadCalled)
+        assertEquals(
+            "Fallback selector should be normalized for yt-dlp",
+            "bestvideo+bestaudio/best",
+            fakeYtDlpEngine.lastDownloadRequest?.qualityOption?.formatSelector
+        )
     }
 
     @Test

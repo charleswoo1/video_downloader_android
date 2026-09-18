@@ -130,4 +130,213 @@ class NativeThreadsEngineTest {
         assertTrue("Error should be Technical", error is MetaExtractionError.Technical)
         assertTrue("Technical error MUST allow fallback", error.canFallback)
     }
+
+    @Test
+    fun parseThreadsPage_quotedAttachmentPost_extractsSuccessfully() {
+        val html = loadFixture("quoted_attachment_post.html")
+        val shortcode = "DdZquotedAttachPost"
+        val canonical = "https://www.threads.com/@attach_quoter/post/$shortcode"
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for quoted_attachment_post", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertEquals("attach_quoter", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/quoted_attach_vid.mp4"))
+        assertTrue("Should contain 720 resolution", media.heights.contains(720))
+    }
+
+    @Test
+    fun parseThreadsPage_linkedInlineMedia_extractsSuccessfully() {
+        val html = loadFixture("linked_inline_media.html")
+        val shortcode = "DdZlinkedInlinePost"
+        val canonical = "https://www.threads.com/@inline_user/post/$shortcode"
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for linked_inline_media", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertEquals("inline_user", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/linked_inline_vid.mp4"))
+        assertTrue("Should contain 1080 resolution", media.heights.contains(1080))
+    }
+
+    private class FakeThreadsWebClient(
+        private val browserHtml: String = "",
+        private val crawlerHtml: String = "",
+        private val downloadSuccess: Boolean = true
+    ) : MetaWebClient() {
+        var browserFetchCount = 0
+        var crawlerFetchCount = 0
+        var downloadedDestinations = mutableListOf<java.io.File>()
+
+        override fun fetch(
+            url: String,
+            profile: RequestProfile,
+            customHeaders: Map<String, String>,
+            followRedirects: Boolean
+        ): Result<HttpResponse> {
+            return when (profile) {
+                RequestProfile.BROWSER -> {
+                    browserFetchCount++
+                    Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
+                }
+                RequestProfile.CRAWLER -> {
+                    crawlerFetchCount++
+                    Result.success(HttpResponse(200, url, crawlerHtml, emptyMap()))
+                }
+            }
+        }
+
+        override fun downloadMediaStream(
+            streamUrl: String,
+            destination: java.io.File,
+            referer: String?,
+            onProgress: (Float, Long?, String?) -> Unit,
+            isCancelled: () -> Boolean
+        ): Boolean {
+            downloadedDestinations.add(destination)
+            if (downloadSuccess) {
+                destination.parentFile?.mkdirs()
+                destination.writeText("fake stream bytes")
+                return true
+            }
+            return false
+        }
+    }
+
+    @Test
+    fun extractMediaInfo_crawlerRetryOnTechnicalFailureWithNonEmptyHtml() = kotlinx.coroutines.runBlocking {
+        val browserHtml = loadFixture("malformed.html")
+        val crawlerHtml = loadFixture("target_post_video_versions.html")
+
+        val fakeWebClient = FakeThreadsWebClient(browserHtml = browserHtml, crawlerHtml = crawlerHtml)
+        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+
+        val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZtargetPost")
+
+        assertTrue("Expected extraction to succeed after crawler retry", result.isSuccess)
+        assertEquals(1, fakeWebClient.browserFetchCount)
+        assertEquals("Crawler MUST be retried once on technical failure even with non-empty HTML", 1, fakeWebClient.crawlerFetchCount)
+        val mediaInfo = result.getOrNull()
+        assertEquals("Check out this Threads video", mediaInfo?.title)
+    }
+
+    @Test
+    fun extractMediaInfo_noCrawlerRetryOnRestriction() = kotlinx.coroutines.runBlocking {
+        // HTML containing deleted / private marker
+        val restrictedHtml = "<html><body>Sorry, this page isn't available.</body></html>"
+        val fakeWebClient = FakeThreadsWebClient(browserHtml = restrictedHtml, crawlerHtml = "not used")
+        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+
+        val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZdeleted")
+
+        assertTrue("Expected failure on restriction", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue(error is MetaExtractionError.Restricted)
+        assertEquals(1, fakeWebClient.browserFetchCount)
+        assertEquals("Crawler MUST NOT be retried on restriction", 0, fakeWebClient.crawlerFetchCount)
+    }
+
+    @Test
+    fun download_dashMergeFailure_deletesTempFilesAndReturnsFailure() = kotlinx.coroutines.runBlocking {
+        val fakeWebClient = FakeThreadsWebClient(downloadSuccess = true)
+        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_dash_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+
+        try {
+            val dashOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                id = "best",
+                label = "最佳畫質",
+                formatSelector = "https://threads.net/video.mp4|https://threads.net/audio.mp4"
+            )
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@user/post/DdZdash",
+                title = "Dash Post",
+                qualityOption = dashOption
+            )
+
+            val result = customEngine.download(request, tempDir, { _, _, _ -> }, {})
+
+            // Since context is null, FFmpeg merge fails
+            assertTrue("DASH merge failure MUST return failure (not fake video-only success)", result.isFailure)
+
+            // Verify video and audio part temp files are deleted
+            val partFiles = tempDir.listFiles { _, name -> name.endsWith(".part") } ?: emptyArray()
+            assertTrue("Temporary .part files must be cleaned up", partFiles.isEmpty())
+
+            // Verify no partial mp4 remains
+            val mp4Files = tempDir.listFiles { _, name -> name.endsWith(".mp4") } ?: emptyArray()
+            assertTrue("No invalid output video should remain on merge failure", mp4Files.isEmpty())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun download_audioOnly_usesSeparateSourceFileAndFailsOnFfmpegError() = kotlinx.coroutines.runBlocking {
+        val fakeWebClient = FakeThreadsWebClient(downloadSuccess = true)
+        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "threads_audio_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+
+        try {
+            val audioOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                id = "audio_only",
+                label = "僅音訊",
+                formatSelector = "https://threads.net/video.mp4",
+                isAudioOnly = true
+            )
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@user/post/DdZaudio",
+                title = "Audio Post",
+                qualityOption = audioOption
+            )
+
+            val result = customEngine.download(request, tempDir, { _, _, _ -> }, {})
+
+            assertTrue("FFmpeg extraction failure must result in failure", result.isFailure)
+            assertTrue("Must have downloaded stream to temp source", fakeWebClient.downloadedDestinations.isNotEmpty())
+            val downloadedSource = fakeWebClient.downloadedDestinations.first()
+            assertTrue("Source file MUST use .source.mp4 naming", downloadedSource.name.endsWith(".source.mp4"))
+            assertFalse("Source temporary file must be cleaned up", downloadedSource.exists())
+
+            val mp3Files = tempDir.listFiles { _, name -> name.endsWith(".mp3") } ?: emptyArray()
+            assertTrue("No invalid .mp3 files should remain after FFmpeg failure", mp3Files.isEmpty())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun buildQualityOptions_mapsResolutionTiersToExactRenditionUrls() = kotlinx.coroutines.runBlocking {
+        val html = loadFixture("target_post_video_versions.html")
+        val fakeWebClient = FakeThreadsWebClient(browserHtml = html)
+        val customEngine = NativeThreadsEngine(context = null, webClient = fakeWebClient)
+
+        val result = customEngine.extractMediaInfo("https://www.threads.com/@test_user/post/DdZtargetPost")
+        assertTrue(result.isSuccess)
+        val options = result.getOrNull()?.qualityOptions ?: emptyList()
+
+        val bestOption = options.find { it.id == "best" }
+        assertNotNull(bestOption)
+        assertEquals("https://threads.net/cdn/video_1080.mp4", bestOption?.formatSelector)
+
+        val opt1080 = options.find { it.id == "1080p" }
+        assertNotNull(opt1080)
+        assertEquals("https://threads.net/cdn/video_1080.mp4", opt1080?.formatSelector)
+
+        val opt720 = options.find { it.id == "720p" }
+        assertNotNull(opt720)
+        assertEquals("https://threads.net/cdn/video_720.mp4", opt720?.formatSelector)
+
+        // Fixture does not have 480p or 360p; they MUST NOT be displayed
+        val opt480 = options.find { it.id == "480p" }
+        val opt360 = options.find { it.id == "360p" }
+        assertEquals(null, opt480)
+        assertEquals(null, opt360)
+    }
 }

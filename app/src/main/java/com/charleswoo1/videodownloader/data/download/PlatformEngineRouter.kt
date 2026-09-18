@@ -196,15 +196,40 @@ class PlatformEngineRouter(
 
         when {
             platform == Platform.INSTAGRAM && isDirectMediaUrl -> {
-                nativeInstagramEngine.download(request, destDir, onProgress, onStatus)
+                val res = nativeInstagramEngine.download(request, destDir, onProgress, onStatus)
+                if (res.isSuccess || res.exceptionOrNull() is InterruptedException) {
+                    res
+                } else {
+                    safeLog("Native Instagram download failed (${res.exceptionOrNull()?.message}); attempting yt-dlp fallback")
+                    val fallbackRequest = createYtDlpFallbackRequest(request)
+                    ytDlpEngine.download(fallbackRequest, destDir, onProgress, onStatus)
+                }
             }
             platform == Platform.THREADS && isDirectMediaUrl -> {
-                nativeThreadsEngine.download(request, destDir, onProgress, onStatus)
+                val res = nativeThreadsEngine.download(request, destDir, onProgress, onStatus)
+                if (res.isSuccess || res.exceptionOrNull() is InterruptedException) {
+                    res
+                } else {
+                    safeLog("Native Threads download failed (${res.exceptionOrNull()?.message}); attempting yt-dlp fallback")
+                    val fallbackRequest = createYtDlpFallbackRequest(request)
+                    ytDlpEngine.download(fallbackRequest, destDir, onProgress, onStatus)
+                }
             }
             else -> {
                 ytDlpEngine.download(request, destDir, onProgress, onStatus)
             }
         }
+    }
+
+    private fun createYtDlpFallbackRequest(request: DownloadRequest): DownloadRequest {
+        val fallbackSelector = if (request.qualityOption.isAudioOnly) {
+            "bestaudio/best"
+        } else {
+            "bestvideo+bestaudio/best"
+        }
+        return request.copy(
+            qualityOption = request.qualityOption.copy(formatSelector = fallbackSelector)
+        )
     }
 
     override fun cancelDownload() {

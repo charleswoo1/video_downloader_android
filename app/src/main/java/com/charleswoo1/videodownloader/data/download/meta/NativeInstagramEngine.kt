@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
@@ -31,7 +32,7 @@ class NativeInstagramEngine(
         private const val TAG = "NativeInstagramEngine"
         const val ENGINE_NAME = "NativeInstagramEngine"
 
-        private val SHORTCODE_PATTERN = Pattern.compile("""/(?:p|reel|reels|tv|share/p)/([A-Za-z0-9_-]+)""")
+        private val INSTAGRAM_URL_PATTERN = Pattern.compile("""/(p|reel|reels|tv|share/p)/([A-Za-z0-9_-]+)""")
         private val SCRIPT_JSON_PATTERN = Pattern.compile(
             """<script[^>]*type=["']application/json["'][^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
@@ -69,8 +70,30 @@ class NativeInstagramEngine(
     }
 
     fun extractShortcode(url: String): String? {
-        val matcher = SHORTCODE_PATTERN.matcher(url)
+        val matcher = INSTAGRAM_URL_PATTERN.matcher(url)
+        return if (matcher.find()) matcher.group(2) else null
+    }
+
+    fun extractContentType(url: String): String? {
+        val matcher = INSTAGRAM_URL_PATTERN.matcher(url)
         return if (matcher.find()) matcher.group(1) else null
+    }
+
+    fun normalizeUrl(rawUrl: String): String {
+        val clean = rawUrl.substringBefore('#').substringBefore('?').trimEnd('/')
+        val matcher = INSTAGRAM_URL_PATTERN.matcher(clean)
+        if (matcher.find()) {
+            val rawType = matcher.group(1)
+            val shortcode = matcher.group(2)
+            val normalizedType = when (rawType) {
+                "p", "share/p" -> "p"
+                "tv" -> "tv"
+                "reel", "reels" -> "reel"
+                else -> "reel"
+            }
+            return "https://www.instagram.com/$normalizedType/$shortcode/"
+        }
+        return clean
     }
 
     fun parseInstagramPage(html: String, targetShortcode: String, canonicalUrl: String): MetaExtractionResult {
@@ -180,6 +203,7 @@ class NativeInstagramEngine(
                                     uploader = "Instagram",
                                     thumbnailUrl = thumb,
                                     progressiveVideoUrls = listOf(contentUrl),
+                                    renditions = listOf(NativeMediaRendition(url = contentUrl, width = 0, height = 1080)),
                                     heights = listOf(1080)
                                 )
                             )
@@ -238,8 +262,7 @@ class NativeInstagramEngine(
         canonicalUrl: String,
         parentObj: JSONObject? = null
     ): MetaExtractionResult {
-        val urls = mutableListOf<String>()
-        val heights = mutableListOf<Int>()
+        val renditions = mutableListOf<NativeMediaRendition>()
 
         val versions = videoObj.optJSONArray("video_versions")
         if (versions != null) {
@@ -248,24 +271,26 @@ class NativeInstagramEngine(
                 val u = ver.optString("url")
                 val w = ver.optInt("width", 0)
                 val h = ver.optInt("height", 0)
-                val res = if (w > 0 && h > 0) minOf(w, h) else if (h > 0) h else w
                 if (u.isNotBlank()) {
-                    urls.add(u)
-                    if (res > 0) heights.add(res)
+                    renditions.add(NativeMediaRendition(url = u, width = w, height = h))
                 }
             }
         }
 
         val directVideoUrl = videoObj.optString("video_url")
-        if (directVideoUrl.isNotBlank() && !urls.contains(directVideoUrl)) {
-            urls.add(0, directVideoUrl)
+        if (directVideoUrl.isNotBlank() && renditions.none { it.url == directVideoUrl }) {
+            renditions.add(0, NativeMediaRendition(url = directVideoUrl, width = 0, height = 0))
         }
 
-        if (urls.isEmpty()) {
+        if (renditions.isEmpty()) {
             return MetaExtractionResult.Failure(
                 MetaExtractionError.NoVideo("此 Instagram 貼文未包含可下載的影片串流")
             )
         }
+
+        val sortedRenditions = renditions.sortedByDescending { it.resolution }
+        val urls = sortedRenditions.map { it.url }.distinct()
+        val heights = sortedRenditions.map { it.resolution }.filter { it > 0 }.distinct()
 
         val thumb = videoObj.optString("display_url").ifBlank {
             parentObj?.optString("display_url")
@@ -289,7 +314,8 @@ class NativeInstagramEngine(
                 uploader = uploader,
                 thumbnailUrl = thumb,
                 progressiveVideoUrls = urls,
-                heights = heights.distinct().sortedDescending(),
+                renditions = sortedRenditions,
+                heights = heights,
                 durationSeconds = if (duration > 0) duration.toLong() else null
             )
         )
@@ -301,15 +327,15 @@ class NativeInstagramEngine(
                 MetaExtractionError.InvalidUrl("無法從網址中解析 Instagram 貼文代碼，請確認網址是否正確")
             )
 
-        val canonicalUrl = "https://www.instagram.com/reel/$shortcode/"
+        val canonicalUrl = normalizeUrl(url)
 
         val browserResponse = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.BROWSER)
-        var html = browserResponse.getOrNull()?.body ?: ""
+        val html = browserResponse.getOrNull()?.body ?: ""
 
         var parseResult = parseInstagramPage(html, shortcode, canonicalUrl)
 
-        // If technical failure with browser profile, attempt with crawler profile (link preview)
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error.canFallback && html.isBlank()) {
+        // If technical failure with browser profile (even if html is non-empty), retry with crawler profile
+        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
             val crawlerResponse = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.CRAWLER)
             val crawlerHtml = crawlerResponse.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
@@ -340,36 +366,50 @@ class NativeInstagramEngine(
 
     private fun buildQualityOptions(media: ExtractedMetaMedia): List<QualityOption> {
         val options = mutableListOf<QualityOption>()
-        val primaryUrl = media.progressiveVideoUrls.first()
+        val renditions = media.renditions.sortedByDescending { it.resolution }
+        val bestRendition = renditions.firstOrNull()
+            ?: media.progressiveVideoUrls.firstOrNull()?.let { NativeMediaRendition(it) }
 
-        options.add(
-            QualityOption(
-                id = "best",
-                label = "最佳畫質 (推薦)",
-                formatSelector = primaryUrl
+        if (bestRendition != null) {
+            options.add(
+                QualityOption(
+                    id = "best",
+                    label = "最佳畫質 (推薦)",
+                    formatSelector = bestRendition.url
+                )
             )
-        )
+        }
 
-        for (h in media.heights) {
-            when {
-                h >= 1080 -> options.add(QualityOption("1080p", "1080p Full HD", primaryUrl))
-                h in 720..1079 -> options.add(QualityOption("720p", "720p HD", primaryUrl))
-                h in 480..719 -> options.add(QualityOption("480p", "480p 標清", primaryUrl))
-                h in 360..479 -> options.add(QualityOption("360p", "360p 流暢", primaryUrl))
-            }
+        val r1080 = renditions.firstOrNull { it.resolution >= 1080 }
+        if (r1080 != null) {
+            options.add(QualityOption("1080p", "1080p Full HD", r1080.url))
+        }
+        val r720 = renditions.firstOrNull { it.resolution in 720..1079 }
+        if (r720 != null) {
+            options.add(QualityOption("720p", "720p HD", r720.url))
+        }
+        val r480 = renditions.firstOrNull { it.resolution in 480..719 }
+        if (r480 != null) {
+            options.add(QualityOption("480p", "480p 標清", r480.url))
+        }
+        val r360 = renditions.firstOrNull { it.resolution in 360..479 }
+        if (r360 != null) {
+            options.add(QualityOption("360p", "360p 流暢", r360.url))
         }
 
         val distinctOptions = options.distinctBy { it.id }.toMutableList()
 
-        // Audio-only option
-        distinctOptions.add(
-            QualityOption(
-                id = "audio_only",
-                label = "僅音訊 (MP3/M4A)",
-                formatSelector = primaryUrl,
-                isAudioOnly = true
+        val audioUrl = bestRendition?.url ?: media.progressiveVideoUrls.firstOrNull()
+        if (audioUrl != null) {
+            distinctOptions.add(
+                QualityOption(
+                    id = "audio_only",
+                    label = "僅音訊 (MP3/M4A)",
+                    formatSelector = audioUrl,
+                    isAudioOnly = true
+                )
             )
-        )
+        }
 
         return distinctOptions
     }
@@ -385,36 +425,55 @@ class NativeInstagramEngine(
             if (!destDir.exists()) destDir.mkdirs()
 
             val cleanTitle = request.title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(80)
-            val ext = if (request.qualityOption.isAudioOnly) "mp3" else "mp4"
-            val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.$ext")
-
             val streamUrl = request.qualityOption.formatSelector
 
-            onStatus("正在下載 Instagram 媒體…")
-            val downloadOk = webClient.downloadMediaStream(
-                streamUrl = streamUrl,
-                destination = outputFile,
-                referer = "https://www.instagram.com/",
-                onProgress = onProgress,
-                isCancelled = { isCancelled.get() }
-            )
-
-            if (!downloadOk) {
-                if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
-                return@withContext Result.failure(IllegalStateException("下載 Instagram 串流失敗"))
-            }
-
             if (request.qualityOption.isAudioOnly) {
-                onStatus("正在轉檔為純音訊…")
-                val audioFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp3")
-                val extracted = MetaFfmpegHelper.extractAudio(context, outputFile, audioFile)
-                if (extracted && audioFile.exists()) {
-                    outputFile.delete()
-                    return@withContext Result.success(audioFile)
-                }
-            }
+                val tempSource = File(destDir, "${UUID.randomUUID()}.source.mp4")
+                val finalAudio = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp3")
+                try {
+                    onStatus("正在下載 Instagram 音訊來源…")
+                    val downloadOk = webClient.downloadMediaStream(
+                        streamUrl = streamUrl,
+                        destination = tempSource,
+                        referer = "https://www.instagram.com/",
+                        onProgress = onProgress,
+                        isCancelled = { isCancelled.get() }
+                    )
 
-            Result.success(outputFile)
+                    if (!downloadOk) {
+                        if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
+                        return@withContext Result.failure(IllegalStateException("下載 Instagram 音訊來源失敗"))
+                    }
+
+                    onStatus("正在轉檔為純音訊…")
+                    val extracted = MetaFfmpegHelper.extractAudio(context, tempSource, finalAudio)
+                    if (extracted && finalAudio.exists() && finalAudio.length() > 0L) {
+                        return@withContext Result.success(finalAudio)
+                    } else {
+                        if (finalAudio.exists()) finalAudio.delete()
+                        return@withContext Result.failure(IllegalStateException("FFmpeg 音訊轉檔失敗"))
+                    }
+                } finally {
+                    if (tempSource.exists()) tempSource.delete()
+                }
+            } else {
+                val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp4")
+                onStatus("正在下載 Instagram 媒體…")
+                val downloadOk = webClient.downloadMediaStream(
+                    streamUrl = streamUrl,
+                    destination = outputFile,
+                    referer = "https://www.instagram.com/",
+                    onProgress = onProgress,
+                    isCancelled = { isCancelled.get() }
+                )
+
+                if (!downloadOk) {
+                    if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
+                    return@withContext Result.failure(IllegalStateException("下載 Instagram 串流失敗"))
+                }
+
+                Result.success(outputFile)
+            }
         } catch (e: Exception) {
             if (isCancelled.get() || e is InterruptedException) {
                 Result.failure(InterruptedException("下載已取消"))

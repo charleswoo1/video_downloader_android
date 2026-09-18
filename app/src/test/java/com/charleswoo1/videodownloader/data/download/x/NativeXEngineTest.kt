@@ -101,16 +101,16 @@ class NativeXEngineTest {
     }
 
     @Test
-    fun parseGraphQLTweet_unavailable_failsWithDeletedOrNotFound() {
+    fun parseGraphQLTweet_unavailable_returnsProvisionalUnavailableWithFallbackAllowed() {
         val jsonString = loadFixture("tweet_unavailable_graphql.json")
         val json = JSONObject(jsonString)
         val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/999", "999")
 
-        assertTrue("Unavailable tweet must fail extraction", result.isFailure)
-        val error = result.exceptionOrNull() as? PlatformExtractionError
-        assertNotNull(error)
-        assertEquals(PlatformErrorCode.DELETED_OR_NOT_FOUND, error?.code)
-        assertFalse("DeletedOrNotFound must not allow fallback", error?.canFallback ?: true)
+        assertTrue("Unavailable tweet must fail extraction with provisional error", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError.ProvisionalUnavailable
+        assertNotNull("Expected ProvisionalUnavailable, got ${result.exceptionOrNull()}", error)
+        assertEquals("TweetUnavailable", error?.typename)
+        assertTrue("ProvisionalUnavailable MUST allow fallback", error?.canFallback ?: false)
     }
 
     @Test
@@ -216,5 +216,188 @@ class NativeXEngineTest {
         assertEquals("yes", capturedActiveUser)
         assertEquals("zh-tw", capturedLanguage)
         assertEquals("https://x.com", capturedOrigin)
+    }
+
+    @Test
+    fun extractMediaInfo_recoverySequence_provisionalOnAttempt1_retriesWithNewGuestTokenAndSucceeds() = runBlocking {
+        val videoJson = loadFixture("video_tweet_graphql.json")
+        val unavailableJson = loadFixture("tweet_unavailable_graphql.json")
+        var graphqlCallCount = 0
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_$graphqlCallCount")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    graphqlCallCount++
+                    val payload = if (graphqlCallCount == 1) unavailableJson else videoJson
+                    return Result.success(HttpResponse(200, url, payload, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/TwitterVideoCreator/status/1234567890")
+
+        assertTrue("Expected extraction to succeed after retry on attempt 2", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals(2, graphqlCallCount)
+        assertEquals(listOf("GRAPHQL"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_fallbackSequence_bothGraphQLAttemptsProvisional_htmlFallbackSucceeds() = runBlocking {
+        val unavailableJson = loadFixture("tweet_unavailable_graphql.json")
+        val htmlFallback = loadFixture("html_fallback_initial_state.html")
+        var graphqlCallCount = 0
+        var htmlFetched = false
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    graphqlCallCount++
+                    return Result.success(HttpResponse(200, url, unavailableJson, emptyMap()))
+                }
+                if (url.contains("5678901234")) {
+                    htmlFetched = true
+                    return Result.success(HttpResponse(200, url, htmlFallback, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/user/status/5678901234")
+
+        assertTrue("Expected extraction to succeed via HTML fallback", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals(2, graphqlCallCount)
+        assertTrue("HTML must have been fetched", htmlFetched)
+        assertEquals(listOf("GRAPHQL", "HTML_FALLBACK"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_terminalFailure_htmlFallbackUncorroborated_returnsTechnicalAllowingFallback() = runBlocking {
+        val unavailableJson = loadFixture("tweet_unavailable_graphql.json")
+        val uncorroboratedHtml = "<html><head><title>X</title></head><body><div>Generic layout without tweet or tombstone</div></body></html>"
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    return Result.success(HttpResponse(200, url, unavailableJson, emptyMap()))
+                }
+                if (url.contains("1234567890")) {
+                    return Result.success(HttpResponse(200, url, uncorroboratedHtml, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/user/status/1234567890")
+
+        assertTrue("Expected failure", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(error)
+        assertTrue("Error must allow fallback for uncorroborated unavailable", error?.canFallback ?: false)
+        assertFalse("Must NOT be false DeletedOrNotFound", error?.code == PlatformErrorCode.DELETED_OR_NOT_FOUND)
+        assertEquals(listOf("GRAPHQL", "HTML_FALLBACK"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_corroboratedDeleted_htmlContainsTombstone_returnsTerminalDeletedOrNotFound() = runBlocking {
+        val unavailableJson = loadFixture("tweet_unavailable_graphql.json")
+        val tombstoneHtml = "<html><body><div>This Post was deleted by the Post author</div></body></html>"
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    return Result.success(HttpResponse(200, url, unavailableJson, emptyMap()))
+                }
+                if (url.contains("1234567890")) {
+                    return Result.success(HttpResponse(200, url, tombstoneHtml, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/user/status/1234567890")
+
+        assertTrue("Expected failure", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(error)
+        assertEquals(PlatformErrorCode.DELETED_OR_NOT_FOUND, error?.code)
+        assertFalse("Terminal DeletedOrNotFound must not allow fallback", error?.canFallback ?: true)
+        assertEquals(listOf("GRAPHQL", "HTML_FALLBACK"), testEngine.lastProfileSequence)
     }
 }

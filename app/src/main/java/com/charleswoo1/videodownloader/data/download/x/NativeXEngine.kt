@@ -344,7 +344,7 @@ class NativeXEngine(
         // Check if tweet was removed, suspended, or not found
         val typename = resultObj.optString("__typename")
         if (typename == "TweetUnavailable" || typename == "TweetTombstone") {
-            return Result.failure(PlatformExtractionError.DeletedOrNotFound("此 X 貼文已被刪除、設為私密或暫時無法存取"))
+            return Result.failure(PlatformExtractionError.ProvisionalUnavailable(typename))
         }
 
         val legacy = resultObj.optJSONObject("legacy")
@@ -420,6 +420,16 @@ class NativeXEngine(
     }
 
     suspend fun parseHtmlFallback(html: String, pageUrl: String, statusId: String): Result<ExtractedXMedia> = withContext(Dispatchers.IO) {
+        // Corroborate explicit deleted/private tombstone in public HTML
+        if (html.contains("This Post was deleted by the Post author", ignoreCase = true) ||
+            html.contains("This account’s posts are protected", ignoreCase = true) ||
+            html.contains("This account's posts are protected", ignoreCase = true) ||
+            html.contains("This Post is from a suspended account", ignoreCase = true) ||
+            html.contains("Hmm...this page doesn’t exist", ignoreCase = true)
+        ) {
+            return@withContext Result.failure(PlatformExtractionError.DeletedOrNotFound("此 X 貼文已被作者刪除或原始內容已不存在"))
+        }
+
         val matcher = INITIAL_STATE_RE.matcher(html)
         if (!matcher.find()) {
             return@withContext Result.failure(PlatformExtractionError.ParseError("HTML 備援頁面未包含 __INITIAL_STATE__"))
@@ -498,6 +508,9 @@ class NativeXEngine(
         val profileSteps = mutableListOf<String>()
 
         profileSteps.add("GRAPHQL")
+        safeLog("[Resolver] platform=X")
+        safeLog("[X] graphql_attempt=1")
+
         val bearer = ensureBearerToken()
         val guest = ensureGuestToken(bearer)
 
@@ -508,23 +521,51 @@ class NativeXEngine(
         if (gqlResult.isSuccess) {
             val parseResult = parseGraphQLTweet(gqlResult.getOrThrow(), cleanUrl, statusId)
             if (parseResult.isSuccess) {
+                safeLog("[X] graphql_attempt=1 result=SUCCESS")
                 extractedMedia = parseResult.getOrThrow()
             } else {
                 val err = parseResult.exceptionOrNull() as? PlatformExtractionError
-                if (err != null && !err.canFallback) {
+                if (err is PlatformExtractionError.ProvisionalUnavailable) {
+                    safeLog("[X] graphql_attempt=1 typename=${err.typename}")
+                    // Refresh guest session and retry GraphQL once
+                    safeLog("[X] guest_refresh=true")
+                    cachedGuestToken = null
+                    val newBearer = ensureBearerToken()
+                    val newGuest = ensureGuestToken(newBearer)
+                    safeLog("[X] graphql_attempt=2")
+                    val retryGql = fetchPostViaGraphQL(statusId, newBearer, newGuest)
+                    if (retryGql.isSuccess) {
+                        val retryParse = parseGraphQLTweet(retryGql.getOrThrow(), cleanUrl, statusId)
+                        if (retryParse.isSuccess) {
+                            safeLog("[X] graphql_attempt=2 result=SUCCESS")
+                            extractedMedia = retryParse.getOrThrow()
+                        } else {
+                            val retryErr = retryParse.exceptionOrNull() as? PlatformExtractionError
+                            safeLog("[X] graphql_attempt=2 result=${retryErr?.code?.name ?: "FAILURE"}")
+                            lastError = retryErr
+                        }
+                    } else {
+                        val retryErr = retryGql.exceptionOrNull() as? PlatformExtractionError
+                        safeLog("[X] graphql_attempt=2 result=${retryErr?.code?.name ?: "FAILURE"}")
+                        lastError = retryErr
+                    }
+                } else if (err != null && !err.canFallback) {
                     lastProfileSequence = profileSteps
+                    safeLog("[X] final=${err.code.name}")
                     return@withContext Result.failure(err)
+                } else {
+                    lastError = err
                 }
-                lastError = err
             }
         } else {
             val err = gqlResult.exceptionOrNull() as? PlatformExtractionError
             lastError = err
         }
 
-        // HTML fallback if GraphQL encountered technical failure
+        // HTML fallback if GraphQL did not resolve media
         if (extractedMedia == null) {
             profileSteps.add("HTML_FALLBACK")
+            safeLog("[X] html_fallback=true")
             val htmlResp = httpSession.fetch(cleanUrl, RequestProfile.DESKTOP_NAVIGATION)
             val html = htmlResp.getOrNull()?.body ?: ""
             if (html.isNotBlank()) {
@@ -535,6 +576,7 @@ class NativeXEngine(
                     val err = htmlResult.exceptionOrNull() as? PlatformExtractionError
                     if (err != null && !err.canFallback) {
                         lastProfileSequence = profileSteps
+                        safeLog("[X] final=${err.code.name}")
                         return@withContext Result.failure(err)
                     }
                     if (lastError == null) lastError = err
@@ -545,11 +587,12 @@ class NativeXEngine(
         lastProfileSequence = profileSteps
 
         if (extractedMedia == null) {
-            return@withContext Result.failure(
-                lastError ?: PlatformExtractionError.ParseError("無法解析 X 貼文影片資訊")
-            )
+            val finalErr = lastError ?: PlatformExtractionError.ParseError("無法解析 X 貼文影片資訊")
+            safeLog("[X] final=${finalErr.code.name}")
+            return@withContext Result.failure(finalErr)
         }
 
+        safeLog("[X] final=SUCCESS")
         val qualityOptions = buildQualityOptions(extractedMedia)
         val info = MediaInfo(
             sourceUrl = cleanUrl,
@@ -562,6 +605,14 @@ class NativeXEngine(
         )
 
         Result.success(info)
+    }
+
+    private fun safeLog(msg: String) {
+        try {
+            Log.d(TAG, msg)
+        } catch (_: Exception) {
+            println("[$TAG] $msg")
+        }
     }
 
     private fun buildQualityOptions(media: ExtractedXMedia): List<QualityOption> {

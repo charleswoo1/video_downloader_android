@@ -64,6 +64,12 @@ open class PlatformExtractionError(
         userMessage: String = "此貼文可能已被刪除或原始網址不存在"
     ) : PlatformExtractionError(PlatformErrorCode.DELETED_OR_NOT_FOUND, userMessage, canFallback = false)
 
+    class ProvisionalUnavailable(
+        val typename: String,
+        userMessage: String = "X GraphQL 回傳暫時無法存取 ($typename)，將嘗試重新整理階段或使用 HTML 備援",
+        cause: Throwable? = null
+    ) : PlatformExtractionError(PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED, userMessage, canFallback = true, cause = cause)
+
     class GeoRestricted(
         userMessage: String = "此內容在您目前所在的地區無法存取"
     ) : PlatformExtractionError(PlatformErrorCode.GEO_RESTRICTED, userMessage, canFallback = false)

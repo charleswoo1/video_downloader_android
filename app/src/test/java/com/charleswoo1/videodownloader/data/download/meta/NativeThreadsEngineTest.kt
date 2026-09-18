@@ -557,4 +557,141 @@ class NativeThreadsEngineTest {
             engine.extractCanonicalFromHtml(nameOgHtml)
         )
     }
+
+    @Test
+    fun parseThreadsPage_targetPostCodeInWrapperWithDeeperChildMedia_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_wrapper": {
+                  "code": "BAVLndHzC",
+                  "post": {
+                    "code": "BAVLndHzC",
+                    "user": {"username": "deep_threads_user"},
+                    "caption": {"text": "Deep threads video"},
+                    "video_versions": [
+                      {"url": "https://threads.net/cdn/deep_threads_video.mp4", "width": 1080, "height": 1920}
+                    ]
+                  }
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "BAVLndHzC", "https://www.threads.com/@deep_threads_user/post/BAVLndHzC")
+        assertTrue("Expected success for post with deeper child media", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("BAVLndHzC", media.postId)
+        assertEquals("deep_threads_user", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/deep_threads_video.mp4"))
+    }
+
+    @Test
+    fun parseThreadsPage_targetPostWrapperPresentWithoutMedia_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "post_card": {
+                  "code": "_5-t0FGYG",
+                  "view_state": "placeholder",
+                  "tracking_token": "xyz123"
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "_5-t0FGYG", "https://www.threads.com/@user/post/_5-t0FGYG")
+        assertTrue("Wrapper without media must fail extraction", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be Technical, NOT NoVideo; found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseThreadsPage_imageOnlyTargetWithRecommendedVideo_returnsTerminalNoVideo() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "target_post": {
+                  "code": "TargetImagePost",
+                  "image_versions2": {
+                    "candidates": [
+                      {"url": "https://threads.net/cdn/target_image.jpg", "width": 1080, "height": 1080}
+                    ]
+                  }
+                },
+                "recommended_posts": [
+                  {
+                    "code": "UnrelatedVideoPost",
+                    "video_versions": [
+                      {"url": "https://threads.net/cdn/unrelated_video.mp4", "width": 1080, "height": 1920}
+                    ]
+                  }
+                ]
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "TargetImagePost", "https://www.threads.com/@user/post/TargetImagePost")
+        assertTrue("Image-only target must fail extraction", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be NoVideo, NOT Technical or Success; found: $error", error is MetaExtractionError.NoVideo)
+        assertFalse("Terminal NoVideo MUST NOT allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseThreadsPage_unresolvedTargetWithRecommendedVideo_returnsTechnicalAndRefusesRecommendation() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "wrapper_stub": {
+                  "code": "UnresolvedTarget",
+                  "placeholder": true
+                },
+                "feed_units": [
+                  {
+                    "code": "UnrelatedFeedVideo",
+                    "video_versions": [
+                      {"url": "https://threads.net/cdn/feed_video.mp4", "width": 1080, "height": 1920}
+                    ]
+                  }
+                ]
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "UnresolvedTarget", "https://www.threads.com/@user/post/UnresolvedTarget")
+        assertTrue("Unresolved target must fail extraction", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be Technical, NOT NoVideo and NOT Success; found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST allow fallback", error.canFallback)
+    }
 }

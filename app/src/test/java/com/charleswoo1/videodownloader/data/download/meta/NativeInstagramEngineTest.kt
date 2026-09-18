@@ -590,4 +590,253 @@ class NativeInstagramEngineTest {
         val technical = error as MetaExtractionError.Technical
         assertTrue("Mixed profile failure must allow fallback to yt-dlp", technical.canFallback)
     }
+
+    @Test
+    fun parseInstagramPage_nestedIfNotGatedLoggedOut_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "shortcode_media": {
+                "shortcode": "DdXnested",
+                "if_not_gated_logged_out": {
+                  "node": {
+                    "shortcode": "DdXnested",
+                    "is_video": true,
+                    "video_url": "https://instagram.com/cdn/nested_video.mp4",
+                    "dimensions": {"height": 1080, "width": 1920},
+                    "owner": {"username": "nested_creator"}
+                  }
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXnested", "https://www.instagram.com/reel/DdXnested/")
+        assertTrue("Expected success for if_not_gated_logged_out container", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("DdXnested", media.postId)
+        assertEquals("nested_creator", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://instagram.com/cdn/nested_video.mp4"))
+    }
+
+    @Test
+    fun parseInstagramPage_outerWrapperPlaceholderWithDeeperXdt_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "wrapper": {
+                "shortcode": "DdXdeep",
+                "placeholder": true
+              },
+              "xdt_api__v1__media__shortcode__web_info": {
+                "items": [
+                  {
+                    "code": "DdXdeep",
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/deep_video.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "user": {"username": "deep_creator"}
+                  }
+                ]
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXdeep", "https://www.instagram.com/reel/DdXdeep/")
+        assertTrue("Expected success for deeper XDT node when outer wrapper is placeholder", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("DdXdeep", media.postId)
+        assertEquals("deep_creator", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://instagram.com/cdn/deep_video.mp4"))
+    }
+
+    @Test
+    fun parseInstagramPage_targetWrapperPresentWithoutMedia_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "shortcode_media": {
+                "shortcode": "DdXemptyWrapper",
+                "id": "12345678"
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXemptyWrapper", "https://www.instagram.com/reel/DdXemptyWrapper/")
+        assertTrue("Target wrapper without media must result in Failure", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be Technical, NOT NoVideo; found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseInstagramPage_resolvedPureImagePost_returnsTerminalNoVideo() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "shortcode_media": {
+                "shortcode": "DdXimageOnly",
+                "is_video": false,
+                "display_url": "https://instagram.com/cdn/photo.jpg",
+                "image_versions2": {
+                  "candidates": [
+                    {"url": "https://instagram.com/cdn/photo.jpg", "width": 1080, "height": 1080}
+                  ]
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXimageOnly", "https://www.instagram.com/p/DdXimageOnly/")
+        assertTrue("Resolved pure image post must result in Failure", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be NoVideo, found: $error", error is MetaExtractionError.NoVideo)
+        assertFalse("Terminal NoVideo MUST NOT allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseInstagramPage_dataSjsScriptWithoutJsonType_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script data-sjs>
+            requireLazy(["ScheduledServerJS"], function(sjs) {
+              sjs.handle({
+                "require": [
+                  ["RelayPrefetchedStreamCache", "next", [], [
+                    "xdt_api__v1__media__shortcode__web_info",
+                    {
+                      "items": [
+                        {
+                          "code": "DdXdatasjs",
+                          "video_versions": [
+                            {"url": "https://instagram.com/cdn/datasjs_video.mp4", "width": 1080, "height": 1920}
+                          ],
+                          "user": {"username": "sjs_user"}
+                        }
+                      ]
+                    }
+                  ]]
+                ]
+              });
+            });
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXdatasjs", "https://www.instagram.com/reel/DdXdatasjs/")
+        assertTrue("Expected success for data-sjs script block", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("DdXdatasjs", media.postId)
+        assertEquals("sjs_user", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://instagram.com/cdn/datasjs_video.mp4"))
+    }
+
+    @Test
+    fun extractMediaInfo_desktopWrapperWithoutMedia_escalatesToMobileAndSucceeds() = kotlinx.coroutines.runBlocking {
+        val desktopWrapperOnlyHtml = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "shortcode_media": {
+                "shortcode": "DdXescalate",
+                "id": "123456"
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val mobileFullMediaHtml = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "xdt_api__v1__media__shortcode__web_info": {
+                "items": [
+                  {
+                    "code": "DdXescalate",
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/mobile_video.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "user": {"username": "mobile_user"}
+                  }
+                ]
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            var desktopCount = 0
+            var mobileCount = 0
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> {
+                        desktopCount++
+                        Result.success(HttpResponse(200, url, desktopWrapperOnlyHtml, emptyMap()))
+                    }
+                    RequestProfile.MOBILE_NAVIGATION -> {
+                        mobileCount++
+                        Result.success(HttpResponse(200, url, mobileFullMediaHtml, emptyMap()))
+                    }
+                    else -> Result.failure(java.io.IOException("Unexpected profile"))
+                }
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/DdXescalate/")
+
+        assertTrue("Expected extraction to succeed after escalating to MOBILE", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals("https://www.instagram.com/reel/DdXescalate/", mediaInfo?.sourceUrl)
+        assertEquals(1, fakeSession.desktopCount)
+        assertEquals(1, fakeSession.mobileCount)
+        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
+    }
 }

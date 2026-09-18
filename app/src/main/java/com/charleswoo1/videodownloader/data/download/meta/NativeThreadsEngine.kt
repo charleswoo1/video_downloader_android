@@ -44,10 +44,166 @@ class NativeThreadsEngine(
             """<script[^>]*type=["']application/json["'][^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
+        private val DATA_SJS_PATTERN = Pattern.compile(
+            """<script\b(?=[^>]*\bdata-sjs\b)[^>]*>(.*?)</script>""",
+            Pattern.CASE_INSENSITIVE or Pattern.DOTALL
+        )
         private val GENERIC_SCRIPT_PATTERN = Pattern.compile(
             """<script\b[^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
+
+        fun isExcludedContainerKey(key: String): Boolean {
+            return key in listOf(
+                "relatedPosts", "related_posts", "feed_units", "feedUnits",
+                "replies", "replyThreads", "reply_threads",
+                "parentPost", "parent_post", "suggested_users", "suggestedUsers"
+            )
+        }
+
+        fun collectJsonFromScript(
+            raw: String,
+            candidates: MutableList<JSONObject>,
+            maxDepth: Int = 3,
+            targetMarker: String? = null
+        ) {
+            val trimmed = raw.trim()
+            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+                try {
+                    val obj = JSONObject(trimmed)
+                    candidates.add(obj)
+                    collectNestedJsonStrings(obj, candidates, 1, maxDepth)
+                    return
+                } catch (_: Exception) {}
+            } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                try {
+                    val arr = JSONArray(trimmed)
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i)
+                        if (item != null) {
+                            candidates.add(item)
+                            collectNestedJsonStrings(item, candidates, 1, maxDepth)
+                        }
+                    }
+                    return
+                } catch (_: Exception) {}
+            }
+            extractBalancedJsonPayloads(trimmed, candidates, maxDepth, targetMarker)
+        }
+
+        fun collectNestedJsonStrings(
+            root: Any?,
+            candidates: MutableList<JSONObject>,
+            currentDepth: Int,
+            maxDepth: Int
+        ) {
+            if (root == null || currentDepth > maxDepth) return
+            if (root is String) {
+                val trimmed = root.trim()
+                val start = minOf(
+                    trimmed.indexOf('{').takeIf { it >= 0 } ?: Int.MAX_VALUE,
+                    trimmed.indexOf('[').takeIf { it >= 0 } ?: Int.MAX_VALUE
+                )
+                if (start != Int.MAX_VALUE) {
+                    val isObj = trimmed[start] == '{'
+                    val end = if (isObj) trimmed.lastIndexOf('}') else trimmed.lastIndexOf(']')
+                    if (end > start) {
+                        val sub = trimmed.substring(start, end + 1)
+                        try {
+                            if (isObj) {
+                                val obj = JSONObject(sub)
+                                candidates.add(obj)
+                                collectNestedJsonStrings(obj, candidates, currentDepth + 1, maxDepth)
+                            } else {
+                                val arr = JSONArray(sub)
+                                for (i in 0 until arr.length()) {
+                                    collectNestedJsonStrings(arr.opt(i), candidates, currentDepth + 1, maxDepth)
+                                }
+                            }
+                        } catch (_: Exception) {}
+
+                        if (sub.contains("\\\"")) {
+                            try {
+                                val unescaped = sub.replace("\\\"", "\"").replace("\\\\", "\\")
+                                if (unescaped.startsWith("{")) {
+                                    val obj = JSONObject(unescaped)
+                                    candidates.add(obj)
+                                    collectNestedJsonStrings(obj, candidates, currentDepth + 1, maxDepth)
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                return
+            }
+            if (root is JSONObject) {
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (isExcludedContainerKey(key)) continue
+                    val value = root.opt(key)
+                    if (value is String || value is JSONObject || value is JSONArray) {
+                        collectNestedJsonStrings(value, candidates, currentDepth, maxDepth)
+                    }
+                }
+            } else if (root is JSONArray) {
+                for (i in 0 until root.length()) {
+                    collectNestedJsonStrings(root.opt(i), candidates, currentDepth, maxDepth)
+                }
+            }
+        }
+
+        fun extractBalancedJsonPayloads(
+            text: String,
+            candidates: MutableList<JSONObject>,
+            maxDepth: Int,
+            targetMarker: String? = null
+        ) {
+            var i = 0
+            val n = text.length
+            while (i < n) {
+                if (text[i] == '{') {
+                    val start = i
+                    var depth = 0
+                    var inString = false
+                    var escape = false
+                    var j = i
+                    while (j < n) {
+                        val c = text[j]
+                        if (escape) {
+                            escape = false
+                        } else if (c == '\\' && inString) {
+                            escape = true
+                        } else if (c == '"') {
+                            inString = !inString
+                        } else if (!inString) {
+                            if (c == '{') depth++
+                            else if (c == '}') {
+                                depth--
+                                if (depth == 0) {
+                                    val candidateStr = text.substring(start, j + 1)
+                                    var parsed = false
+                                    if (targetMarker == null || candidateStr.contains(targetMarker)) {
+                                        try {
+                                            val obj = JSONObject(candidateStr)
+                                            candidates.add(obj)
+                                            collectNestedJsonStrings(obj, candidates, 1, maxDepth)
+                                            parsed = true
+                                        } catch (_: Exception) {}
+                                    }
+                                    if (parsed) {
+                                        i = j
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                        j++
+                    }
+                }
+                i++
+            }
+        }
         private val CANONICAL_LINK_PATTERN = Pattern.compile(
             """<link\b(?=[^>]*\brel=["']canonical["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>""",
             Pattern.CASE_INSENSITIVE
@@ -240,47 +396,39 @@ class NativeThreadsEngine(
             )
         }
 
-        // 2. Scan script tags for JSON payload
+        // 2. Scan script tags for JSON payload (application/json, data-sjs, generic containing shortcode)
         val candidates = mutableListOf<JSONObject>()
-        val matcher = SCRIPT_JSON_PATTERN.matcher(html)
-        while (matcher.find()) {
-            val raw = matcher.group(1)?.trim() ?: continue
-            try {
-                if (raw.startsWith("{") && raw.endsWith("}")) {
-                    candidates.add(JSONObject(raw))
-                } else if (raw.startsWith("[") && raw.endsWith("]")) {
-                    val arr = JSONArray(raw)
-                    for (i in 0 until arr.length()) {
-                        val item = arr.optJSONObject(i)
-                        if (item != null) candidates.add(item)
-                    }
-                }
-            } catch (_: Exception) {}
-        }
+        var detectedScriptSource = "application_json"
 
-        // 3. Find target post strictly matching code == targetShortcode
-        var targetPost: JSONObject? = null
-        for (candidate in candidates) {
-            targetPost = findPostByCode(candidate, targetShortcode)
-            if (targetPost != null) break
-        }
-
-        // 3b. Fallback scan for generic or unescaped script tags containing targetShortcode
-        if (targetPost == null) {
-            val genericMatcher = GENERIC_SCRIPT_PATTERN.matcher(html)
-            while (genericMatcher.find()) {
-                val raw = genericMatcher.group(1)?.trim() ?: continue
-                if (!raw.contains(targetShortcode)) continue
-                val found = findPostByCode(raw, targetShortcode)
-                if (found != null) {
-                    targetPost = found
-                    break
+        fun scanScriptPatterns(pattern: Pattern, targetMarker: String? = null, sourceName: String) {
+            val matcher = pattern.matcher(html)
+            while (matcher.find()) {
+                val raw = matcher.group(1)?.trim() ?: continue
+                val beforeCount = candidates.size
+                collectJsonFromScript(raw, candidates, maxDepth = 3, targetMarker = targetMarker)
+                if (candidates.size > beforeCount && detectedScriptSource == "application_json" && sourceName != "application_json") {
+                    detectedScriptSource = sourceName
                 }
             }
         }
 
+        scanScriptPatterns(SCRIPT_JSON_PATTERN, sourceName = "application_json")
+        scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode, sourceName = "data_sjs")
+        scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode, sourceName = "nested_json")
+
+        // 3. Find target post strictly matching code == targetShortcode
+        val searchResult = searchTargetPost(candidates, targetShortcode, detectedScriptSource)
+        val targetPost = searchResult.postNode
+
         // Target post isolation: If target post was not found, STRICTLY REFUSE to use unrelated feed posts
         if (targetPost == null) {
+            if (searchResult.wrapperSeen) {
+                return MetaExtractionResult.Failure(
+                    MetaExtractionError.Technical(
+                        "Threads 貼文代碼符合，但目前頁面資料未解析出有效媒體節點。"
+                    )
+                )
+            }
             return MetaExtractionResult.Failure(
                 MetaExtractionError.Technical(
                     "Threads 已找到貼文連結，但目前頁面未提供可解析的目標媒體資料。"
@@ -291,26 +439,119 @@ class NativeThreadsEngine(
         return extractMediaFromPost(targetPost, targetShortcode, canonicalUrl)
     }
 
-    private fun findPostByCode(root: Any?, targetCode: String): JSONObject? {
-        if (root == null) return null
+    data class ThreadsPostSearchResult(
+        val postNode: JSONObject? = null,
+        val wrapperSeen: Boolean = false,
+        val scriptSource: String = "application_json"
+    )
+
+    private fun hasThreadsMediaStructure(obj: JSONObject): Boolean {
+        val versions = obj.optJSONArray("video_versions")
+        if (versions != null && versions.length() > 0) return true
+        if (obj.optString("video_dash_manifest").isNotBlank()) return true
+        val carousel = obj.optJSONArray("carousel_media")
+        if (carousel != null && carousel.length() > 0) return true
+        val quoted = obj.optJSONObject("quoted_post")
+            ?: obj.optJSONObject("quoted_attachment_post")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("quoted_attachment_post")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("quoted_post")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("quoted_attachment_post")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("quoted_post")
+        if (quoted != null && (quoted.optJSONArray("video_versions")?.let { it.length() > 0 } == true || quoted.optString("video_dash_manifest").isNotBlank())) {
+            return true
+        }
+        val linkedMedia = obj.optJSONObject("text_post_app_info")?.optJSONObject("linked_inline_media")?.optJSONObject("media")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("link_preview_response")?.optJSONObject("video")
+            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("linked_inline_media")
+        if (linkedMedia != null && (linkedMedia.optJSONArray("video_versions")?.let { it.length() > 0 } == true || linkedMedia.optString("video_dash_manifest").isNotBlank())) {
+            return true
+        }
+        return false
+    }
+
+    private fun isThreadsImageOrTextPost(obj: JSONObject): Boolean {
+        val hasImages = obj.optJSONObject("image_versions2")?.optJSONArray("candidates")?.let { it.length() > 0 } ?: false
+        val hasUser = obj.has("user")
+        val hasCaption = obj.has("caption")
+        return hasImages || (hasUser && hasCaption)
+    }
+
+    private fun searchTargetPost(candidates: List<JSONObject>, targetCode: String, scriptSource: String): ThreadsPostSearchResult {
+        var wrapperSeen = false
+        var fallbackPostNode: JSONObject? = null
+        for (candidate in candidates) {
+            val res = findPostByCode(candidate, targetCode)
+            if (res.wrapperSeen) wrapperSeen = true
+            if (res.postNode != null) {
+                if (hasThreadsMediaStructure(res.postNode)) {
+                    return res.copy(scriptSource = scriptSource)
+                } else if (fallbackPostNode == null) {
+                    fallbackPostNode = res.postNode
+                }
+            }
+        }
+        return ThreadsPostSearchResult(postNode = fallbackPostNode, wrapperSeen = wrapperSeen, scriptSource = scriptSource)
+    }
+
+    private fun findPostByCode(root: Any?, targetCode: String): ThreadsPostSearchResult {
+        if (root == null) return ThreadsPostSearchResult()
+        var wrapperSeen = false
         if (root is JSONObject) {
             val code = root.optString("code")
             if (code == targetCode) {
-                return root
+                wrapperSeen = true
+                if (hasThreadsMediaStructure(root)) {
+                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true)
+                }
+
+                // Descend into children
+                val keys = root.keys()
+                var fallbackChildResult: ThreadsPostSearchResult? = null
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (isExcludedContainerKey(key)) continue
+                    val child = root.opt(key)
+                    val childRes = findPostByCode(child, targetCode)
+                    if (childRes.wrapperSeen) wrapperSeen = true
+                    if (childRes.postNode != null) {
+                        if (hasThreadsMediaStructure(childRes.postNode)) return childRes
+                        if (fallbackChildResult == null) fallbackChildResult = childRes
+                    }
+                }
+                if (fallbackChildResult != null) return fallbackChildResult
+
+                if (isThreadsImageOrTextPost(root)) {
+                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true)
+                }
+
+                return ThreadsPostSearchResult(postNode = null, wrapperSeen = true)
             }
 
             val keys = root.keys()
+            var fallbackChildResult: ThreadsPostSearchResult? = null
             while (keys.hasNext()) {
                 val key = keys.next()
+                if (isExcludedContainerKey(key)) continue
                 val child = root.opt(key)
-                val found = findPostByCode(child, targetCode)
-                if (found != null) return found
+                val childRes = findPostByCode(child, targetCode)
+                if (childRes.wrapperSeen) wrapperSeen = true
+                if (childRes.postNode != null) {
+                    if (hasThreadsMediaStructure(childRes.postNode)) return childRes
+                    if (fallbackChildResult == null) fallbackChildResult = childRes
+                }
             }
+            if (fallbackChildResult != null) return fallbackChildResult
         } else if (root is JSONArray) {
+            var fallbackChildResult: ThreadsPostSearchResult? = null
             for (i in 0 until root.length()) {
-                val found = findPostByCode(root.opt(i), targetCode)
-                if (found != null) return found
+                val childRes = findPostByCode(root.opt(i), targetCode)
+                if (childRes.wrapperSeen) wrapperSeen = true
+                if (childRes.postNode != null) {
+                    if (hasThreadsMediaStructure(childRes.postNode)) return childRes
+                    if (fallbackChildResult == null) fallbackChildResult = childRes
+                }
             }
+            if (fallbackChildResult != null) return fallbackChildResult
         } else if (root is String) {
             val trimmed = root.trim()
             if (trimmed.contains(targetCode)) {
@@ -326,7 +567,7 @@ class NativeThreadsEngine(
                         try {
                             val parsed = if (isObj) JSONObject(sub) else JSONArray(sub)
                             val found = findPostByCode(parsed, targetCode)
-                            if (found != null) return found
+                            if (found.wrapperSeen || found.postNode != null) return found
                         } catch (_: Exception) {}
 
                         if (sub.contains("\\\"")) {
@@ -334,14 +575,14 @@ class NativeThreadsEngine(
                                 val unescaped = sub.replace("\\\"", "\"").replace("\\\\", "\\")
                                 val parsed = if (unescaped.startsWith("{")) JSONObject(unescaped) else JSONArray(unescaped)
                                 val found = findPostByCode(parsed, targetCode)
-                                if (found != null) return found
+                                if (found.wrapperSeen || found.postNode != null) return found
                             } catch (_: Exception) {}
                         }
                     }
                 }
             }
         }
-        return null
+        return ThreadsPostSearchResult(postNode = null, wrapperSeen = wrapperSeen)
     }
 
     private fun extractRenditions(videoVersions: JSONArray?): List<NativeMediaRendition> {
@@ -538,8 +779,13 @@ class NativeThreadsEngine(
 
         val hasMedia = renditions.isNotEmpty() || (dashVideoUrl != null && dashAudioUrl != null) || (dashVideoUrl != null)
         if (!hasMedia) {
+            if (isThreadsImageOrTextPost(post)) {
+                return MetaExtractionResult.Failure(
+                    MetaExtractionError.NoVideo("此 Threads 貼文未包含任何影片內容 (可能為純文字或純圖片貼文)")
+                )
+            }
             return MetaExtractionResult.Failure(
-                MetaExtractionError.NoVideo("此 Threads 貼文未包含任何影片內容 (可能為純文字或純圖片貼文)")
+                MetaExtractionError.Technical("Threads 貼文結構未解析出有效媒體，可能為頁面版型變更")
             )
         }
 
@@ -586,6 +832,10 @@ class NativeThreadsEngine(
         val canonicalUrl = normalizeUrl(resolvedUrl)
         val profileSteps = mutableListOf<String>()
 
+        safeLog("[Resolver] platform=THREADS")
+        safeLog("[Threads] share_resolved=true")
+        safeLog("[Threads] target_code=$shortcode")
+
         // Step 1: DESKTOP_NAVIGATION
         profileSteps.add("DESKTOP")
         val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
@@ -615,8 +865,18 @@ class NativeThreadsEngine(
 
         lastProfileSequence = profileSteps
 
+        val targetWrapper = if (parseResult is MetaExtractionResult.Failure) {
+            val detail = (parseResult.error as? MetaExtractionError.Technical)?.detail ?: parseResult.error.message ?: ""
+            detail.contains("貼文代碼符合")
+        } else true
+        val actualMedia = parseResult is MetaExtractionResult.Success
+
+        safeLog("[Threads] script_source=application_json")
+        safeLog("[Threads] target_wrapper=$targetWrapper actual_media=$actualMedia")
+
         when (parseResult) {
             is MetaExtractionResult.Success -> {
+                safeLog("[Threads] final=SUCCESS")
                 val media = parseResult.media
                 val options = buildQualityOptions(media)
                 val info = MediaInfo(
@@ -631,8 +891,18 @@ class NativeThreadsEngine(
                 Result.success(info)
             }
             is MetaExtractionResult.Failure -> {
+                val finalStatus = if (parseResult.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
+                safeLog("[Threads] final=$finalStatus")
                 Result.failure(parseResult.error)
             }
+        }
+    }
+
+    private fun safeLog(msg: String) {
+        try {
+            Log.d(TAG, msg)
+        } catch (_: Exception) {
+            println("[$TAG] $msg")
         }
     }
 

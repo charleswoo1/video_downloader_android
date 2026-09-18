@@ -1,828 +1,695 @@
-# HANDOFF — Android v0.1.0 Initial Implementation
+# HANDOFF — Android v0.1.0 Platform Recovery / Multi-Resolver Implementation
 
 Repository: `charleswoo1/video_downloader_android`
 
-Target milestone: `v0.1.0`
+Target: existing PR #2 / branch `feat/android-v0.1.0-initial`
 
-Status: **implementation contract / not a release authorization**
+Status: **implementation contract / recovery task / NOT release authorization**
+
+This document supersedes the earlier assumption that platform detection should simply route every supported social URL into yt-dlp.  
+For Instagram, Threads, and X/Twitter, that assumption is now explicitly rejected by owner real-device evidence.
+
+---
 
 ## 0. Mission
 
-Build the first installable Android version of **Social Video Downloader** as a native Android application.
-
-The core user experience is:
+Make the Android v0.1.0 application perform the basic public-media workflow reliably on real devices:
 
 ```text
-Social app
-  ↓ Share
-Social Video Downloader
-  ↓
-Extract URL from shared text
-  ↓
-Detect platform
-  ↓
-Analyze media with yt-dlp
-  ↓
-Show metadata + download choices
-  ↓
-Download / merge media
-  ↓
-Save to Android Downloads
-  ↓
-Show completion notification
+Android Share / pasted URL
+        ↓
+URL normalization + platform detection
+        ↓
+platform-specific resolver (when required)
+        ↓
+app-owned ResolvedMedia / MediaInfo
+        ↓
+download direct media streams or yt-dlp fallback
+        ↓
+FFmpeg merge / audio extraction when required
+        ↓
+MediaStore → Downloads/SocialVideoDownloader/
 ```
 
-The app must also support pasting a URL directly on the main screen.
+The immediate regression targets are:
 
-This repository is Android-only. Do not modify the Windows repository unless a later task explicitly requests cross-repo work.
+- Instagram public Reel
+- Threads public video post, including `threads.com/share/...`
+- X/Twitter public video post
+
+The task is **not** to keep patching yt-dlp error strings.  
+The task is to implement the correct Android-side extraction architecture using already available open-source implementations as reference.
 
 ---
 
-## 1. Mandatory workflow
+## 1. Non-negotiable direction
+
+### 1.1 Android-first implementation
+
+This repository is Android-only.
+
+The Windows repository `charleswoo1/video_downloader` may be used only for:
+
+- expected product behavior;
+- known URL normalization behavior;
+- expected output semantics;
+- comparison of a resolver's conceptual behavior.
+
+**DO NOT use the Windows repository as the primary implementation source for Android platform extraction.**
+
+The implementation source of truth for this task must be:
+
+1. current Android code in this repository;
+2. relevant Android / portable open-source extractor implementations;
+3. current behavior of the target public websites;
+4. real-device evidence.
+
+### 1.2 yt-dlp is NOT the primary resolver for these three platforms
+
+For v0.1.0 recovery:
+
+```text
+Instagram  → platform-specific resolver FIRST → yt-dlp optional fallback
+Threads    → platform-specific resolver FIRST → yt-dlp is NOT sufficient by itself
+X/Twitter  → platform-specific resolver FIRST → yt-dlp optional fallback
+```
+
+For these three platforms, it is a task failure to keep the architecture as:
+
+```text
+PlatformDetector → youtubedl-android → yt-dlp → error
+```
+
+and then only translate or special-case the error.
+
+### 1.3 yt-dlp can remain primary for other platforms
+
+Unless evidence requires otherwise, the existing yt-dlp path can remain the primary implementation for:
+
+- YouTube
+- Facebook
+- TikTok
+- generic supported sites
+
+Do not unnecessarily rewrite working platforms.
+
+### 1.4 Do not add login/cookie UI as a shortcut
+
+Current scope remains public content.
+
+Do **not** respond to public-content extraction failures by adding:
+
+- browser cookie extraction;
+- cookies.txt import;
+- account login UI;
+- WebView credential capture;
+- hard-coded session tokens;
+- private API credentials.
+
+If a reference implementation requires a secret, private token, authenticated API, or user login, document that limitation and select another public approach.
+
+---
+
+## 2. Current real-device evidence — must be treated as regression input
+
+Owner tested the CI APK and confirmed the effective runtime version is:
+
+```text
+yt-dlp: 2026.08.19
+```
+
+### Instagram failures
+
+Two public Reel URLs were reported to fail during analysis with:
+
+```text
+WARNING: [Instagram] ... Instagram API is not granting access
+```
+
+Regression inputs:
+
+```text
+https://www.instagram.com/reel/DdXfJ2nzdtA/?stkn=ZWhiNjI5c2NqcGpn
+https://www.instagram.com/reel/DdTezS7Onyv/?stkn=MXFvZXhvY3dya3h0eA==
+```
+
+The existence of an up-to-date yt-dlp runtime does not solve this case.  
+Do not keep retrying the same yt-dlp extractor as the primary fix.
+
+### Threads failures
+
+Owner reported these share URLs fail as unsupported:
+
+```text
+https://www.threads.com/share/_x6PzKrLo/
+https://www.threads.com/share/BADtlftVG7/
+```
+
+Required behavior:
+
+```text
+/share/<token>
+  ↓ follow real redirect / canonical URL
+canonical Threads post
+  ↓ identify target post only
+extract target media
+```
+
+The resolver must not accidentally select recommended / related / quoted media unless the target post semantics require it.
+
+### X / Twitter failures
+
+Owner reported these URLs returned:
+
+```text
+ERROR: [twitter] ... No video could be found in this tweet
+```
+
+Regression inputs:
+
+```text
+https://x.com/SmallQQQQQ/status/2100222618649682262
+https://x.com/Handjob12s/status/2100621013876887914
+```
+
+Treat these as owner-supplied regression inputs.
+
+If inspection proves that a specific post genuinely contains no public video at test time, do not fake success.  
+Record evidence and additionally test a confirmed public X video post using the same resolver path.
+
+---
+
+## 3. Mandatory research phase — DO THIS BEFORE WRITING THE FIX
+
+The agent must not start by editing `YtDlpDownloadEngine.kt`.
 
 Before implementation:
 
-1. Read `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, and this contract.
-2. Read current `main` and any open Issue / PR relevant to this milestone.
-3. Create one implementation Issue for Android `v0.1.0` if one does not already exist.
-4. Create a feature branch from the latest `main`.
-5. Implement the milestone on that branch.
-6. Run all required tests and build a debug APK.
-7. Open a Pull Request to `main`.
-8. Do **not** merge the PR unless explicitly instructed by the repository owner.
-9. Do **not** create a tag or GitHub Release.
+1. Read:
+   - `AGENTS.md`
+   - current `README.md`
+   - this handoff
+   - current PR #2
+   - all current source files in `data/download/`
+   - current platform detection / share URL code.
 
-The PR description must include:
+2. Inspect current upstream/reference implementations for actual extraction behavior.
 
-- implemented scope;
-- known limitations;
-- test results;
-- tested Android version / device or emulator information;
-- debug APK artifact information;
-- yt-dlp / youtubedl-android / FFmpeg versions actually used.
+3. Produce a short implementation note in the PR conversation or commit documentation containing, for each of Instagram / Threads / X:
+   - reference repository;
+   - exact source file(s) / relevant function(s);
+   - URL / endpoint / page payload technique used;
+   - whether authentication is required;
+   - whether it is suitable for Android public-content use;
+   - what logic will be ported or adapted;
+   - what will deliberately NOT be copied.
 
----
+4. Only after this reference comparison may implementation begin.
 
-## 2. Product scope for v0.1.0
+### Known references to inspect
 
-### In scope
+These are starting points, not permission to blindly copy code:
 
-- Native Android application.
-- Kotlin.
-- Jetpack Compose UI.
-- Receive shared `text/plain` content from Android Sharesheet.
-- Extract HTTP / HTTPS URL(s) from arbitrary shared text.
-- Select the first supported URL deterministically when more than one URL is present.
-- Detect these platforms:
-  - YouTube / `youtu.be`
-  - Facebook / `fb.watch`
-  - Instagram
-  - Threads
-  - X / Twitter
-  - TikTok
-  - generic yt-dlp-supported URL
-- Analyze a URL using yt-dlp and display at minimum:
-  - title;
-  - platform / extractor;
-  - duration when available;
-  - thumbnail when available;
-  - basic format / quality choices when available.
-- Download video.
-- Download audio-only.
-- FFmpeg merge/post-processing when required.
-- Display active download progress.
-- Allow cancellation of an active download.
-- Persist completed file into Android shared storage.
-- Display completion / failure notification.
-- Main screen supports paste / manual URL input.
-- GitHub Actions CI builds and uploads a debug APK Artifact.
+- `JunkFood02/Seal`
+  - mature Android downloader architecture and youtubedl-android integration patterns.
+- `yausername/youtubedl-android`
+  - Android runtime behavior / process / FFmpeg integration reference.
+- `tribixbite/yt-dlp-threads`
+  - Threads-specific extractor behavior reference.
+- `ThePotato456/threads-ytdlp-extractor`
+  - additional Threads extractor reference.
+- `2Xsave/2xsave_common`
+  - portable social-media extraction/common logic candidate.
+- current public Android Instagram / X downloader repositories found through GitHub search
+  - inspect implementation quality, maintenance status, authentication assumptions, and licensing before adapting.
 
-### Explicitly out of scope for v0.1.0
+If previous project discussion or PR comments contain additional Android reference repositories, inspect those too.
 
-Do not expand scope unless the owner explicitly asks:
+### Reference-code rule
 
-- DRM bypass.
-- Private / paid-content bypass.
-- Browser cookie extraction.
-- Account login UI.
-- Cookie import UI.
-- Playlist batch downloading.
-- Download queue with multiple concurrent jobs.
-- Automatic yt-dlp runtime self-update.
-- Android TV / Wear / Auto.
-- Google Play publication.
-- Production signing.
-- Automatic GitHub Release publishing.
-- Background clipboard monitoring.
-- Accessibility-service based URL capture.
-- Automatic interception of content from other apps without an explicit Android Share action.
+Do not cargo-cult.
+
+For every external implementation used:
+
+- understand the actual HTTP flow;
+- verify it still works against the current site;
+- check license compatibility;
+- adapt the minimum required algorithm into our application-owned abstraction;
+- do not copy unrelated UI, analytics, ads, credentials, or tracking code.
 
 ---
 
-## 3. Android baseline
+## 4. Required architecture
 
-Use the following baseline unless an incompatibility is discovered and documented in the PR:
+Keep the existing `DownloadEngine` app boundary, but introduce explicit platform resolver routing.
 
-- `compileSdk = 36`
-- `targetSdk = 36`
-- `minSdk = 26`
-- Kotlin
-- Jetpack Compose
-- Gradle Kotlin DSL
-- Java / JDK 17 toolchain unless the selected stable Android Gradle Plugin requires a newer supported baseline.
-- Single application module for v0.1.0 unless a clear testability/build reason justifies a second module.
-
-Use current stable Android / Kotlin / Compose dependencies that are compatible with API 36 at implementation time. Pin exact versions in the repository; do not use dynamic `+` dependency versions.
-
-Prefer a Gradle Version Catalog (`gradle/libs.versions.toml`) for dependency versions.
-
-Suggested application ID:
+Recommended shape:
 
 ```text
-com.charleswoo1.videodownloader
+MainViewModel
+    ↓
+DownloadRepository
+    ↓
+Hybrid / Routed DownloadEngine
+    ↓
+PlatformResolverRouter
+    ├── InstagramResolver
+    ├── ThreadsResolver
+    ├── XResolver
+    └── YtDlpResolver / existing yt-dlp path
 ```
 
-App display name:
+Exact class names may differ, but the separation must be real.
 
-```text
-Social Video Downloader
+### 4.1 Resolver contract
+
+Create an app-owned interface similar to:
+
+```kotlin
+interface PlatformResolver {
+    fun supports(url: String): Boolean
+
+    suspend fun resolve(url: String): Result<ResolvedMedia>
+}
 ```
 
-Initial version values:
+The app-owned resolved result should contain enough information to download without exposing third-party classes:
 
 ```text
-versionName = "0.1.0"
-versionCode = 1
-```
-
-Do not create a `v0.1.0` Git tag in this task.
-
----
-
-## 4. yt-dlp / FFmpeg runtime strategy
-
-Use `youtubedl-android` behind an application-owned abstraction rather than calling it directly from Composables or screens.
-
-Initial candidate dependency:
-
-```text
-io.github.junkfood02.youtubedl-android:library:0.18.1
-io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1
-```
-
-`aria2c` is **not required** for v0.1.0. Do not add it unless there is a demonstrated need.
-
-Important constraints:
-
-1. `0.18.1` is an initial implementation candidate, not an architectural dependency.
-2. Wrap the library with an interface such as `MediaExtractor` / `MediaDownloadEngine` so the implementation can be changed later.
-3. Do not expose `YoutubeDLRequest`, `VideoInfo`, or other third-party classes to the UI layer.
-4. Do not implement automatic yt-dlp binary/runtime updates in v0.1.0.
-5. Initialize yt-dlp and FFmpeg outside Composables, preferably from application/runtime initialization code with explicit error handling.
-6. If native ABI configuration is required, document it and verify at least `arm64-v8a`; supporting additional ABIs is desirable for debug builds but must not break CI.
-7. Verify behavior on a modern arm64 device/emulator. Pay special attention to 16 KB page-size compatibility.
-8. If `0.18.1` cannot pass required acceptance tests, do not hide the failure. Document the failing platform/device and propose the smallest justified dependency/runtime adjustment in the PR.
-
-### Licensing checkpoint
-
-`youtubedl-android` is published under GPL-3.0. Before any public binary Release, review and satisfy all applicable third-party licensing obligations, including the chosen FFmpeg build and its license configuration.
-
-For this milestone:
-
-- add `THIRD_PARTY_NOTICES.md` describing major runtime dependencies and their upstream links/licenses;
-- do not claim a project-wide license that has not been explicitly selected by the owner;
-- treat public production Release as blocked until repository licensing is explicitly decided.
-
----
-
-## 5. Required architecture
-
-Keep v0.1.0 simple but layered.
-
-Recommended structure:
-
-```text
-app/src/main/java/com/charleswoo1/videodownloader/
-├── App.kt
-├── MainActivity.kt
-├── data/
-│   ├── download/
-│   │   ├── DownloadEngine.kt
-│   │   ├── YtDlpDownloadEngine.kt
-│   │   └── DownloadRepository.kt
-│   └── storage/
-│       └── DownloadStorage.kt
-├── domain/
-│   ├── model/
-│   │   ├── MediaInfo.kt
-│   │   ├── MediaFormat.kt
-│   │   ├── DownloadRequest.kt
-│   │   └── DownloadState.kt
-│   └── url/
-│       ├── SharedTextUrlExtractor.kt
-│       └── PlatformDetector.kt
-├── service/
-│   └── DownloadService.kt
-└── ui/
-    ├── MainViewModel.kt
-    ├── navigation/
-    ├── screen/
-    ├── component/
-    └── theme/
-```
-
-Exact filenames may change if implementation quality improves, but preserve these boundaries:
-
-```text
-Compose UI
-   ↓
-ViewModel / UI state
-   ↓
-Repository / use-case boundary
-   ↓
-DownloadEngine abstraction
-   ↓
-youtubedl-android + FFmpeg
-```
-
-Do not put yt-dlp command construction directly in Composables.
-
----
-
-## 6. Share Intent behavior
-
-Register the application as a share target for:
-
-```text
-ACTION_SEND
-text/plain
-```
-
-Expected behavior:
-
-1. User taps Share in another app.
-2. User selects Social Video Downloader.
-3. App receives `Intent.EXTRA_TEXT`.
-4. Parse arbitrary text rather than assuming the payload is a bare URL.
-5. Extract valid HTTP / HTTPS URLs.
-6. Normalize obvious trailing punctuation safely.
-7. Choose the first supported URL.
-8. Open/focus the app and immediately populate the analysis flow.
-9. If no URL is found, show a clear user-facing message and preserve the original shared text only in memory as needed for the screen; do not log sensitive content unnecessarily.
-
-The Activity must also correctly handle a new share while already alive (for example through `onNewIntent` / equivalent state handling).
-
-Do not rely on clipboard access for the share workflow.
-
----
-
-## 7. URL extraction and platform detection
-
-Implement these as pure, unit-testable Kotlin components.
-
-### URL extraction requirements
-
-Must handle at least:
-
-```text
-https://example.com/video
-Check this: https://example.com/video
-看看這個 https://example.com/video 很有趣
-https://example.com/a https://example.com/b
-(https://example.com/video)
-https://example.com/video,
-```
-
-Must reject obvious non-HTTP(S) strings.
-
-### Platform detection
-
-Map URLs to an internal enum / sealed model such as:
-
-```text
-YOUTUBE
-FACEBOOK
-INSTAGRAM
-THREADS
-X
-TIKTOK
-GENERIC
-```
-
-Platform detection is a UI hint and routing aid only. yt-dlp remains the final authority for actual extractor support.
-
----
-
-## 8. Analyze flow
-
-The main screen must have a URL input field and an Analyze action.
-
-For either pasted URL or share-intent URL:
-
-```text
-Idle
- ↓
-Validating URL
- ↓
-Analyzing
- ↓
-Success(MediaInfo)
-```
-
-or
-
-```text
-Analyzing
- ↓
-Error(user-readable message)
-```
-
-`MediaInfo` should be an app-owned model and include at least:
-
-```text
-sourceUrl
-title
+canonicalUrl
 platform
-extractor
-thumbnailUrl?
-durationSeconds?
-formats
+title
+uploader?
+thumbnail?
+duration?
+media candidates
+  - direct progressive URL, OR
+  - video URL + audio URL
+  - height / bitrate when trustworthy
+headers/referer needed for media request
 ```
 
-Do not display raw Python stack traces, command lines, cookies, headers, or tokens in normal UI errors.
+Do not expose raw yt-dlp classes to UI.
 
-A developer-oriented error detail may be logged in debug builds, but sanitize URLs where practical and never log authentication material.
+### 4.2 Download path
 
----
+If a platform resolver returns direct media URLs, download them directly through the Android engine.
 
-## 9. Download choices
+Do not force a successfully resolved direct URL back through yt-dlp merely because yt-dlp already exists.
 
-v0.1.0 UI must support at least:
+Use FFmpeg only when required for:
 
-### Video
+- separate video + audio merge;
+- audio extraction / conversion.
 
-- Best available / automatic.
-- When format metadata makes it practical, expose a small set of quality choices such as:
-  - 1080p
-  - 720p
-  - 480p
-  - 360p
-- Do not present a quality option if the analyzed media cannot satisfy it.
-- Prefer MP4-compatible output where practical.
-- Use FFmpeg merge when separate video/audio streams are selected.
+### 4.3 Fallback semantics
 
-### Audio
+Fallback must be explicit and observable.
 
-- Audio-only mode.
-- Produce a broadly playable audio result; exact codec/container should be chosen based on the runtime's reliable FFmpeg support and documented in the PR.
-
-Keep yt-dlp selector construction inside the download engine layer.
-
----
-
-## 10. Download execution and lifecycle
-
-Downloads are user-initiated and may continue after the UI leaves the foreground.
-
-For v0.1.0, implement a foreground download service or another Android-supported user-initiated transfer mechanism that provides equivalent lifecycle reliability and notification visibility.
-
-If using a foreground service:
-
-- declare the appropriate foreground service type for data transfer;
-- declare the required foreground service permissions for the selected target SDK;
-- show an ongoing notification immediately as required by Android;
-- stop the service promptly after completion/cancellation/failure;
-- implement timeout-safe behavior on modern Android versions;
-- do not assume an unlimited background runtime.
-
-State model should include at minimum:
+Example:
 
 ```text
-Idle
-Preparing
-Downloading(progress?, eta?)
-PostProcessing
-Completed(uri/path)
-Cancelled
-Failed(message)
+InstagramResolver
+  ├─ success → use native result
+  └─ unsupported / no public media result
+        ↓
+     yt-dlp fallback (optional)
 ```
 
-Cancellation must terminate the corresponding yt-dlp process through the runtime API when possible.
+A resolver exception caused by a programming bug must not silently fall through and hide the bug.
 
-Only one active download is required for v0.1.0.
+Log which resolver path was used in debug diagnostics.
 
 ---
 
-## 11. Storage behavior
+## 5. Platform-specific requirements
 
-Primary v0.1.0 destination:
+## 5.1 Instagram
 
-```text
-Downloads/SocialVideoDownloader/
-```
+Goal: public Reel / public video post metadata + downloadable media without account login.
 
-Use modern Android shared-storage APIs.
-
-For Android 10+ prefer MediaStore / scoped-storage-compatible behavior rather than legacy unrestricted filesystem assumptions.
+The primary implementation must be based on a currently working public-page / portable extractor technique discovered in the mandatory research phase.
 
 Requirements:
 
-- completed downloads are visible to the user outside the app;
-- incomplete/temporary files should not appear as successfully completed media;
-- sanitize invalid filename characters;
-- avoid accidental overwrite; apply deterministic conflict naming such as `(1)`, `(2)` or another documented scheme;
-- return the final `content://` URI or equivalent app-owned result to the UI when available;
-- no broad storage permission should be requested unless technically necessary and justified.
+- normalize Reel/post URL and remove irrelevant share query parameters when safe;
+- use realistic browser HTTP headers where required;
+- follow redirects;
+- handle escaped JSON / HTML entities correctly;
+- locate media belonging to the target shortcode only;
+- return direct media URL(s), title/caption, thumbnail when available;
+- do not claim private/login-required content is supported;
+- do not call the yt-dlp Instagram extractor first.
 
-Because `minSdk = 26`, isolate any pre-API-29 storage fallback. Do not let legacy storage handling contaminate the API-29+ path.
+If the public website blocks all unauthenticated extraction for the tested URL, provide concrete HTTP/payload evidence before declaring a platform limitation.
 
----
+## 5.2 Threads
 
-## 12. Notifications
+Threads requires a dedicated resolver.
 
-Create a dedicated notification channel.
-
-Required states:
-
-- downloading;
-- post-processing when applicable;
-- completed;
-- failed;
-- cancelled if useful.
-
-The active notification should show progress when the runtime reports meaningful progress.
-
-Completion notification should open the application and, when feasible, provide access to the downloaded file through a safe `content://` URI.
-
-Android 13+ notification permission behavior must be handled correctly. A denied notification permission must not crash the application; document any resulting background-download limitations.
-
----
-
-## 13. UI requirements
-
-Keep the first release functional and restrained.
-
-### Main screen
-
-Must include:
-
-- app title;
-- URL text field;
-- Analyze button;
-- loading/analyzing state;
-- media result card;
-- thumbnail if available;
-- title;
-- platform;
-- duration if available;
-- download mode selector;
-- quality selector when applicable;
-- Download button;
-- active progress UI;
-- Cancel action while downloading;
-- clear success/failure message.
-
-### Share entry
-
-When opened from Android Sharesheet, skip unnecessary manual steps:
+Required URL forms include at minimum:
 
 ```text
-Receive share
-→ extract URL
-→ populate UI
-→ begin analysis automatically
+https://www.threads.com/@user/post/<code>
+https://www.threads.com/t/<code>
+https://www.threads.com/share/<token>
+threads.net equivalents when encountered
 ```
 
-Do **not** automatically start the final download in v0.1.0. The user must explicitly confirm Download after analysis.
+Requirements:
 
-### Language
+1. Normalize `threads.net` → `threads.com` where appropriate.
+2. For `/share/<token>`, resolve redirects/canonical URL before extracting a post ID.
+3. Support:
+   - `application/json` payloads;
+   - escaped/nested JSON payloads when the target post is not present as a simple JSON block.
+4. Match the target post by shortcode/code.
+5. Once target post is found, traverse only the target post's relevant media subtree.
+6. Explicitly avoid:
+   - recommended;
+   - related;
+   - suggested;
+   - unrelated page media.
+7. Support progressive video when available.
+8. Support DASH video + audio when required.
+9. If DASH is used:
+   - parse Representation choices;
+   - choose a real best video representation;
+   - choose audio representation;
+   - merge with FFmpeg;
+   - merge failure = failure, never silent video-only success.
+10. Do not display fake 1080p/720p options that map to the same URL.
 
-Use Traditional Chinese (`zh-TW`) as the initial UI language.
+The existing simplified `ThreadsResolver.kt` may be replaced or substantially rewritten if that is the smallest correct solution.
 
-Keep user-visible strings in Android string resources rather than hardcoding them in Composables.
+## 5.3 X / Twitter
 
----
+Do not assume `No video could be found in this tweet` from yt-dlp proves the post has no video.
 
-## 14. State and configuration
+The primary X resolver must be based on a current public extraction method discovered during research.
 
-Use a lifecycle-aware ViewModel.
+Requirements:
 
-Do not introduce a database unless necessary.
+- normalize `twitter.com` / `x.com`;
+- identify status ID;
+- resolve target tweet/media only;
+- obtain available video variants when public;
+- select the best sensible variant using bitrate/resolution metadata;
+- preserve required Referer/User-Agent/headers;
+- return a clear "no public video in target post" only when the primary resolver also confirms no video.
 
-For v0.1.0 it is acceptable for current analysis/download screen state to be in memory, provided rotation/recomposition does not cause duplicate downloads or duplicate yt-dlp execution.
+Do not add undocumented bearer tokens, private API keys, or copied secrets.
 
-If preferences are needed, use Android-appropriate preference storage and keep the scope minimal.
-
-No cookie/login settings are needed in this milestone.
-
----
-
-## 15. Error handling
-
-Create user-readable categories rather than surfacing raw exceptions.
-
-At minimum cover:
-
-- invalid / missing URL;
-- unsupported URL;
-- network unavailable / connection failure;
-- yt-dlp initialization failure;
-- metadata extraction failure;
-- FFmpeg initialization / post-processing failure;
-- storage write failure;
-- download cancellation;
-- platform-side restriction / login required when detectable.
-
-Messages should make clear when the failure is caused by a source site's changing behavior rather than implying that every URL is guaranteed to work.
-
----
-
-## 16. Testing requirements
-
-### Unit tests — mandatory
-
-At minimum:
-
-1. `SharedTextUrlExtractor`
-   - bare URL;
-   - URL embedded in English text;
-   - URL embedded in Chinese text;
-   - multiple URLs;
-   - punctuation around URL;
-   - no URL;
-   - non-http scheme rejection.
-
-2. `PlatformDetector`
-   - YouTube;
-   - youtu.be;
-   - Facebook;
-   - fb.watch;
-   - Instagram;
-   - Threads;
-   - X;
-   - twitter.com;
-   - TikTok;
-   - generic URL.
-
-3. Download request / format selection mapping.
-
-4. Download state mapping / cancellation behavior that can be tested without performing a real network download.
-
-### Instrumented / integration smoke tests
-
-Where practical:
-
-- `ACTION_SEND` `text/plain` intent opens the correct state;
-- manual URL input is accepted;
-- notification channel creation does not crash;
-- storage integration creates a writable target on supported emulator/device.
-
-### Real runtime verification
-
-Before declaring the PR ready, manually test at least:
-
-- one public YouTube URL;
-- one additional public supported social URL if currently available;
-- video download;
-- audio-only download;
-- cancel during download;
-- share from another Android app or an equivalent test intent;
-- successful file visibility in Downloads.
-
-Do not place unstable third-party live URLs into unit tests that would make CI nondeterministic.
-
-If Instagram/TikTok/Facebook fails because of an upstream runtime/extractor issue, record the exact result in the PR instead of weakening tests or faking support.
+If a public endpoint requires a guest/session token obtained through a documented public bootstrap flow, explain and encapsulate that flow; do not hard-code transient credentials.
 
 ---
 
-## 17. GitHub Actions CI
+## 6. HTTP and parsing requirements
 
-Add a CI workflow for pull requests and pushes to `main`.
+For platform-native resolvers:
 
-Use GitHub-hosted standard runners.
+- use Android-compatible HTTP code;
+- set explicit timeouts;
+- follow redirects deliberately;
+- support per-request headers;
+- use a browser-like User-Agent where needed;
+- use Referer where media CDN requires it;
+- decode HTML entities and JSON escapes;
+- sanitize logging;
+- close streams/connections;
+- cancellation must interrupt active network work;
+- temporary files must stay private until successful completion.
 
-CI should perform at minimum:
+Prefer one small HTTP abstraction shared by platform resolvers rather than duplicating fragile connection code three times, but do not introduce a large framework merely for this milestone unless justified.
+
+---
+
+## 7. Error model
+
+Do not expose raw extractor warnings as the primary user message.
+
+Map failures into app-owned categories such as:
 
 ```text
-checkout
-setup JDK
-Gradle dependency/cache setup
-./gradlew test
-./gradlew lint
-./gradlew assembleDebug
-upload debug APK artifact
+NoPublicMedia
+LoginRequired
+RateLimited
+UnsupportedLayout
+NetworkFailure
+ResolverChanged
+PostProcessingFailure
+StorageFailure
+Cancelled
 ```
 
-Pin third-party GitHub Actions to immutable commit SHAs where practical, following the security posture used by the Windows repository.
+Debug logs may include sanitized low-level details.
 
-Artifact naming convention:
+User-visible error examples should be concise:
 
-```text
-SocialVideoDownloader-Android-CI-v0.1.0-run-<run_number>
-```
+- 「此公開貼文目前找不到可下載影片」
+- 「來源網站要求登入，目前版本不支援登入內容」
+- 「來源網站頁面格式已變更，解析器需要更新」
 
-APK inside the artifact should have a clear deterministic name, for example:
-
-```text
-SocialVideoDownloader-Android-v0.1.0-debug.apk
-```
-
-Artifact retention target:
-
-```text
-7 days
-```
-
-CI must **not**:
-
-- create tags;
-- create GitHub Releases;
-- sign with a production keystore;
-- require repository secrets for normal debug builds.
+Do not show multi-line raw yt-dlp WARNING/ERROR text directly in the main error card.
 
 ---
 
-## 18. Repository files expected from the implementation
+## 8. Runtime strategy
 
-Expected baseline after the PR, adjusted only when justified:
+Keep `youtubedl-android 0.18.1` only where it remains useful.
+
+Current app runtime self-update to Stable may remain if it is already stable and tested, but:
+
+- runtime update is not the fix for Instagram/Threads/X native resolver failures;
+- do not repeatedly update yt-dlp trying to solve a resolver that should be platform-native;
+- runtime version must remain visible in diagnostics.
+
+Do not change FFmpeg packaging strategy unless required by an actual failure.
+
+The known 16 KB page-size limitation remains documented and is not solved by this task unless a minimal validated dependency update is available.
+
+---
+
+## 9. Tests — CI success alone is NOT acceptance
+
+### 9.1 Mandatory unit tests
+
+Add deterministic tests for:
+
+- routing:
+  - Instagram URL → InstagramResolver first;
+  - Threads URL → ThreadsResolver first;
+  - X URL → XResolver first;
+  - YouTube / generic → current yt-dlp path.
+- URL normalization for each platform.
+- Threads `/share/` canonical resolution logic using mocked/local responses.
+- target-post selection that rejects unrelated/recommended media.
+- escaped JSON payload parsing.
+- direct progressive media selection.
+- DASH best-video + audio selection.
+- merge failure returns failure.
+- resolver fallback semantics.
+- user-facing error mapping.
+
+Do not make CI depend on live third-party URLs.
+
+### 9.2 Real-device acceptance gate
+
+A PR is **not ready to merge** until the owner tests a new CI APK and confirms the regression platforms.
+
+At minimum, report:
 
 ```text
-.github/
-  workflows/
-    ci.yml
-app/
-  build.gradle.kts
-  src/
-    main/
-      AndroidManifest.xml
-      java/...
-      res/...
-    test/...
-    androidTest/...
-gradle/
-  libs.versions.toml
-  wrapper/...
-build.gradle.kts
-settings.gradle.kts
-gradle.properties
-gradlew
-gradlew.bat
-README.md
-THIRD_PARTY_NOTICES.md
-AGENTS.md
-CONTRIBUTING.md
-SECURITY.md
+Device:
+Android version:
+APK CI run:
+App commit:
+yt-dlp runtime:
+
+Instagram:
+- URL:
+- resolver used:
+- analyze:
+- download:
+- playable/audio:
+
+Threads:
+- /share URL:
+- canonical URL resolved:
+- resolver used:
+- analyze:
+- download:
+- playable/audio:
+
+X:
+- URL:
+- resolver used:
+- analyze:
+- download:
+- playable/audio:
 ```
 
-Update README to replace "initialization only" language with real developer build instructions once the project builds successfully.
+If a supplied live URL no longer contains public media, replace it with another confirmed public-media URL and explain why.
+
+### 9.3 Existing baseline regression
+
+Do not break currently working behavior:
+
+- YouTube analyze/download
+- Facebook basic public path
+- share intent
+- manual paste
+- cancellation
+- MediaStore save
+- completion/failure notification
 
 ---
 
-## 19. README updates required in this PR
+## 10. Diagnostics required for this recovery task
 
-The implementation PR must update README with:
+In debug builds, log a short resolver trace such as:
 
-- current Android requirements;
-- how to clone/build the debug APK;
-- how to install the debug APK for testing;
-- how to use the Android share flow;
-- supported-platform caveats;
-- storage location;
-- CI Artifact location/instructions;
-- statement that v0.1.0 is pre-release/development until the owner explicitly publishes a Release;
-- no claim that every yt-dlp-supported site is guaranteed to work.
+```text
+[Resolver] platform=THREADS route=ThreadsResolver
+[Resolver] share_redirect=true canonical=https://...
+[Resolver] target_code=...
+[Resolver] candidates=2 selected=dash height=1080 audio=true
+```
 
-Do not add a permanent public Release download link until an actual Release exists.
+For fallback:
 
----
+```text
+[Resolver] platform=INSTAGRAM primary=InstagramResolver result=NoPublicMedia
+[Resolver] fallback=yt-dlp
+```
 
-## 20. Security / privacy requirements
-
-Do not request permissions unrelated to the milestone.
-
-Do not collect analytics or telemetry in v0.1.0.
-
-Do not add ad SDKs.
-
-Do not add remote configuration.
-
-Do not transmit URLs anywhere except to the source services/runtime required to analyze/download them.
-
-Do not commit:
+Never log:
 
 - cookies;
-- auth tokens;
-- API keys;
-- keystores;
-- signing passwords;
-- `local.properties`;
-- device identifiers.
+- auth headers;
+- tokens;
+- full credential-bearing URLs;
+- personal account data.
 
-Do not use WebView-based credential capture.
+This diagnostic trace is required so future real-device screenshots/logs show which engine actually ran.
 
 ---
 
-## 21. Definition of done
+## 11. Workflow for this task
 
-The implementation PR is ready for owner review only when all of the following are true:
-
-- [ ] Android project opens/builds with documented tooling.
-- [ ] `compileSdk 36` and `targetSdk 36` are configured, or a documented blocker explains any temporary deviation.
-- [ ] `minSdk 26` is configured.
-- [ ] App launches without crash.
-- [ ] Share target appears for `text/plain` share actions.
-- [ ] Shared social text extracts a URL correctly.
-- [ ] Manual pasted URL flow works.
-- [ ] Platform detection works for required hosts.
-- [ ] At least one public URL can be analyzed through the selected yt-dlp runtime.
-- [ ] Media metadata is displayed through app-owned models.
-- [ ] Video download works on at least one verified public source.
-- [ ] Audio-only download works on at least one verified public source.
-- [ ] FFmpeg merge/post-processing is verified when required.
-- [ ] Active download progress is visible.
-- [ ] Download cancellation works.
-- [ ] Finished file is visible in `Downloads/SocialVideoDownloader/` or the documented equivalent MediaStore destination.
-- [ ] Completion/failure notification works.
-- [ ] Unit tests pass.
-- [ ] Lint passes or any exception is explicitly documented and narrowly justified.
-- [ ] `assembleDebug` passes.
-- [ ] GitHub Actions uploads a debug APK Artifact.
-- [ ] No credentials or signing keys are committed.
-- [ ] `THIRD_PARTY_NOTICES.md` exists.
-- [ ] README is updated to match actual behavior.
-- [ ] Known upstream/runtime limitations are listed in the PR.
-- [ ] No tag or formal GitHub Release has been created.
-
----
-
-## 22. Required implementation report
-
-When Codex finishes, return a concise report containing:
+Continue the existing work:
 
 ```text
-Issue:
-Branch:
+Repository: charleswoo1/video_downloader_android
+PR: #2
+Branch: feat/android-v0.1.0-initial
+```
+
+Do **not**:
+
+- create a new PR for this recovery unless PR #2 becomes unusable;
+- merge PR #2;
+- modify `main` directly;
+- create a tag;
+- publish a Release.
+
+Before pushing, confirm the branch still corresponds to PR #2.
+
+After implementation:
+
+```text
+./gradlew test
+./gradlew lintDebug
+./gradlew assembleDebug
+```
+
+CI must upload the new debug APK Artifact.
+
+---
+
+## 12. Stop conditions
+
+Stop and report evidence instead of choosing a different architecture silently if:
+
+1. A reference implementation only works with authenticated/private APIs.
+2. A platform now requires login for the owner's public regression URLs.
+3. A required public endpoint is protected by a secret/token that cannot be legitimately obtained.
+4. The selected reference code has incompatible licensing for adaptation.
+5. The fix would require WebView credential capture, accessibility, broad storage permission, or other invasive mechanisms.
+6. The only proposed fix is "update yt-dlp again" for Instagram/Threads/X without first implementing/evaluating the required native resolver.
+7. A resolver cannot be validated against current website payloads.
+
+When stopping, include:
+
+- HTTP status / sanitized response evidence;
+- reference implementation evaluated;
+- exact blocker;
+- smallest next option.
+
+---
+
+## 13. Definition of done for this recovery
+
+The task is complete only when all are true:
+
+- [ ] Mandatory reference research is documented.
+- [ ] Instagram has a platform-specific primary resolver.
+- [ ] Threads has a platform-specific primary resolver with working `/share/` handling.
+- [ ] X/Twitter has a platform-specific primary resolver.
+- [ ] yt-dlp is no longer the unconditional first path for those three platforms.
+- [ ] Resolver routing is covered by tests.
+- [ ] Raw yt-dlp warnings are not shown directly as normal UI errors.
+- [ ] Threads target-post selection does not use recommendation media.
+- [ ] Direct stream downloads support required headers/referer.
+- [ ] DASH merge failure is a real failure.
+- [ ] Unit tests pass.
+- [ ] Lint passes.
+- [ ] `assembleDebug` passes.
+- [ ] CI passes and uploads APK.
+- [ ] Existing YouTube/Facebook baseline is not regressed.
+- [ ] Owner receives a new APK for real-device testing.
+- [ ] Instagram/Threads/X are not marked PASS until real-device verification.
+- [ ] No merge/tag/release occurs without owner instruction.
+
+---
+
+## 14. Required agent report
+
+Return exactly this information when implementation is ready for owner testing:
+
+```text
+Reference research:
+- Instagram:
+- Threads:
+- X:
+
+Architecture:
+- routing changes:
+- new resolver classes:
+- yt-dlp fallback behavior:
+
 PR:
+Branch:
 Head commit:
 
-Build:
+Tests:
 Unit tests:
 Lint:
 assembleDebug:
-CI:
+CI run:
 Artifact:
 
-Runtime:
-youtubedl-android:
-yt-dlp bundled/runtime version:
-FFmpeg:
-ABIs:
+Regression status:
+- YouTube:
+- Facebook:
+- Instagram: NEEDS OWNER DEVICE TEST / PASS / BLOCKED
+- Threads: NEEDS OWNER DEVICE TEST / PASS / BLOCKED
+- X: NEEDS OWNER DEVICE TEST / PASS / BLOCKED
 
-Manual verification:
-- Share Intent:
-- URL extraction:
-- YouTube analyze:
-- Video download:
-- Audio download:
-- Cancel:
-- Downloads visibility:
-- Notifications:
-- Additional social platform:
-
+Diagnostics added:
 Known limitations:
 Release created: NO
+Merged: NO
 ```
 
-Do not report a capability as passing unless it was actually exercised or covered by an appropriate test.
-
----
-
-## 23. Stop conditions / escalation
-
-Stop and report instead of silently changing architecture if any of these occur:
-
-1. `youtubedl-android 0.18.1` cannot initialize or build under the selected current Android toolchain.
-2. Native libraries fail on arm64 / modern 16 KB page-size devices.
-3. FFmpeg integration requires a materially different licensing/build strategy.
-4. Scoped-storage limitations prevent the required Downloads behavior.
-5. A required solution would need broad storage, accessibility, overlay, device-admin, or other invasive permissions.
-6. The implementation would require committing secrets or production signing materials.
-7. CI cannot build a reproducible debug APK without undocumented local files.
-
-In these cases, preserve the smallest working implementation, document evidence, and request an owner decision in the PR rather than adding an unsafe workaround.
-
----
-
-## 24. Owner decisions already fixed by this contract
-
-Do not ask again unless implementation evidence requires a change:
-
-- Android is a separate repository from the Windows app.
-- Android is the current mobile priority; iOS is not in scope.
-- Kotlin + Jetpack Compose is the chosen UI stack.
-- Explicit Android Sharesheet sharing is the primary mobile workflow.
-- Share action analyzes automatically but does **not** auto-download in v0.1.0.
-- No clipboard/background spying approach.
-- CI debug APK Artifact is desired.
-- Formal Release is **not authorized** by this contract.
-- v0.1.0 is the first Android milestone.
+Do not report Instagram / Threads / X as PASS merely because unit tests or CI pass.

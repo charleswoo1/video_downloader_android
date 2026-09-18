@@ -34,7 +34,7 @@ object DownloadRepository {
 
     fun initialize(context: Context) {
         if (engine == null) {
-            engine = YtDlpDownloadEngine(context.applicationContext)
+            engine = PlatformEngineRouter(context.applicationContext)
         }
         if (storage == null) {
             storage = DownloadStorage(context.applicationContext)

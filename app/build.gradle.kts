@@ -82,6 +82,7 @@ dependencies {
     implementation(libs.commons.compress)
     implementation(libs.jackson.databind)
     implementation(libs.jackson.annotations)
+    implementation(libs.okhttp)
 
     testImplementation(libs.junit)
     testImplementation(libs.json)

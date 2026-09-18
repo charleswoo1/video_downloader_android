@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Instagram Carousel by test_creator</title>
+</head>
+<body>
+    <script type="application/json" data-sjs>
+    {
+        "require": [
+            ["ScheduledServerJS", "handle", null, [
+                {
+                    "xdt_shortcode_media": {
+                        "__typename": "XDTGraphSidecar",
+                        "id": "358999999999999999",
+                        "shortcode": "DdXcarousel",
+                        "code": "DdXcarousel",
+                        "is_video": false,
+                        "display_url": "https://instagram.com/cdn/carousel_thumb.jpg",
+                        "owner": {
+                            "username": "test_creator"
+                        },
+                        "edge_media_to_caption": {
+                            "edges": [
+                                {
+                                    "node": {
+                                        "text": "Carousel containing video and photo"
+                                    }
+                                }
+                            ]
+                        },
+                        "edge_sidecar_to_children": {
+                            "edges": [
+                                {
+                                    "node": {
+                                        "id": "item1",
+                                        "is_video": false,
+                                        "display_url": "https://instagram.com/cdn/photo1.jpg"
+                                    }
+                                },
+                                {
+                                    "node": {
+                                        "id": "item2",
+                                        "is_video": true,
+                                        "video_url": "https://instagram.com/cdn/carousel_video.mp4",
+                                        "video_versions": [
+                                            {
+                                                "url": "https://instagram.com/cdn/carousel_video.mp4",
+                                                "width": 720,
+                                                "height": 1280
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]]
+        ]
+    }
+    </script>
+</body>
+</html>

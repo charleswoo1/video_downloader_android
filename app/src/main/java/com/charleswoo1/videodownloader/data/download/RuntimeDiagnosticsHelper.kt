@@ -157,6 +157,11 @@ object RuntimeDiagnosticsHelper {
             extraDetails.add("Threads plugin check error: $threadsPluginStatus")
         }
 
+        val router = DownloadRepository.getEngine(context) as? PlatformEngineRouter
+        val lastRoute = router?.lastRoutingLog?.let {
+            "${it.platform} -> Primary: ${it.primaryEngine}, Result: ${it.primaryResultCategory}, Fallback: ${it.fallbackAttempted}, Final: ${it.finalEngine}"
+        }
+
         val diag = RuntimeDiagnostics(
             youtubedlSource = "PR #361 (76ed1bf9) + PR #359 (a505022a)",
             ytdlpVersion = ytdlpVer,
@@ -169,6 +174,9 @@ object RuntimeDiagnosticsHelper {
             threadsPluginAvailable = threadsPluginOk,
             threadsPluginCommit = YtDlpPluginManager.PINNED_COMMIT,
             threadsPluginStatus = threadsPluginStatus,
+            nativeInstagramAvailable = true,
+            nativeThreadsAvailable = true,
+            lastRoutingLog = lastRoute,
             details = if (extraDetails.isNotEmpty()) extraDetails.joinToString("; ") else null
         )
 

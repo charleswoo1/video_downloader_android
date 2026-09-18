@@ -12,6 +12,9 @@ data class RuntimeDiagnostics(
     val threadsPluginAvailable: Boolean = false,
     val threadsPluginCommit: String = YtDlpPluginManager.PINNED_COMMIT,
     val threadsPluginStatus: String = "bundled",
+    val nativeInstagramAvailable: Boolean = true,
+    val nativeThreadsAvailable: Boolean = true,
+    val lastRoutingLog: String? = null,
     val details: String? = null
 ) {
     fun toFormattedReport(): String {
@@ -24,9 +27,14 @@ data class RuntimeDiagnostics(
             appendLine("FFmpeg version: $ffmpegVersion")
             appendLine("QuickJS available: ${if (quickJsAvailable) "yes" else "no"}")
             appendLine("ABI: $abi")
+            appendLine("Native Instagram Engine: ${if (nativeInstagramAvailable) "ready" else "unavailable"}")
+            appendLine("Native Threads Engine: ${if (nativeThreadsAvailable) "ready" else "unavailable"}")
             appendLine("Threads plugin: bundled")
             appendLine("Plugin commit: $threadsPluginCommit")
             appendLine("Plugin status: $threadsPluginStatus")
+            if (!lastRoutingLog.isNullOrBlank()) {
+                appendLine("Last Route: $lastRoutingLog")
+            }
             if (!details.isNullOrBlank()) {
                 appendLine("Details: $details")
             }

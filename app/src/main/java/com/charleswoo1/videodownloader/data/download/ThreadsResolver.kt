@@ -695,7 +695,8 @@ open class ThreadsResolver(private val context: Context? = null) {
                 readTimeout = 30000
                 setRequestProperty("User-Agent", BROWSER_UA)
                 setRequestProperty("Accept", "*/*")
-                setRequestProperty("Referer", "https://www.threads.com/")
+                setRequestProperty("Referer", "https://www.threads.net/")
+                setRequestProperty("Origin", "https://www.threads.net")
             }
             activeConnection = conn
 

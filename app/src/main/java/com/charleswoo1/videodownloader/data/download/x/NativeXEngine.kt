@@ -179,26 +179,30 @@ class NativeXEngine(
     suspend fun ensureGuestToken(bearerToken: String): String? = withContext(Dispatchers.IO) {
         cachedGuestToken?.let { return@withContext it }
 
-        // Check cookie jar first
+        // 1. Check cookie jar first
         val cookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
         if (!cookieGt.isNullOrBlank()) {
             cachedGuestToken = cookieGt
             return@withContext cookieGt
         }
 
-        // Request hashflags endpoint with Bearer and transaction id
+        // 2. Request hashflags endpoint with Bearer, transaction id, and active user/language headers
         val apiHeaders = mutableMapOf(
             "Authorization" to "Bearer $bearerToken",
-            "x-client-transaction-id" to generateTransactionId()
+            "x-client-transaction-id" to generateTransactionId(),
+            "x-twitter-active-user" to "yes",
+            "x-twitter-client-language" to "zh-tw"
         )
         val hashResp = httpSession.fetch(
             url = HASHFLAGS_ENDPOINT,
             profile = RequestProfile.API,
+            origin = "https://x.com",
+            referer = "https://x.com/",
             customHeaders = apiHeaders
         )
 
-        // Check response header x-guest-token
-        val headerGt = hashResp.getOrNull()?.headers?.get("x-guest-token")
+        // Check response header x-guest-token (case-insensitive)
+        val headerGt = hashResp.getOrNull()?.getHeader("x-guest-token")
         if (!headerGt.isNullOrBlank()) {
             cachedGuestToken = headerGt
             return@withContext headerGt
@@ -209,6 +213,32 @@ class NativeXEngine(
         if (!postCookieGt.isNullOrBlank()) {
             cachedGuestToken = postCookieGt
             return@withContext postCookieGt
+        }
+
+        // 3. Final authenticated x.com navigation fallback used by twsave:
+        // Request x.com desktop navigation with Authorization Bearer header, which prompts x.com to set 'gt' in cookies
+        val navAuthHeaders = mutableMapOf(
+            "Authorization" to "Bearer $bearerToken",
+            "x-twitter-active-user" to "yes"
+        )
+        val navResp = httpSession.fetch(
+            url = TWITTER_HOME_URL,
+            profile = RequestProfile.DESKTOP_NAVIGATION,
+            origin = "https://x.com",
+            referer = "https://x.com/",
+            customHeaders = navAuthHeaders
+        )
+
+        val navCookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
+        if (!navCookieGt.isNullOrBlank()) {
+            cachedGuestToken = navCookieGt
+            return@withContext navCookieGt
+        }
+
+        val navHeaderGt = navResp.getOrNull()?.getHeader("x-guest-token")
+        if (!navHeaderGt.isNullOrBlank()) {
+            cachedGuestToken = navHeaderGt
+            return@withContext navHeaderGt
         }
 
         null
@@ -236,7 +266,9 @@ class NativeXEngine(
 
         val headers = mutableMapOf(
             "Authorization" to "Bearer $bearerToken",
-            "x-client-transaction-id" to generateTransactionId()
+            "x-client-transaction-id" to generateTransactionId(),
+            "x-twitter-active-user" to "yes",
+            "x-twitter-client-language" to "zh-tw"
         )
         if (!guestToken.isNullOrBlank()) {
             headers["x-guest-token"] = guestToken
@@ -260,7 +292,9 @@ class NativeXEngine(
             val newGuest = ensureGuestToken(newBearer)
             val retryHeaders = mutableMapOf(
                 "Authorization" to "Bearer $newBearer",
-                "x-client-transaction-id" to generateTransactionId()
+                "x-client-transaction-id" to generateTransactionId(),
+                "x-twitter-active-user" to "yes",
+                "x-twitter-client-language" to "zh-tw"
             )
             if (!newGuest.isNullOrBlank()) {
                 retryHeaders["x-guest-token"] = newGuest
@@ -595,6 +629,7 @@ class NativeXEngine(
             streamUrl = streamUrl,
             destination = downloadTarget,
             referer = "https://x.com/",
+            origin = "https://x.com",
             onProgress = onProgress,
             isCancelled = { isCancelled.get() }
         )

@@ -238,6 +238,7 @@ class NativeInstagramEngineTest {
             streamUrl: String,
             destination: File,
             referer: String?,
+            origin: String?,
             onProgress: (Float, Long?, String?) -> Unit,
             isCancelled: () -> Boolean
         ): Boolean {
@@ -427,5 +428,75 @@ class NativeInstagramEngineTest {
         val media = (result as MetaExtractionResult.Success).media
         assertEquals("TargetShortcode", media.postId)
         assertEquals("https://instagram.com/cdn/target_video.mp4?stkn=tok+123", media.progressiveVideoUrls.first())
+    }
+
+    @Test
+    fun extractMediaInfo_desktopLoginWall_escalatesToMobileAndSucceeds() = kotlinx.coroutines.runBlocking {
+        val loginWallHtml = "<html><head><title>Login • Instagram</title></head><body><a href=\"/accounts/login/\">Login</a></body></html>"
+        val publicFixtureHtml = loadFixture("single_public_video.html")
+
+        val testSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val returnedBody = when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> loginWallHtml
+                    RequestProfile.MOBILE_NAVIGATION -> publicFixtureHtml
+                    else -> ""
+                }
+                return Result.success(HttpResponse(200, url, returnedBody, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = testSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+
+        assertTrue("Expected extraction success when mobile profile succeeds after desktop login wall", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals("https://www.instagram.com/reel/DdS5sMrxkBq/", mediaInfo?.sourceUrl)
+        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_allProfilesLoginWall_returnsTerminalLoginRequired() = kotlinx.coroutines.runBlocking {
+        val loginWallHtml = "<html><head><title>Login • Instagram</title></head><body><a href=\"/accounts/login/\">Login</a></body></html>"
+
+        val testSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, loginWallHtml, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = testSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+
+        assertTrue("Expected extraction failure when all profiles hit login wall", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be MetaExtractionError.Restricted", error is MetaExtractionError.Restricted)
+        val restricted = error as MetaExtractionError.Restricted
+        assertEquals(RestrictionReason.LOGIN_REQUIRED, restricted.reason)
+        assertFalse("Terminal login-required must not fallback", restricted.canFallback)
+        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
     }
 }

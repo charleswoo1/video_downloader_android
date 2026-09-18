@@ -531,55 +531,80 @@ class NativeInstagramEngine(
 
         val canonicalUrl = normalizeUrl(url)
         val profileSteps = mutableListOf<String>()
+        val profiles = listOf(
+            "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
+            "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
+            "CRAWLER" to RequestProfile.CRAWLER_NAVIGATION
+        )
 
-        // Step 1: DESKTOP_NAVIGATION
-        profileSteps.add("DESKTOP")
-        val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
-        val desktopHtml = desktopResp.getOrNull()?.body ?: ""
+        var successfulMedia: ExtractedMetaMedia? = null
+        var encounteredLoginWall = false
+        var lastError: MetaExtractionError? = null
 
-        var parseResult = parseInstagramPage(desktopHtml, shortcode, canonicalUrl)
+        for ((name, profile) in profiles) {
+            profileSteps.add(name)
+            val resp = httpSession.fetch(canonicalUrl, profile)
+            val html = resp.getOrNull()?.body ?: ""
 
-        // Step 2: Escalation to MOBILE_NAVIGATION on technical failure
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
-            profileSteps.add("MOBILE")
-            val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
-            val mobileHtml = mobileResp.getOrNull()?.body ?: ""
-            if (mobileHtml.isNotBlank()) {
-                parseResult = parseInstagramPage(mobileHtml, shortcode, canonicalUrl)
-            }
-        }
-
-        // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
-            profileSteps.add("CRAWLER")
-            val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
-            val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
-            if (crawlerHtml.isNotBlank()) {
-                parseResult = parseInstagramPage(crawlerHtml, shortcode, canonicalUrl)
+            val parseResult = parseInstagramPage(html, shortcode, canonicalUrl)
+            when (parseResult) {
+                is MetaExtractionResult.Success -> {
+                    successfulMedia = parseResult.media
+                    break
+                }
+                is MetaExtractionResult.Failure -> {
+                    val error = parseResult.error
+                    lastError = error
+                    when (error) {
+                        is MetaExtractionError.Restricted -> {
+                            if (error.reason == RestrictionReason.LOGIN_REQUIRED) {
+                                encounteredLoginWall = true
+                                // Retryable during profile escalation: continue to next profile
+                            } else {
+                                // AUDIENCE_RESTRICTED or DELETED_OR_PRIVATE: strictly terminal immediately
+                                lastProfileSequence = profileSteps
+                                return@withContext Result.failure(error)
+                            }
+                        }
+                        is MetaExtractionError.NoVideo -> {
+                            // Target post found but contains no video: strictly terminal immediately
+                            lastProfileSequence = profileSteps
+                            return@withContext Result.failure(error)
+                        }
+                        else -> {
+                            // Technical or other parser error: escalate to next profile
+                        }
+                    }
+                }
             }
         }
 
         lastProfileSequence = profileSteps
 
-        when (parseResult) {
-            is MetaExtractionResult.Success -> {
-                val media = parseResult.media
-                val options = buildQualityOptions(media)
-                val info = MediaInfo(
-                    sourceUrl = canonicalUrl,
-                    title = media.title,
-                    platform = Platform.INSTAGRAM,
-                    extractor = ENGINE_NAME,
-                    thumbnailUrl = media.thumbnailUrl,
-                    durationSeconds = media.durationSeconds,
-                    qualityOptions = options
-                )
-                Result.success(info)
-            }
-            is MetaExtractionResult.Failure -> {
-                Result.failure(parseResult.error)
-            }
+        if (successfulMedia != null) {
+            val options = buildQualityOptions(successfulMedia)
+            val info = MediaInfo(
+                sourceUrl = canonicalUrl,
+                title = successfulMedia.title,
+                platform = Platform.INSTAGRAM,
+                extractor = ENGINE_NAME,
+                thumbnailUrl = successfulMedia.thumbnailUrl,
+                durationSeconds = successfulMedia.durationSeconds,
+                qualityOptions = options
+            )
+            return@withContext Result.success(info)
         }
+
+        if (encounteredLoginWall) {
+            return@withContext Result.failure(
+                MetaExtractionError.Restricted(
+                    RestrictionReason.LOGIN_REQUIRED,
+                    "來源網站需要登入帳號驗證，目前版本不支援登入下載"
+                )
+            )
+        }
+
+        Result.failure(lastError ?: MetaExtractionError.Technical("All anonymous profiles failed to extract media for $shortcode"))
     }
 
     private fun buildQualityOptions(media: ExtractedMetaMedia): List<QualityOption> {
@@ -658,6 +683,7 @@ class NativeInstagramEngine(
             streamUrl = directStreamUrl,
             destination = downloadTarget,
             referer = "https://www.instagram.com/",
+            origin = "https://www.instagram.com",
             onProgress = onProgress,
             isCancelled = { isCancelled.get() }
         )

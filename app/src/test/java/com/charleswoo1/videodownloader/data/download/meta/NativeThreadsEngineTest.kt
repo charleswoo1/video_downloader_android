@@ -210,6 +210,7 @@ class NativeThreadsEngineTest {
             streamUrl: String,
             destination: java.io.File,
             referer: String?,
+            origin: String?,
             onProgress: (Float, Long?, String?) -> Unit,
             isCancelled: () -> Boolean
         ): Boolean {
@@ -420,5 +421,95 @@ class NativeThreadsEngineTest {
         val raw = "https:\\/\\/video.fbcdn.net\\/v.mp4?token=abc+def%2B123&amp;stkn=tok+xyz\\u0026name=%E6%B8%AC%E8%A9%A6"
         val normalized = NativeThreadsEngine.normalizeCdnUrl(raw)
         assertEquals("https://video.fbcdn.net/v.mp4?token=abc+def+123&stkn=tok+xyz&name=測試", normalized)
+    }
+
+    @Test
+    fun download_dashVideoNetworkFailure_returnsNetworkErrorNotInterrupted() = kotlinx.coroutines.runBlocking {
+        val testSession = object : PlatformHttpSession() {
+            override fun downloadMediaStream(
+                streamUrl: String,
+                destination: java.io.File,
+                referer: String?,
+                origin: String?,
+                onProgress: (Float, Long?, String?) -> Unit,
+                isCancelled: () -> Boolean
+            ): Boolean {
+                // Simulate HTTP/CDN network failure
+                return false
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = testSession)
+        val tempDir = java.io.File.createTempFile("threads_test", "").apply { delete(); mkdirs() }
+
+        try {
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@u/post/123",
+                title = "Test Post",
+                qualityOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                    id = "best",
+                    label = "最佳畫質",
+                    formatSelector = "https://cdn.threads.net/v.mp4|https://cdn.threads.net/a.mp4"
+                )
+            )
+
+            val result = testEngine.download(request, tempDir, { _, _, _ -> }, {})
+
+            assertTrue("Download must fail", result.isFailure)
+            val error = result.exceptionOrNull()
+            assertTrue(
+                "Network failure must return PlatformExtractionError.NetworkError, not InterruptedException; found: $error",
+                error is com.charleswoo1.videodownloader.data.download.PlatformExtractionError.NetworkError
+            )
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun download_dashVideoCancelled_returnsInterruptedException() = kotlinx.coroutines.runBlocking {
+        lateinit var testEngineRef: NativeThreadsEngine
+        val testSession = object : PlatformHttpSession() {
+            override fun downloadMediaStream(
+                streamUrl: String,
+                destination: java.io.File,
+                referer: String?,
+                origin: String?,
+                onProgress: (Float, Long?, String?) -> Unit,
+                isCancelled: () -> Boolean
+            ): Boolean {
+                // Simulate user cancellation triggered mid-stream
+                testEngineRef.cancelDownload()
+                return false
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = testSession)
+        testEngineRef = testEngine
+
+        val tempDir = java.io.File.createTempFile("threads_test_cancel", "").apply { delete(); mkdirs() }
+
+        try {
+            val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
+                url = "https://www.threads.com/@u/post/123",
+                title = "Test Post",
+                qualityOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
+                    id = "best",
+                    label = "最佳畫質",
+                    formatSelector = "https://cdn.threads.net/v.mp4|https://cdn.threads.net/a.mp4"
+                )
+            )
+
+            val result = testEngine.download(request, tempDir, { _, _, _ -> }, {})
+
+            assertTrue("Download must fail", result.isFailure)
+            val error = result.exceptionOrNull()
+            assertTrue(
+                "Cancellation must return InterruptedException; found: $error",
+                error is InterruptedException
+            )
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 }

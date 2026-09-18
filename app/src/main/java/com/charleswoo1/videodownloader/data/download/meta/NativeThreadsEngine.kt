@@ -719,20 +719,44 @@ class NativeThreadsEngine(
             val tempAudio = File(destDir, "${sanitizedTitle}_a_${UUID.randomUUID().toString().take(6)}.m4a")
 
             onStatus("正在下載 DASH 視訊串流...")
-            val videoOk = httpSession.downloadMediaStream(videoUrl, tempVideo, "https://www.threads.net/", onProgress, { isCancelled.get() })
-            if (!videoOk || isCancelled.get()) {
+            val videoOk = httpSession.downloadMediaStream(
+                streamUrl = videoUrl,
+                destination = tempVideo,
+                referer = "https://www.threads.net/",
+                origin = "https://www.threads.net",
+                onProgress = onProgress,
+                isCancelled = { isCancelled.get() }
+            )
+            if (isCancelled.get()) {
                 tempVideo.delete()
                 tempAudio.delete()
-                return@withContext Result.failure(InterruptedException("下載視訊已取消或失敗"))
+                return@withContext Result.failure(InterruptedException("下載已取消"))
+            }
+            if (!videoOk) {
+                tempVideo.delete()
+                tempAudio.delete()
+                return@withContext Result.failure(PlatformExtractionError.NetworkError("下載 DASH 視訊串流失敗"))
             }
 
             if (audioUrl != null) {
                 onStatus("正在下載 DASH 音訊串流...")
-                val audioOk = httpSession.downloadMediaStream(audioUrl, tempAudio, "https://www.threads.net/", { _, _, _ -> }, { isCancelled.get() })
-                if (!audioOk || isCancelled.get()) {
+                val audioOk = httpSession.downloadMediaStream(
+                    streamUrl = audioUrl,
+                    destination = tempAudio,
+                    referer = "https://www.threads.net/",
+                    origin = "https://www.threads.net",
+                    onProgress = { _, _, _ -> },
+                    isCancelled = { isCancelled.get() }
+                )
+                if (isCancelled.get()) {
                     tempVideo.delete()
                     tempAudio.delete()
-                    return@withContext Result.failure(InterruptedException("下載音訊已取消或失敗"))
+                    return@withContext Result.failure(InterruptedException("下載已取消"))
+                }
+                if (!audioOk) {
+                    tempVideo.delete()
+                    tempAudio.delete()
+                    return@withContext Result.failure(PlatformExtractionError.NetworkError("下載 DASH 音訊串流失敗"))
                 }
 
                 if (isAudioOnly) {
@@ -751,8 +775,25 @@ class NativeThreadsEngine(
                 if (!merged) return@withContext Result.failure(PlatformExtractionError.FfmpegError("FFmpeg 串流合成失敗"))
                 return@withContext Result.success(destinationFile)
             } else {
-                tempVideo.renameTo(destinationFile)
-                return@withContext Result.success(destinationFile)
+                if (destinationFile.exists()) destinationFile.delete()
+                val renamed = tempVideo.renameTo(destinationFile)
+                if (renamed && destinationFile.exists()) {
+                    return@withContext Result.success(destinationFile)
+                } else {
+                    val copied = try {
+                        tempVideo.copyTo(destinationFile, overwrite = true)
+                        tempVideo.delete()
+                        destinationFile.exists()
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (copied) {
+                        return@withContext Result.success(destinationFile)
+                    } else {
+                        tempVideo.delete()
+                        return@withContext Result.failure(PlatformExtractionError.StorageError("無法將暫存視訊儲存至目的檔案"))
+                    }
+                }
             }
         } else {
             // Progressive stream
@@ -766,6 +807,7 @@ class NativeThreadsEngine(
                 streamUrl = cleanFormat,
                 destination = downloadTarget,
                 referer = "https://www.threads.net/",
+                origin = "https://www.threads.net",
                 onProgress = onProgress,
                 isCancelled = { isCancelled.get() }
             )

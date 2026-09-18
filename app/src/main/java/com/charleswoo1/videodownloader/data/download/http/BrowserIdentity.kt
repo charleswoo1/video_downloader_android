@@ -109,6 +109,10 @@ enum class RequestProfile {
                 headers["priority"] = "u=1, i"
                 if (!origin.isNullOrBlank()) headers["origin"] = origin
                 if (!referer.isNullOrBlank()) headers["referer"] = referer
+                if (origin?.contains("x.com") == true || referer?.contains("x.com") == true) {
+                    headers["x-twitter-active-user"] = "yes"
+                    headers["x-twitter-client-language"] = "zh-tw"
+                }
             }
 
             MEDIA -> {

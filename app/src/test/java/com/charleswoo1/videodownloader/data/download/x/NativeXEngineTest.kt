@@ -142,4 +142,79 @@ class NativeXEngineTest {
         assertEquals(16, decoded1.size)
         assertEquals(8, decoded2.size)
     }
+
+    @Test
+    fun ensureGuestToken_hashflagsMissing_recoversViaAuthenticatedNavigationFallback() = runBlocking {
+        val testSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    // hashflags returns empty headers and dummy json without guest token
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    // Authenticated x.com navigation fallback sets/returns guest token
+                    return Result.success(
+                        HttpResponse(
+                            200,
+                            url,
+                            "<html></html>",
+                            mapOf("x-guest-token" to "nav_fallback_guest_token_999")
+                        )
+                    )
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = testSession)
+        val guestToken = testEngine.ensureGuestToken("dummy_bearer_token")
+
+        assertNotNull("Guest token must be recovered via navigation fallback", guestToken)
+        assertEquals("nav_fallback_guest_token_999", guestToken)
+    }
+
+    @Test
+    fun fetchPostViaGraphQL_sendsTwitterActiveUserAndLanguageHeaders() = runBlocking {
+        var capturedActiveUser: String? = null
+        var capturedLanguage: String? = null
+        var capturedOrigin: String? = null
+
+        val testSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                capturedActiveUser = customHeaders["x-twitter-active-user"]
+                capturedLanguage = customHeaders["x-twitter-client-language"]
+                capturedOrigin = origin
+                return Result.success(HttpResponse(200, url, "{\"data\":{\"tweetResult\":{\"result\":{\"__typename\":\"TweetUnavailable\"}}}}", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = testSession)
+        testEngine.fetchPostViaGraphQL("12345", "test_bearer", "test_guest")
+
+        assertEquals("yes", capturedActiveUser)
+        assertEquals("zh-tw", capturedLanguage)
+        assertEquals("https://x.com", capturedOrigin)
+    }
 }

@@ -2,6 +2,8 @@ package com.charleswoo1.videodownloader.data.download.http
 
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -149,5 +151,70 @@ class PlatformHttpSessionTest {
         assertTrue(sanitized.contains("token=[REDACTED]"))
         assertTrue(sanitized.contains("sessionid=[REDACTED]"))
         assertTrue(sanitized.contains("gt=[REDACTED]"))
+    }
+
+    @Test
+    fun downloadMediaStream_passesOriginAndRefererHeaders() {
+        var capturedOrigin: String? = null
+        var capturedReferer: String? = null
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                capturedOrigin = req.header("origin")
+                capturedReferer = req.header("referer")
+
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("fake video payload".toResponseBody("video/mp4".toMediaTypeOrNull()))
+                    .build()
+            }
+        })
+
+        val tempFile = java.io.File.createTempFile("origin_test", ".mp4")
+        try {
+            val success = session.downloadMediaStream(
+                streamUrl = "https://cdn.example.com/video.mp4",
+                destination = tempFile,
+                referer = "https://www.instagram.com/",
+                origin = "https://www.instagram.com",
+                onProgress = { _, _, _ -> },
+                isCancelled = { false }
+            )
+
+            assertTrue(success)
+            assertEquals("https://www.instagram.com", capturedOrigin)
+            assertEquals("https://www.instagram.com/", capturedReferer)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    @Test
+    fun httpResponse_headersAreCaseInsensitive() {
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("x-guest-token", "guest_12345")
+                    .header("Content-Type", "application/json")
+                    .body("{}".toResponseBody("application/json".toMediaTypeOrNull()))
+                    .build()
+            }
+        })
+
+        val resp = session.fetch("https://api.x.com/test", RequestProfile.API).getOrNull()
+        assertNotNull(resp)
+        assertEquals("guest_12345", resp?.getHeader("x-guest-token"))
+        assertEquals("guest_12345", resp?.getHeader("X-Guest-Token"))
+        assertEquals("guest_12345", resp?.getHeader("X-GUEST-TOKEN"))
+        assertEquals("guest_12345", resp?.headers?.get("X-GUEST-TOKEN"))
+        assertEquals("application/json", resp?.getHeader("content-type"))
     }
 }

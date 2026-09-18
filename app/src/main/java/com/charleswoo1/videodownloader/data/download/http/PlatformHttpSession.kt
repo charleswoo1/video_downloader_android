@@ -60,7 +60,9 @@ open class PlatformHttpSession(
         val finalUrl: String,
         val body: String,
         val headers: Map<String, String>
-    )
+    ) {
+        fun getHeader(name: String): String? = headers[name]
+    }
 
     open fun fetch(
         url: String,
@@ -130,8 +132,10 @@ open class PlatformHttpSession(
                     }
 
                     val bodyString = respBody.string()
-                    val headersMap = response.headers.names().associateWith { name ->
-                        response.header(name) ?: ""
+                    val headersMap = java.util.TreeMap<String, String>(java.lang.String.CASE_INSENSITIVE_ORDER).apply {
+                        for (name in response.headers.names()) {
+                            put(name, response.header(name) ?: "")
+                        }
                     }
 
                     safeLog("Fetched ${sanitizeLogText(url)} -> HTTP $code (${bodyString.length} chars)")
@@ -195,13 +199,14 @@ open class PlatformHttpSession(
         streamUrl: String,
         destination: File,
         referer: String? = null,
+        origin: String? = null,
         onProgress: (Float, Long?, String?) -> Unit,
         isCancelled: () -> Boolean
     ): Boolean {
         val partFile = File(destination.parentFile, "${destination.name}.part")
         try {
             val reqBuilder = Request.Builder().url(streamUrl)
-            val mediaHeaders = RequestProfile.MEDIA.buildHeaders(BrowserIdentity.DESKTOP, referer = referer)
+            val mediaHeaders = RequestProfile.MEDIA.buildHeaders(BrowserIdentity.DESKTOP, origin = origin, referer = referer)
             mediaHeaders.forEach { (k, v) -> reqBuilder.header(k, v) }
 
             val call = okHttpClient.newCall(reqBuilder.build())

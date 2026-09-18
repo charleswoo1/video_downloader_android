@@ -2,7 +2,12 @@ package com.charleswoo1.videodownloader.data.download.meta
 
 import android.content.Context
 import android.util.Log
+import com.charleswoo1.videodownloader.data.download.PlatformErrorCode
+import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
 import com.charleswoo1.videodownloader.data.download.PlatformMediaEngine
+import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
+import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
+import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.Platform
@@ -12,20 +17,24 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
 /**
- * Native Instagram extraction and download engine for public reels and videos.
+ * Native Instagram extraction and download engine V2.
  *
- * Implements strict target matching using shortcode and derived numeric media ID
- * to prevent extracting unrelated recommended videos. Correctly classifies content/audience
- * restrictions to avoid invalid fallback loops.
+ * Implements reference-driven extraction ported from 2Xsave/insave (MIT):
+ * - Coherent desktop/mobile/crawler request profile escalation
+ * - Robust URL normalization (escaped slashes, unicode escapes, percent decoding)
+ * - Meta CDN video path acceptance without requiring .mp4 suffix
+ * - Support for xdt_api__v1__media__shortcode__web_info and data.media
+ * - Strict target-media isolation via shortcode and numeric media ID
  */
 class NativeInstagramEngine(
     private val context: Context? = null,
-    private val webClient: MetaWebClient = MetaWebClient()
+    private val httpSession: PlatformHttpSession = PlatformHttpSession()
 ) : PlatformMediaEngine {
 
     companion object {
@@ -57,11 +66,60 @@ class NativeInstagramEngine(
             }
             return id
         }
+
+        /**
+         * Normalizes Meta CDN URLs per 2Xsave/insave:
+         * 1. Unescapes slashes (\/ -> /)
+         * 2. Decodes \uXXXX unicode escapes across entire URL
+         * 3. Decodes percent-encoded components
+         */
+        fun normalizeCdnUrl(rawUrl: String): String {
+            val unescapedSlashes = rawUrl.replace("\\/", "/")
+            val sb = StringBuilder()
+            var i = 0
+            while (i < unescapedSlashes.length) {
+                if (unescapedSlashes[i] == '\\' && i + 5 < unescapedSlashes.length && unescapedSlashes[i + 1] == 'u') {
+                    val hex = unescapedSlashes.substring(i + 2, i + 6)
+                    val code = hex.toIntOrNull(16)
+                    if (code != null) {
+                        sb.append(code.toChar())
+                        i += 6
+                        continue
+                    }
+                }
+                sb.append(unescapedSlashes[i])
+                i++
+            }
+            val unicodeDecoded = sb.toString()
+            return try {
+                URLDecoder.decode(unicodeDecoded, "UTF-8")
+            } catch (_: Exception) {
+                unicodeDecoded
+            }
+        }
+
+        /**
+         * Checks whether a URL represents a valid Meta video stream,
+         * without strictly requiring an explicit .mp4 extension.
+         */
+        fun isMetaVideoUrl(url: String): Boolean {
+            val lower = url.lowercase()
+            return lower.startsWith("http") && (
+                lower.contains(".mp4") ||
+                lower.contains("cdninstagram.com") ||
+                lower.contains("o1/v/t2/f2/m") ||
+                lower.contains("fbcdn.net") ||
+                lower.contains("/v/")
+            )
+        }
     }
 
     override val name: String = ENGINE_NAME
 
     private val isCancelled = AtomicBoolean(false)
+
+    var lastProfileSequence: List<String> = emptyList()
+        private set
 
     override fun supports(platform: Platform): Boolean = platform == Platform.INSTAGRAM
 
@@ -121,9 +179,7 @@ class NativeInstagramEngine(
             )
         }
 
-        val targetId = shortcodeToId(targetShortcode)
-
-        // 3. Scan script tags for JSON payload
+        // 3. Scan script tags for JSON payloads (application/json, _sharedData, etc.)
         val candidates = mutableListOf<JSONObject>()
 
         fun scanJson(pattern: Pattern) {
@@ -147,6 +203,18 @@ class NativeInstagramEngine(
         scanJson(SCRIPT_JSON_PATTERN)
         scanJson(SHARED_DATA_PATTERN)
 
+        val targetId = shortcodeToId(targetShortcode)
+
+        // 4. Primary: inspect xdt_api__v1__media__shortcode__web_info.items[0]
+        for (candidate in candidates) {
+            val xdtMedia = findXdtMediaItem(candidate, targetShortcode, targetId)
+            if (xdtMedia != null) {
+                val extracted = extractFromMediaObject(xdtMedia, targetShortcode, canonicalUrl)
+                if (extracted != null) return extracted
+            }
+        }
+
+        // 5. Secondary: deep inspect data.media or shortcode-matching objects
         var matchedPost: JSONObject? = null
         for (candidate in candidates) {
             matchedPost = findMediaWithShortcode(candidate, targetShortcode, targetId)
@@ -154,34 +222,16 @@ class NativeInstagramEngine(
         }
 
         if (matchedPost != null) {
-            val isVideo = matchedPost.optBoolean("is_video", false)
-            if (isVideo) {
-                return extractDirectVideo(matchedPost, targetShortcode, canonicalUrl)
-            }
+            val extracted = extractFromMediaObject(matchedPost, targetShortcode, canonicalUrl)
+            if (extracted != null) return extracted
 
-            // Check carousel media
-            val carouselMedia = matchedPost.optJSONArray("carousel_media")
-                ?: matchedPost.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges")
-
-            if (carouselMedia != null && carouselMedia.length() > 0) {
-                for (i in 0 until carouselMedia.length()) {
-                    var child = carouselMedia.optJSONObject(i)
-                    if (child?.has("node") == true) {
-                        child = child.optJSONObject("node")
-                    }
-                    if (child != null && child.optBoolean("is_video", false)) {
-                        return extractDirectVideo(child, targetShortcode, canonicalUrl, matchedPost)
-                    }
-                }
-            }
-
-            // Post exists and is confirmed to have no video (image post)
+            // Post exists but has no video
             return MetaExtractionResult.Failure(
-                MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (不支援純圖片下載)")
+                MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (可能為純圖片貼文)")
             )
         }
 
-        // 4. Schema.org VideoObject fallback
+        // 6. Schema.org VideoObject fallback
         val ldMatcher = LD_JSON_PATTERN.matcher(html)
         while (ldMatcher.find()) {
             val raw = ldMatcher.group(1)?.trim() ?: continue
@@ -189,12 +239,12 @@ class NativeInstagramEngine(
                 if (raw.startsWith("{")) {
                     val ld = JSONObject(raw)
                     if (ld.optString("@type") == "VideoObject") {
-                        val contentUrl = ld.optString("contentUrl")
-                        if (contentUrl.isNotBlank()) {
+                        val contentUrl = normalizeCdnUrl(ld.optString("contentUrl"))
+                        if (contentUrl.isNotBlank() && isMetaVideoUrl(contentUrl)) {
                             val title = ld.optString("name").ifBlank {
                                 ld.optString("description").ifBlank { "Instagram 影片 ($targetShortcode)" }
                             }
-                            val thumb = ld.optString("thumbnailUrl").ifBlank { null }
+                            val thumb = ld.optString("thumbnailUrl").ifBlank { null }?.let { normalizeCdnUrl(it) }
                             return MetaExtractionResult.Success(
                                 ExtractedMetaMedia(
                                     postId = targetShortcode,
@@ -213,7 +263,7 @@ class NativeInstagramEngine(
             } catch (_: Exception) {}
         }
 
-        // 5. Check if login-gated without target media
+        // 7. Check if login-gated without target media
         if (html.contains("/accounts/login/") || html.contains("<title>Login • Instagram</title>", ignoreCase = true)) {
             return MetaExtractionResult.Failure(
                 MetaExtractionError.Restricted(
@@ -223,7 +273,7 @@ class NativeInstagramEngine(
             )
         }
 
-        // 6. Schema changed or technical failure
+        // 8. Technical failure: target shortcode missing from page data
         return MetaExtractionResult.Failure(
             MetaExtractionError.Technical(
                 "Target shortcode $targetShortcode not found in page data"
@@ -231,18 +281,53 @@ class NativeInstagramEngine(
         )
     }
 
-    private fun findMediaWithShortcode(root: Any?, shortcode: String, targetId: Long): JSONObject? {
+    private fun findXdtMediaItem(root: Any?, shortcode: String, targetId: Long): JSONObject? {
         if (root == null) return null
         if (root is JSONObject) {
-            val code = root.optString("shortcode").ifBlank { root.optString("code") }
-            val id = root.optString("id")
-            if (code == shortcode || (targetId > 0 && id.startsWith(targetId.toString()))) {
-                return root
+            val xdt = root.optJSONObject("xdt_api__v1__media__shortcode__web_info")
+            if (xdt != null) {
+                val items = xdt.optJSONArray("items")
+                if (items != null && items.length() > 0) {
+                    val item = items.optJSONObject(0)
+                    if (item != null) {
+                        val code = item.optString("code").ifBlank { item.optString("shortcode") }
+                        val id = item.optString("id").ifBlank { item.optString("pk") }
+                        if (code.isBlank() || code == shortcode || (targetId > 0 && id.startsWith(targetId.toString()))) {
+                            return item
+                        }
+                    }
+                }
             }
 
             val keys = root.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
+                val found = findXdtMediaItem(root.opt(key), shortcode, targetId)
+                if (found != null) return found
+            }
+        } else if (root is JSONArray) {
+            for (i in 0 until root.length()) {
+                val found = findXdtMediaItem(root.opt(i), shortcode, targetId)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun findMediaWithShortcode(root: Any?, shortcode: String, targetId: Long): JSONObject? {
+        if (root == null) return null
+        if (root is JSONObject) {
+            val code = root.optString("shortcode").ifBlank { root.optString("code") }
+            val id = root.optString("id").ifBlank { root.optString("pk") }
+            if (code == shortcode || (targetId > 0 && (id.startsWith(targetId.toString()) || id == targetId.toString()))) {
+                return root
+            }
+
+            // Exclude non-target related post containers per 2Xsave/insave
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                if (isExcludedContainerKey(key)) continue
                 val child = root.opt(key)
                 val found = findMediaWithShortcode(child, shortcode, targetId)
                 if (found != null) return found
@@ -253,6 +338,54 @@ class NativeInstagramEngine(
                 if (found != null) return found
             }
         }
+        return null
+    }
+
+    private fun isExcludedContainerKey(key: String): Boolean {
+        return key in listOf(
+            "relatedPosts", "related_posts", "replies", "threadItems", "thread_items",
+            "replyThreads", "reply_threads", "parentPost", "parent_post", "suggested_users",
+            "edge_media_to_comment", "edge_related_profiles", "edge_owner_to_timeline_media"
+        )
+    }
+
+    private fun extractFromMediaObject(
+        mediaObj: JSONObject,
+        targetShortcode: String,
+        canonicalUrl: String,
+        parentObj: JSONObject? = null
+    ): MetaExtractionResult? {
+        val isVideo = mediaObj.optBoolean("is_video", false) ||
+                mediaObj.optInt("media_type", 0) == 2 ||
+                mediaObj.has("video_versions") ||
+                mediaObj.has("video_url")
+
+        if (isVideo) {
+            return extractDirectVideo(mediaObj, targetShortcode, canonicalUrl, parentObj)
+        }
+
+        // Check carousel_media / edge_sidecar_to_children
+        val carouselMedia = mediaObj.optJSONArray("carousel_media")
+            ?: mediaObj.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges")
+
+        if (carouselMedia != null && carouselMedia.length() > 0) {
+            for (i in 0 until carouselMedia.length()) {
+                var child = carouselMedia.optJSONObject(i)
+                if (child?.has("node") == true) {
+                    child = child.optJSONObject("node")
+                }
+                if (child != null) {
+                    val childIsVideo = child.optBoolean("is_video", false) ||
+                            child.optInt("media_type", 0) == 2 ||
+                            child.has("video_versions") ||
+                            child.has("video_url")
+                    if (childIsVideo) {
+                        return extractDirectVideo(child, targetShortcode, canonicalUrl, mediaObj)
+                    }
+                }
+            }
+        }
+
         return null
     }
 
@@ -268,18 +401,24 @@ class NativeInstagramEngine(
         if (versions != null) {
             for (i in 0 until versions.length()) {
                 val ver = versions.optJSONObject(i) ?: continue
-                val u = ver.optString("url")
+                val rawUrl = ver.optString("url")
                 val w = ver.optInt("width", 0)
                 val h = ver.optInt("height", 0)
-                if (u.isNotBlank()) {
-                    renditions.add(NativeMediaRendition(url = u, width = w, height = h))
+                if (rawUrl.isNotBlank()) {
+                    val normalized = normalizeCdnUrl(rawUrl)
+                    if (isMetaVideoUrl(normalized)) {
+                        renditions.add(NativeMediaRendition(url = normalized, width = w, height = h))
+                    }
                 }
             }
         }
 
         val directVideoUrl = videoObj.optString("video_url")
-        if (directVideoUrl.isNotBlank() && renditions.none { it.url == directVideoUrl }) {
-            renditions.add(0, NativeMediaRendition(url = directVideoUrl, width = 0, height = 0))
+        if (directVideoUrl.isNotBlank()) {
+            val normalized = normalizeCdnUrl(directVideoUrl)
+            if (isMetaVideoUrl(normalized) && renditions.none { it.url == normalized }) {
+                renditions.add(0, NativeMediaRendition(url = normalized, width = 0, height = 0))
+            }
         }
 
         if (renditions.isEmpty()) {
@@ -292,9 +431,10 @@ class NativeInstagramEngine(
         val urls = sortedRenditions.map { it.url }.distinct()
         val heights = sortedRenditions.map { it.resolution }.filter { it > 0 }.distinct()
 
-        val thumb = videoObj.optString("display_url").ifBlank {
-            parentObj?.optString("display_url")
+        val rawThumb = videoObj.optString("display_url").ifBlank {
+            parentObj?.optString("display_url") ?: ""
         }
+        val thumb = if (rawThumb.isNotBlank()) normalizeCdnUrl(rawThumb) else null
 
         val owner = videoObj.optJSONObject("owner") ?: parentObj?.optJSONObject("owner")
         val uploader = owner?.optString("username")?.ifBlank { "Instagram" } ?: "Instagram"
@@ -324,24 +464,40 @@ class NativeInstagramEngine(
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         val shortcode = extractShortcode(url)
             ?: return@withContext Result.failure(
-                MetaExtractionError.InvalidUrl("無法從網址中解析 Instagram 貼文代碼，請確認網址是否正確")
+                PlatformExtractionError.PageVariantUnsupported("無法從網址中解析 Instagram 貼文代碼，請確認網址格式")
             )
 
         val canonicalUrl = normalizeUrl(url)
+        val profileSteps = mutableListOf<String>()
 
-        val browserResponse = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.BROWSER)
-        val html = browserResponse.getOrNull()?.body ?: ""
+        // Step 1: DESKTOP_NAVIGATION
+        profileSteps.add("DESKTOP")
+        val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+        val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
-        var parseResult = parseInstagramPage(html, shortcode, canonicalUrl)
+        var parseResult = parseInstagramPage(desktopHtml, shortcode, canonicalUrl)
 
-        // If technical failure with browser profile (even if html is non-empty), retry with crawler profile
+        // Step 2: Escalation to MOBILE_NAVIGATION on technical failure
         if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
-            val crawlerResponse = webClient.fetch(canonicalUrl, MetaWebClient.RequestProfile.CRAWLER)
-            val crawlerHtml = crawlerResponse.getOrNull()?.body ?: ""
+            profileSteps.add("MOBILE")
+            val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
+            val mobileHtml = mobileResp.getOrNull()?.body ?: ""
+            if (mobileHtml.isNotBlank()) {
+                parseResult = parseInstagramPage(mobileHtml, shortcode, canonicalUrl)
+            }
+        }
+
+        // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure
+        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
+            profileSteps.add("CRAWLER")
+            val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
+            val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
                 parseResult = parseInstagramPage(crawlerHtml, shortcode, canonicalUrl)
             }
         }
+
+        lastProfileSequence = profileSteps
 
         when (parseResult) {
             is MetaExtractionResult.Success -> {
@@ -351,7 +507,7 @@ class NativeInstagramEngine(
                     sourceUrl = canonicalUrl,
                     title = media.title,
                     platform = Platform.INSTAGRAM,
-                    extractor = "NativeInstagram",
+                    extractor = ENGINE_NAME,
                     thumbnailUrl = media.thumbnailUrl,
                     durationSeconds = media.durationSeconds,
                     qualityOptions = options
@@ -399,13 +555,12 @@ class NativeInstagramEngine(
 
         val distinctOptions = options.distinctBy { it.id }.toMutableList()
 
-        val audioUrl = bestRendition?.url ?: media.progressiveVideoUrls.firstOrNull()
-        if (audioUrl != null) {
+        if (bestRendition != null) {
             distinctOptions.add(
                 QualityOption(
                     id = "audio_only",
-                    label = "僅音訊 (MP3/M4A)",
-                    formatSelector = audioUrl,
+                    label = "僅下載音訊 (MP3)",
+                    formatSelector = "audio:${bestRendition.url}",
                     isAudioOnly = true
                 )
             )
@@ -421,74 +576,47 @@ class NativeInstagramEngine(
         onStatus: (String) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
         isCancelled.set(false)
-        try {
-            if (!destDir.exists()) destDir.mkdirs()
+        val format = request.qualityOption.formatSelector
+        val isAudioOnly = request.qualityOption.isAudioOnly || format.startsWith("audio:")
+        val directStreamUrl = format.removePrefix("audio:")
 
-            val cleanTitle = request.title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(80)
-            val streamUrl = request.qualityOption.formatSelector
+        val sanitizedTitle = request.title.replace(Regex("""[\\/:*?"<>|]"""), "_").take(80)
+        val finalFileName = if (isAudioOnly) "$sanitizedTitle.mp3" else "$sanitizedTitle.mp4"
+        val destinationFile = File(destDir, finalFileName)
 
-            if (request.qualityOption.isAudioOnly) {
-                val tempSource = File(destDir, "${UUID.randomUUID()}.source.mp4")
-                val finalAudio = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp3")
-                try {
-                    onStatus("正在下載 Instagram 音訊來源…")
-                    val downloadOk = webClient.downloadMediaStream(
-                        streamUrl = streamUrl,
-                        destination = tempSource,
-                        referer = "https://www.instagram.com/",
-                        onProgress = onProgress,
-                        isCancelled = { isCancelled.get() }
-                    )
+        onStatus("正在透過原生 Instagram 引擎下載串流...")
 
-                    if (!downloadOk) {
-                        if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
-                        return@withContext Result.failure(IllegalStateException("下載 Instagram 音訊來源失敗"))
-                    }
+        val downloadTarget = if (isAudioOnly) {
+            File(destDir, "${sanitizedTitle}_temp_${UUID.randomUUID().toString().take(6)}.mp4")
+        } else {
+            destinationFile
+        }
 
-                    onStatus("正在轉檔為純音訊…")
-                    val extracted = MetaFfmpegHelper.extractAudio(context, tempSource, finalAudio)
-                    if (extracted && finalAudio.exists() && finalAudio.length() > 0L) {
-                        return@withContext Result.success(finalAudio)
-                    } else {
-                        if (finalAudio.exists()) finalAudio.delete()
-                        return@withContext Result.failure(IllegalStateException("FFmpeg 音訊轉檔失敗"))
-                    }
-                } finally {
-                    if (tempSource.exists()) tempSource.delete()
-                }
-            } else {
-                val outputFile = File(destDir, "$cleanTitle-${System.currentTimeMillis() % 10000}.mp4")
-                onStatus("正在下載 Instagram 媒體…")
-                val downloadOk = webClient.downloadMediaStream(
-                    streamUrl = streamUrl,
-                    destination = outputFile,
-                    referer = "https://www.instagram.com/",
-                    onProgress = onProgress,
-                    isCancelled = { isCancelled.get() }
-                )
+        val success = httpSession.downloadMediaStream(
+            streamUrl = directStreamUrl,
+            destination = downloadTarget,
+            referer = "https://www.instagram.com/",
+            onProgress = onProgress,
+            isCancelled = { isCancelled.get() }
+        )
 
-                if (!downloadOk) {
-                    if (isCancelled.get()) return@withContext Result.failure(InterruptedException("下載已取消"))
-                    return@withContext Result.failure(IllegalStateException("下載 Instagram 串流失敗"))
-                }
-
-                Result.success(outputFile)
+        if (!success) {
+            if (isCancelled.get()) {
+                downloadTarget.delete()
+                return@withContext Result.failure(InterruptedException("下載已被使用者取消"))
             }
-        } catch (e: Exception) {
-            if (isCancelled.get() || e is InterruptedException) {
-                Result.failure(InterruptedException("下載已取消"))
-            } else {
-                safeLog("Instagram download failed: ${e.message}")
-                Result.failure(e)
+            return@withContext Result.failure(PlatformExtractionError.NetworkError("原生串流下載失敗"))
+        }
+
+        if (isAudioOnly) {
+            onStatus("正在轉檔音訊為 MP3...")
+            val converted = MetaFfmpegHelper.extractAudio(context, downloadTarget, destinationFile)
+            downloadTarget.delete()
+            if (!converted) {
+                return@withContext Result.failure(PlatformExtractionError.FfmpegError("FFmpeg 音訊轉檔失敗"))
             }
         }
-    }
 
-    private fun safeLog(msg: String) {
-        try {
-            Log.d(TAG, msg)
-        } catch (_: Exception) {
-            println("[$TAG] $msg")
-        }
+        Result.success(destinationFile)
     }
 }

@@ -1,5 +1,8 @@
 package com.charleswoo1.videodownloader.data.download.meta
 
+import com.charleswoo1.videodownloader.data.download.PlatformErrorCode
+import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
+
 /**
  * Categorization of content and access restrictions.
  */
@@ -10,16 +13,17 @@ enum class RestrictionReason {
 }
 
 /**
- * Structured errors for Meta platform extraction.
+ * Structured errors for Meta platform extraction, unified with [PlatformExtractionError].
  *
  * [canFallback] determines whether the router is permitted to attempt secondary engine fallback.
  * Content restrictions, deleted/private media, and posts without videos MUST NOT fall back.
  */
 sealed class MetaExtractionError(
-    val userMessage: String,
-    val canFallback: Boolean,
+    code: PlatformErrorCode,
+    userMessage: String,
+    canFallback: Boolean,
     cause: Throwable? = null
-) : Exception(userMessage, cause) {
+) : PlatformExtractionError(code, userMessage, canFallback, cause) {
 
     /**
      * Technical failures where secondary engine fallback is reasonable
@@ -29,7 +33,12 @@ sealed class MetaExtractionError(
         val detail: String,
         userMessage: String = "暫時無法解析此貼文。平台可能未提供匿名媒體資料，或頁面格式已變更。",
         cause: Throwable? = null
-    ) : MetaExtractionError(userMessage, canFallback = true, cause = cause)
+    ) : MetaExtractionError(
+        PlatformErrorCode.PARSE_ERROR,
+        userMessage,
+        canFallback = true,
+        cause = cause
+    )
 
     /**
      * Access or audience restrictions (audience gated, login required, deleted/private).
@@ -38,7 +47,15 @@ sealed class MetaExtractionError(
     class Restricted(
         val reason: RestrictionReason,
         userMessage: String
-    ) : MetaExtractionError(userMessage, canFallback = false)
+    ) : MetaExtractionError(
+        when (reason) {
+            RestrictionReason.AUDIENCE_RESTRICTED -> PlatformErrorCode.AUDIENCE_RESTRICTED
+            RestrictionReason.LOGIN_REQUIRED -> PlatformErrorCode.LOGIN_REQUIRED
+            RestrictionReason.DELETED_OR_PRIVATE -> PlatformErrorCode.DELETED_OR_NOT_FOUND
+        },
+        userMessage,
+        canFallback = false
+    )
 
     /**
      * Target post found, but contains no downloadable video (image or text only).
@@ -46,14 +63,14 @@ sealed class MetaExtractionError(
      */
     class NoVideo(
         userMessage: String = "此貼文未包含可下載的影片內容 (可能為純文字或純圖片)"
-    ) : MetaExtractionError(userMessage, canFallback = false)
+    ) : MetaExtractionError(PlatformErrorCode.NO_VIDEO, userMessage, canFallback = false)
 
     /**
      * Malformed or unrecognized URL structure.
      */
     class InvalidUrl(
         userMessage: String = "無效的貼文網址，無法識別目標內容"
-    ) : MetaExtractionError(userMessage, canFallback = false)
+    ) : MetaExtractionError(PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED, userMessage, canFallback = false)
 }
 
 /**

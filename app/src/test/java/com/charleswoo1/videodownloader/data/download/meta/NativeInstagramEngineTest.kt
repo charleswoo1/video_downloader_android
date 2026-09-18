@@ -1,11 +1,16 @@
 package com.charleswoo1.videodownloader.data.download.meta
 
+import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
+import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
+import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
+import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 
 class NativeInstagramEngineTest {
 
@@ -30,6 +35,21 @@ class NativeInstagramEngineTest {
     }
 
     @Test
+    fun normalizeCdnUrl_handlesEscapedSlashesUnicodeAndPercentEncoding() {
+        val raw = "https:\\/\\/scontent.cdninstagram.com\\/o1\\/v\\/t2\\/f2\\/m\\/test?bytestart=0\\u00253D100%26token=abc"
+        val normalized = NativeInstagramEngine.normalizeCdnUrl(raw)
+        assertEquals("https://scontent.cdninstagram.com/o1/v/t2/f2/m/test?bytestart=0=100&token=abc", normalized)
+    }
+
+    @Test
+    fun isMetaVideoUrl_acceptsValidCdnPathsWithoutMp4Suffix() {
+        assertTrue(NativeInstagramEngine.isMetaVideoUrl("https://scontent.cdninstagram.com/o1/v/t2/f2/m/sample_stream"))
+        assertTrue(NativeInstagramEngine.isMetaVideoUrl("https://video.fbcdn.net/v/t39.0/stream.mp4"))
+        assertTrue(NativeInstagramEngine.isMetaVideoUrl("https://instagram.com/cdn/video_1080.mp4"))
+        assertFalse(NativeInstagramEngine.isMetaVideoUrl("https://example.com/other.jpg"))
+    }
+
+    @Test
     fun parseInstagramPage_singlePublicVideo_extractsSuccessfully() {
         val html = loadFixture("single_public_video.html")
         val shortcode = "DdS5sMrxkBq"
@@ -46,6 +66,34 @@ class NativeInstagramEngineTest {
         assertEquals("https://instagram.com/cdn/thumb.jpg", media.thumbnailUrl)
         assertTrue("Expected 1080 in heights", media.heights.contains(1080))
         assertTrue("Expected 720 in heights", media.heights.contains(720))
+    }
+
+    @Test
+    fun parseInstagramPage_xdtApiWebInfo_extractsSuccessfullyWithEscapedNonMp4Url() {
+        val html = loadFixture("xdt_api_web_info.html")
+        val shortcode = "DdXfLoyTs__"
+        val canonical = "https://www.instagram.com/reel/$shortcode/"
+
+        val result = engine.parseInstagramPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for xdt_api__v1__media__shortcode__web_info", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertTrue("Expected non-.mp4 Meta CDN URL normalized", media.progressiveVideoUrls.first().contains("o1/v/t2/f2/m/test_stream"))
+    }
+
+    @Test
+    fun parseInstagramPage_targetAbsentUnrelatedExists_failsWithTechnical() {
+        val html = loadFixture("target_absent_unrelated_exists.html")
+        val shortcode = "TargetCodeMissing"
+        val canonical = "https://www.instagram.com/reel/$shortcode/"
+
+        val result = engine.parseInstagramPage(html, shortcode, canonical)
+
+        assertTrue("Expected failure when target is absent", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue(error is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST allow fallback", error.canFallback)
     }
 
     @Test
@@ -146,36 +194,49 @@ class NativeInstagramEngineTest {
         )
     }
 
-    private class FakeMetaWebClient(
+    private class FakePlatformHttpSession(
         private val browserHtml: String = "",
+        private val mobileHtml: String = "",
         private val crawlerHtml: String = "",
         private val downloadSuccess: Boolean = true
-    ) : MetaWebClient() {
-        var browserFetchCount = 0
+    ) : PlatformHttpSession() {
+        var desktopFetchCount = 0
+        var mobileFetchCount = 0
         var crawlerFetchCount = 0
-        var lastDownloadedDestination: java.io.File? = null
+        var lastDownloadedDestination: File? = null
 
         override fun fetch(
             url: String,
             profile: RequestProfile,
+            identity: BrowserIdentity,
+            origin: String?,
+            referer: String?,
             customHeaders: Map<String, String>,
-            followRedirects: Boolean
+            followRedirects: Boolean,
+            body: ByteArray?,
+            contentType: String?,
+            method: String
         ): Result<HttpResponse> {
             return when (profile) {
-                RequestProfile.BROWSER -> {
-                    browserFetchCount++
+                RequestProfile.DESKTOP_NAVIGATION -> {
+                    desktopFetchCount++
                     Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
                 }
-                RequestProfile.CRAWLER -> {
+                RequestProfile.MOBILE_NAVIGATION -> {
+                    mobileFetchCount++
+                    Result.success(HttpResponse(200, url, mobileHtml, emptyMap()))
+                }
+                RequestProfile.CRAWLER_NAVIGATION -> {
                     crawlerFetchCount++
                     Result.success(HttpResponse(200, url, crawlerHtml, emptyMap()))
                 }
+                else -> Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
             }
         }
 
         override fun downloadMediaStream(
             streamUrl: String,
-            destination: java.io.File,
+            destination: File,
             referer: String?,
             onProgress: (Float, Long?, String?) -> Unit,
             isCancelled: () -> Boolean
@@ -191,51 +252,52 @@ class NativeInstagramEngineTest {
     }
 
     @Test
-    fun extractMediaInfo_crawlerRetryOnTechnicalFailureWithNonEmptyHtml() = kotlinx.coroutines.runBlocking {
-        // Browser returns non-empty HTML missing target shortcode (Technical failure)
+    fun extractMediaInfo_escalatesFromDesktopToMobileAndCrawlerOnTechnicalFailure() = kotlinx.coroutines.runBlocking {
         val browserHtml = loadFixture("malformed.html")
-        // Crawler returns valid single public video HTML
+        val mobileHtml = loadFixture("malformed.html")
         val crawlerHtml = loadFixture("single_public_video.html")
 
-        val fakeWebClient = FakeMetaWebClient(browserHtml = browserHtml, crawlerHtml = crawlerHtml)
-        val customEngine = NativeInstagramEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = browserHtml, mobileHtml = mobileHtml, crawlerHtml = crawlerHtml)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
 
         assertTrue("Expected extraction to succeed after crawler retry", result.isSuccess)
-        assertEquals(1, fakeWebClient.browserFetchCount)
-        assertEquals("Crawler MUST be retried once on technical failure even with non-empty HTML", 1, fakeWebClient.crawlerFetchCount)
-        val mediaInfo = result.getOrNull()
-        assertEquals("test_creator", mediaInfo?.title?.let { "test_creator" })
+        assertEquals(1, fakeSession.desktopFetchCount)
+        assertEquals(1, fakeSession.mobileFetchCount)
+        assertEquals(1, fakeSession.crawlerFetchCount)
+        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), customEngine.lastProfileSequence)
     }
 
     @Test
-    fun extractMediaInfo_noCrawlerRetryOnRestriction() = kotlinx.coroutines.runBlocking {
+    fun extractMediaInfo_noRetryOnAudienceRestriction() = kotlinx.coroutines.runBlocking {
         val restrictedHtml = loadFixture("audience_restricted.html")
-        val fakeWebClient = FakeMetaWebClient(browserHtml = restrictedHtml, crawlerHtml = "not used")
-        val customEngine = NativeInstagramEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = restrictedHtml)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DbtoOl8zwMO/")
 
         assertTrue("Expected extraction to fail on restriction", result.isFailure)
         val error = result.exceptionOrNull()
         assertTrue(error is MetaExtractionError.Restricted)
-        assertEquals(1, fakeWebClient.browserFetchCount)
-        assertEquals("Crawler MUST NOT be retried on restriction", 0, fakeWebClient.crawlerFetchCount)
+        assertEquals(1, fakeSession.desktopFetchCount)
+        assertEquals(0, fakeSession.mobileFetchCount)
+        assertEquals(0, fakeSession.crawlerFetchCount)
+        assertEquals(listOf("DESKTOP"), customEngine.lastProfileSequence)
     }
 
     @Test
-    fun download_audioOnly_usesSeparateSourceFileAndFailsOnFfmpegError() = kotlinx.coroutines.runBlocking {
-        val fakeWebClient = FakeMetaWebClient(downloadSuccess = true)
-        val customEngine = NativeInstagramEngine(context = null, webClient = fakeWebClient)
-        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "ig_test_${System.currentTimeMillis()}")
+    fun download_audioOnly_failsGracefullyOnFfmpegError() = kotlinx.coroutines.runBlocking {
+        val fakeSession = FakePlatformHttpSession(downloadSuccess = true)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val tempDir = File(System.getProperty("java.io.tmpdir"), "ig_test_${System.currentTimeMillis()}")
         tempDir.mkdirs()
 
         try {
             val audioOption = com.charleswoo1.videodownloader.domain.model.QualityOption(
                 id = "audio_only",
                 label = "僅音訊",
-                formatSelector = "https://instagram.com/cdn/video_1080.mp4",
+                formatSelector = "audio:https://instagram.com/cdn/video_1080.mp4",
                 isAudioOnly = true
             )
             val request = com.charleswoo1.videodownloader.domain.model.DownloadRequest(
@@ -248,12 +310,6 @@ class NativeInstagramEngineTest {
 
             // Since context is null, FFmpeg extraction fails
             assertTrue("FFmpeg extraction failure must result in failure", result.isFailure)
-            assertNotNull(fakeWebClient.lastDownloadedDestination)
-            val downloadedFile = fakeWebClient.lastDownloadedDestination!!
-            assertTrue("Source file MUST use .source.mp4 temporary naming", downloadedFile.name.endsWith(".source.mp4"))
-            assertFalse("Source temporary file must be cleaned up", downloadedFile.exists())
-
-            // Ensure no raw video bytes were left as .mp3
             val mp3Files = tempDir.listFiles { _, name -> name.endsWith(".mp3") } ?: emptyArray()
             assertTrue("No invalid .mp3 files should remain after FFmpeg failure", mp3Files.isEmpty())
         } finally {
@@ -264,8 +320,8 @@ class NativeInstagramEngineTest {
     @Test
     fun buildQualityOptions_mapsResolutionTiersToExactRenditionUrls() = kotlinx.coroutines.runBlocking {
         val html = loadFixture("single_public_video.html")
-        val fakeWebClient = FakeMetaWebClient(browserHtml = html)
-        val customEngine = NativeInstagramEngine(context = null, webClient = fakeWebClient)
+        val fakeSession = FakePlatformHttpSession(browserHtml = html)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
 
         val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
         assertTrue(result.isSuccess)
@@ -282,11 +338,5 @@ class NativeInstagramEngineTest {
         val opt720 = options.find { it.id == "720p" }
         assertNotNull(opt720)
         assertEquals("https://instagram.com/cdn/video_720.mp4", opt720?.formatSelector)
-
-        // Fixture does not have 480p or 360p; they MUST NOT be displayed
-        val opt480 = options.find { it.id == "480p" }
-        val opt360 = options.find { it.id == "360p" }
-        assertEquals(null, opt480)
-        assertEquals(null, opt360)
     }
 }

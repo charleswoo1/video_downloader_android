@@ -3,6 +3,7 @@ package com.charleswoo1.videodownloader.data.download
 import com.charleswoo1.videodownloader.domain.model.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -166,5 +167,23 @@ class YtDlpErrorParserTest {
         val result = YtDlpErrorParser.parse(stderr, Platform.INSTAGRAM)
         assertEquals(YtDlpErrorParser.ErrorCategory.RATE_LIMITED, result.category)
         assertTrue(result.userMessage.contains("存取頻率受限"))
+    }
+
+    @Test
+    fun sanitize_instagramUrlWithStkn_redactsSecret() {
+        val raw = "ERROR: [Instagram] DdcwYWzxZI7: Failed to fetch https://www.instagram.com/reel/DdcwYWzxZI7/?stkn=SECRET_STKN_VAL&utm=test"
+        val parsed = YtDlpErrorParser.parse(raw, Platform.INSTAGRAM)
+        assertNotNull(parsed.primaryError)
+        assertFalse(parsed.primaryError!!.contains("SECRET_STKN_VAL"))
+        assertTrue(parsed.primaryError!!.contains("stkn=[REDACTED]"))
+    }
+
+    @Test
+    fun sanitize_signedCdnUrlWithSig_reducesAndRedacts() {
+        val raw = "ERROR: Failed to download https://video.twimg.com/ext_tw_video/123/pu/vid/video.mp4?sig=SECRET_SIG_VAL&tag=10"
+        val parsed = YtDlpErrorParser.parse(raw, Platform.X)
+        assertNotNull(parsed.primaryError)
+        assertFalse(parsed.primaryError!!.contains("SECRET_SIG_VAL"))
+        assertTrue(parsed.primaryError!!.contains("[REDACTED_QUERY]"))
     }
 }

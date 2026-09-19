@@ -25,8 +25,17 @@ object YtDlpErrorParser {
         UNKNOWN
     }
 
+    private val SIGNED_MEDIA_URL_REGEX = Regex(
+        """(https?://[^\s"'<>]+\.(?:mp4|m4a|m3u8|mpd|webm|ts|mov))\?[^\s"'<>]+""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val SENSITIVE_QUERY_PARAM_REGEX = Regex(
+        """(?i)([?&])(stkn|sig|signature|token|guest[_-]?token|gt|sessionid|csrftoken|auth_token|auth|key|secret)=[^&\s"'<>]+"""
+    )
+
     private val REPLACEMENTS = listOf(
-        Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|token|key)=[^&\s]+""") to "$1=[REDACTED]",
+        Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|auth|bearer|token|key|stkn|sig|signature|gt|guest[_-]?token)=[^&\s"'<>]+""") to "$1=[REDACTED]",
         Regex("""(?i)bearer\s+[a-zA-Z0-9_.-]+""") to "Bearer [REDACTED]",
         Regex("""(?i)--cookies?\s+[^\s]+""") to "--cookies [REDACTED]",
         Regex("""(?i)--plugin-dirs\s+[^\s]+""") to "--plugin-dirs [REDACTED]",
@@ -35,6 +44,15 @@ object YtDlpErrorParser {
 
     fun sanitize(text: String): String {
         var sanitized = text
+        // First reduce signed media URLs to host+path?[REDACTED_QUERY]
+        sanitized = SIGNED_MEDIA_URL_REGEX.replace(sanitized) { mr ->
+            "${mr.groupValues[1]}?[REDACTED_QUERY]"
+        }
+        // Redact any sensitive query params in other URLs
+        sanitized = SENSITIVE_QUERY_PARAM_REGEX.replace(sanitized) { mr ->
+            "${mr.groupValues[1]}${mr.groupValues[2]}=[REDACTED]"
+        }
+        // Redact any remaining sensitive key=value pairs or paths
         for ((pattern, replacement) in REPLACEMENTS) {
             sanitized = pattern.replace(sanitized, replacement)
         }

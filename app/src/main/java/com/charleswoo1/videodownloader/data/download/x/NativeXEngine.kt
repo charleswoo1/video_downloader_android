@@ -94,6 +94,17 @@ class NativeXEngine(
             return "$part1/$part2"
         }
 
+        fun cleanHostAndPath(urlStr: String): String {
+            return try {
+                val uri = java.net.URI(urlStr)
+                val host = uri.host ?: ""
+                val path = uri.path ?: ""
+                "$host$path"
+            } catch (_: Exception) {
+                urlStr.substringBefore('?').substringBefore('#')
+            }
+        }
+
         fun extractBearerTokenFromHtml(html: String): String? {
             val m1 = BEARER_TOKEN_RE.matcher(html)
             if (m1.find()) {
@@ -164,11 +175,28 @@ class NativeXEngine(
     override var lastDiagnosticFingerprint: String? = null
         private set
 
+    data class GraphQLTransportDiagnostics(
+        val httpStatusSeq: String = "0",
+        val authRefreshAttempted: Boolean = false,
+        val contentType: String = "application/json",
+        val bodySizeBytes: Int = 0,
+        val finalUrl: String = "",
+        val redirect: String = "no"
+    )
+
     var lastGraphQLHttpStatus: Int = 0
         private set
 
+    var lastGraphQLTransport: GraphQLTransportDiagnostics = GraphQLTransportDiagnostics()
+        private set
+
     data class GraphQLDiagnostics(
-        val httpStatus: Int = 0,
+        val httpStatus: String = "0",
+        val authRefreshAttempted: Boolean = false,
+        val contentType: String = "application/json",
+        val bodySizeBucket: String = "<10KB",
+        val hostAndPath: String = "",
+        val redirect: String = "no",
         val resultTypename: String = "none",
         val wrapperChain: String = "none",
         val targetRestIdPresent: Boolean = false,
@@ -192,17 +220,21 @@ class NativeXEngine(
         fun toFingerprint(attempt: Int): String {
             val typesStr = if (directMediaTypes.isNotEmpty()) directMediaTypes.joinToString(",") else "none"
             return """
-                [GRAPHQL attempt=$attempt http_status=$httpStatus typename=$resultTypename target_rest_id=$targetRestIdPresent wrapper=$wrapperChain]
+                [profile=GRAPHQL attempt=$attempt http_status=$httpStatus content_type=$contentType body_size=$bodySizeBucket host_and_path=$hostAndPath redirect=$redirect stage=GRAPHQL error=$resultTypename]
+                auth_refresh_attempted=$authRefreshAttempted retry_attempted=$retryAttempted target_rest_id=$targetRestIdPresent wrapper=$wrapperChain
                 flags: legacy=$hasLegacy tweet=$hasTweet tweet_legacy=$hasTweetLegacy quoted=$hasQuotedStatus retweeted=$hasRetweetedStatus extended_entities=$hasExtendedEntities entities=$hasEntities card=$hasCard unified_card=$hasUnifiedCard note_tweet=$hasNoteTweet
                 media: count=$directMediaCount types=$typesStr video_seen=$videoSeen usable_mp4=$usableMp4Seen
-                provisional_typename=$provisionalTypename retry_attempted=$retryAttempted
+                provisional_typename=$provisionalTypename
             """.trimIndent()
         }
     }
 
     data class HtmlDiagnostics(
         val httpStatus: Int = 0,
+        val contentType: String = "text/html",
         val bodySizeBucket: String = "<10KB",
+        val hostAndPath: String = "",
+        val redirect: String = "no",
         val initialStatePresent: Boolean = false,
         val targetStatusInHtml: Boolean = false,
         val knownMarkers: List<String> = emptyList(),
@@ -211,7 +243,10 @@ class NativeXEngine(
         fun toFingerprint(): String {
             val markersStr = if (knownMarkers.isNotEmpty()) knownMarkers.joinToString(",") else "none"
             return """
-                [HTML_FALLBACK http_status=$httpStatus body_size=$bodySizeBucket initial_state=$initialStatePresent target_in_html=$targetStatusInHtml markers=$markersStr outcome=$outcome]
+                [profile=HTML_FALLBACK http_status=$httpStatus content_type=$contentType body_size=$bodySizeBucket host_and_path=$hostAndPath redirect=$redirect stage=HTML_FALLBACK error=$outcome]
+                initial_state_present=$initialStatePresent target_in_html=$targetStatusInHtml
+                markers=$markersStr
+                outcome=$outcome
             """.trimIndent()
         }
     }
@@ -386,6 +421,14 @@ class NativeXEngine(
 
         val resp = respResult.getOrElse {
             lastGraphQLHttpStatus = 0
+            lastGraphQLTransport = GraphQLTransportDiagnostics(
+                httpStatusSeq = "0",
+                authRefreshAttempted = false,
+                contentType = "none",
+                bodySizeBytes = 0,
+                finalUrl = url,
+                redirect = "no"
+            )
             return@withContext Result.failure(it)
         }
         lastGraphQLHttpStatus = resp.code
@@ -417,9 +460,25 @@ class NativeXEngine(
             )
             val retryResp = retryResult.getOrElse {
                 lastGraphQLHttpStatus = 0
+                lastGraphQLTransport = GraphQLTransportDiagnostics(
+                    httpStatusSeq = "${resp.code}→0",
+                    authRefreshAttempted = true,
+                    contentType = resp.getHeader("content-type") ?: "application/json",
+                    bodySizeBytes = resp.body.toByteArray().size,
+                    finalUrl = resp.finalUrl,
+                    redirect = if (resp.finalUrl != url) "yes" else "no"
+                )
                 return@withContext Result.failure(it)
             }
             lastGraphQLHttpStatus = retryResp.code
+            lastGraphQLTransport = GraphQLTransportDiagnostics(
+                httpStatusSeq = "${resp.code}→${retryResp.code}",
+                authRefreshAttempted = true,
+                contentType = retryResp.getHeader("content-type") ?: "application/json",
+                bodySizeBytes = retryResp.body.toByteArray().size,
+                finalUrl = retryResp.finalUrl,
+                redirect = if (retryResp.finalUrl != url) "yes" else "no"
+            )
             if (retryResp.code !in 200..299) {
                 return@withContext Result.failure(
                     PlatformExtractionError.ApiError(retryResp.code, "X GraphQL API returned error code ${retryResp.code}")
@@ -427,6 +486,15 @@ class NativeXEngine(
             }
             return@withContext parseJsonResult(retryResp.body)
         }
+
+        lastGraphQLTransport = GraphQLTransportDiagnostics(
+            httpStatusSeq = "${resp.code}",
+            authRefreshAttempted = false,
+            contentType = resp.getHeader("content-type") ?: "application/json",
+            bodySizeBytes = resp.body.toByteArray().size,
+            finalUrl = resp.finalUrl,
+            redirect = if (resp.finalUrl != url) "yes" else "no"
+        )
 
         if (resp.code !in 200..299) {
             return@withContext Result.failure(
@@ -695,12 +763,23 @@ class NativeXEngine(
 
     fun computeGraphQLDiagnostics(
         data: JSONObject?,
-        httpStatus: Int,
+        transport: GraphQLTransportDiagnostics,
         targetStatusId: String,
         retryAttempted: Boolean
     ): GraphQLDiagnostics {
+        val sizeBucket = formatSizeBucket(transport.bodySizeBytes)
+        val cleanPath = cleanHostAndPath(transport.finalUrl)
+
         if (data == null) {
-            return GraphQLDiagnostics(httpStatus = httpStatus, retryAttempted = retryAttempted)
+            return GraphQLDiagnostics(
+                httpStatus = transport.httpStatusSeq,
+                authRefreshAttempted = transport.authRefreshAttempted,
+                contentType = transport.contentType,
+                bodySizeBucket = sizeBucket,
+                hostAndPath = cleanPath,
+                redirect = transport.redirect,
+                retryAttempted = retryAttempted
+            )
         }
         val tweetResult = data.optJSONObject("data")?.optJSONObject("tweetResult")
         val rawResultObj = tweetResult?.optJSONObject("result")
@@ -755,25 +834,51 @@ class NativeXEngine(
 
         val provTypename = if (typename in listOf("TweetUnavailable", "TweetTombstone")) typename else "none"
 
-        val cardLegacy = rawResultObj?.optJSONObject("card")?.optJSONObject("legacy")
-            ?: unwrappedTweet?.optJSONObject("card")?.optJSONObject("legacy")
+        val cardLegacy = unwrappedTweet?.optJSONObject("card")?.optJSONObject("legacy")
+            ?: rawResultObj?.optJSONObject("card")?.optJSONObject("legacy")
+            ?: legacy?.optJSONObject("card")?.optJSONObject("legacy")
         val hasUnifiedCard = (cardLegacy?.opt("binding_values") != null)
 
+        val hasQuotedStatus = (
+            unwrappedTweet?.optJSONObject("quoted_status_result") != null ||
+            rawResultObj?.optJSONObject("quoted_status_result") != null ||
+            legacy?.optJSONObject("quoted_status_result") != null
+        )
+        val hasRetweetedStatus = (
+            unwrappedTweet?.optJSONObject("retweeted_status_result") != null ||
+            rawResultObj?.optJSONObject("retweeted_status_result") != null ||
+            legacy?.optJSONObject("retweeted_status_result") != null
+        )
+        val hasCard = (
+            unwrappedTweet?.optJSONObject("card") != null ||
+            rawResultObj?.optJSONObject("card") != null ||
+            legacy?.optJSONObject("card") != null
+        )
+        val hasNoteTweet = (
+            unwrappedTweet?.optJSONObject("note_tweet") != null ||
+            rawResultObj?.optJSONObject("note_tweet") != null
+        )
+
         return GraphQLDiagnostics(
-            httpStatus = httpStatus,
+            httpStatus = transport.httpStatusSeq,
+            authRefreshAttempted = transport.authRefreshAttempted,
+            contentType = transport.contentType,
+            bodySizeBucket = sizeBucket,
+            hostAndPath = cleanPath,
+            redirect = transport.redirect,
             resultTypename = typename,
             wrapperChain = wrapperChain,
             targetRestIdPresent = targetRestIdPresent,
-            hasLegacy = (rawResultObj?.optJSONObject("legacy") != null),
+            hasLegacy = (legacy != null),
             hasTweet = (rawResultObj?.optJSONObject("tweet") != null),
             hasTweetLegacy = (rawResultObj?.optJSONObject("tweet")?.optJSONObject("legacy") != null),
-            hasQuotedStatus = (rawResultObj?.optJSONObject("quoted_status_result") != null || legacy?.optJSONObject("quoted_status_result") != null),
-            hasRetweetedStatus = (legacy?.optJSONObject("retweeted_status_result") != null),
+            hasQuotedStatus = hasQuotedStatus,
+            hasRetweetedStatus = hasRetweetedStatus,
             hasExtendedEntities = (extendedEntities != null),
             hasEntities = (entities != null),
-            hasCard = (rawResultObj?.optJSONObject("card") != null || unwrappedTweet?.optJSONObject("card") != null),
+            hasCard = hasCard,
             hasUnifiedCard = hasUnifiedCard,
-            hasNoteTweet = (rawResultObj?.optJSONObject("note_tweet") != null || unwrappedTweet?.optJSONObject("note_tweet") != null),
+            hasNoteTweet = hasNoteTweet,
             directMediaCount = mediaArray?.length() ?: 0,
             directMediaTypes = mediaTypes,
             videoSeen = videoSeen,
@@ -783,16 +888,33 @@ class NativeXEngine(
         )
     }
 
+    fun computeGraphQLDiagnostics(
+        data: JSONObject?,
+        httpStatus: Int,
+        targetStatusId: String,
+        retryAttempted: Boolean
+    ): GraphQLDiagnostics = computeGraphQLDiagnostics(
+        data,
+        GraphQLTransportDiagnostics(httpStatusSeq = httpStatus.toString()),
+        targetStatusId,
+        retryAttempted
+    )
+
     fun computeHtmlDiagnostics(
         htmlResp: Result<HttpResponse>,
         htmlResult: Result<ExtractedXMedia>?,
-        statusId: String
+        statusId: String,
+        targetUrl: String = ""
     ): HtmlDiagnostics {
         val respObj = htmlResp.getOrNull()
         val httpCode = respObj?.code ?: 0
+        val contentType = respObj?.getHeader("content-type") ?: "text/html"
         val html = respObj?.body ?: ""
         val bytes = html.toByteArray().size
         val sizeBucket = formatSizeBucket(bytes)
+        val finalUrl = respObj?.finalUrl ?: targetUrl
+        val cleanPath = cleanHostAndPath(finalUrl)
+        val redirect = if (respObj?.finalUrl != null && targetUrl.isNotBlank() && respObj.finalUrl != targetUrl) "yes" else "no"
         val initialPresent = html.contains("window.__INITIAL_STATE__")
         val targetInHtml = html.contains(statusId)
         val markers = mutableListOf<String>()
@@ -814,7 +936,10 @@ class NativeXEngine(
 
         return HtmlDiagnostics(
             httpStatus = httpCode,
+            contentType = contentType,
             bodySizeBucket = sizeBucket,
+            hostAndPath = cleanPath,
+            redirect = redirect,
             initialStatePresent = initialPresent,
             targetStatusInHtml = targetInHtml,
             knownMarkers = markers,
@@ -931,6 +1056,7 @@ class NativeXEngine(
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         lastDiagnosticFingerprint = null
         lastProfileSequence = emptyList()
+        lastGraphQLTransport = GraphQLTransportDiagnostics()
 
         val statusId = extractStatusId(url)
             ?: return@withContext Result.failure(
@@ -953,7 +1079,7 @@ class NativeXEngine(
 
         safeLog("[X] graphql_attempt=1")
         val gqlResult = fetchPostViaGraphQL(statusId, bearer, guest)
-        val gqlDiag1 = computeGraphQLDiagnostics(gqlResult.getOrNull(), lastGraphQLHttpStatus, statusId, retryAttempted = false)
+        val gqlDiag1 = computeGraphQLDiagnostics(gqlResult.getOrNull(), lastGraphQLTransport, statusId, retryAttempted = false)
         diagnosticHistory.add(gqlDiag1.toFingerprint(1))
         lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
 
@@ -976,7 +1102,7 @@ class NativeXEngine(
                     val newGuest = ensureGuestToken(newBearer, forceRefresh = true)
                     safeLog("[X] graphql_attempt=2")
                     val retryGql = fetchPostViaGraphQL(statusId, newBearer, newGuest)
-                    val gqlDiag2 = computeGraphQLDiagnostics(retryGql.getOrNull(), lastGraphQLHttpStatus, statusId, retryAttempted = true)
+                    val gqlDiag2 = computeGraphQLDiagnostics(retryGql.getOrNull(), lastGraphQLTransport, statusId, retryAttempted = true)
                     diagnosticHistory.add(gqlDiag2.toFingerprint(2))
                     lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
 
@@ -1031,7 +1157,7 @@ class NativeXEngine(
                     internalReason = err?.internalReason ?: internalReason
                     if (err != null && !err.canFallback) {
                         lastProfileSequence = profileSteps
-                        val htmlDiag = computeHtmlDiagnostics(htmlResp, htmlResult, statusId)
+                        val htmlDiag = computeHtmlDiagnostics(htmlResp, htmlResult, statusId, cleanUrl)
                         diagnosticHistory.add(htmlDiag.toFingerprint())
                         lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
                         safeLog("[X] final=${err.code.name}")
@@ -1040,7 +1166,7 @@ class NativeXEngine(
                     if (lastError == null) lastError = err
                 }
             }
-            val htmlDiag = computeHtmlDiagnostics(htmlResp, htmlResult, statusId)
+            val htmlDiag = computeHtmlDiagnostics(htmlResp, htmlResult, statusId, cleanUrl)
             diagnosticHistory.add(htmlDiag.toFingerprint())
             lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
         }

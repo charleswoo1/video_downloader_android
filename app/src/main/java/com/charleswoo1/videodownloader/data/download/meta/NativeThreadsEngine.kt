@@ -1075,7 +1075,7 @@ class NativeThreadsEngine(
             stepName: String,
             resp: Result<HttpResponse>,
             html: String,
-            outcome: ThreadsParseOutcome
+            outcome: ThreadsParseOutcome?
         ) {
             val respObj = resp.getOrNull()
             val httpCode = respObj?.code ?: 0
@@ -1085,18 +1085,52 @@ class NativeThreadsEngine(
             val finalUrl = respObj?.finalUrl ?: canonicalUrl
             val cleanPath = cleanHostAndPath(finalUrl)
             val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != canonicalUrl) "yes" else "no"
-            val errorClassName = when (outcome.result) {
-                is MetaExtractionResult.Success -> "NONE"
-                is MetaExtractionResult.Failure -> outcome.result.error.javaClass.simpleName
+
+            val stage: String
+            val errorClassName: String
+            val scriptSource: String
+            val scriptCount: Int
+            val rawCode: Boolean
+            val decodedCode: Boolean
+            val targetWrapper: Boolean
+            val mediaNode: Boolean
+            val matchedKeysStr: String
+
+            if (outcome != null) {
+                val diag = outcome.diagnostics
+                stage = diag.stage
+                errorClassName = when (outcome.result) {
+                    is MetaExtractionResult.Success -> "NONE"
+                    is MetaExtractionResult.Failure -> outcome.result.error.javaClass.simpleName
+                }
+                scriptSource = diag.scriptSource
+                scriptCount = diag.scriptCount
+                rawCode = diag.rawCodeInHtml
+                decodedCode = diag.decodedCodeInHtml
+                targetWrapper = diag.targetWrapperFound
+                mediaNode = diag.mediaNodeFound
+                matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
+            } else {
+                stage = if (resp.isFailure) "FETCH_FAILED" else "EMPTY_BODY"
+                errorClassName = if (resp.isFailure) {
+                    resp.exceptionOrNull()?.javaClass?.simpleName ?: "IOException"
+                } else {
+                    "EMPTY_BODY"
+                }
+                scriptSource = "none"
+                scriptCount = 0
+                rawCode = false
+                decodedCode = false
+                targetWrapper = false
+                mediaNode = false
+                matchedKeysStr = "none"
             }
-            val diag = outcome.diagnostics
-            val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
 
             val stepFp = """
-                [profile=$stepName http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName]
+                [profile=$stepName http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=$stage error=$errorClassName]
                 share: input=$isShareInput resolved=$shareResolved
-                scripts: source=${diag.scriptSource} count=${diag.scriptCount}
-                target: raw_code=${diag.rawCodeInHtml} decoded_code=${diag.decodedCodeInHtml} wrapper=${diag.targetWrapperFound} media_node=${diag.mediaNodeFound}
+                scripts: source=$scriptSource count=$scriptCount
+                target: raw_code=$rawCode decoded_code=$decodedCode wrapper=$targetWrapper media_node=$mediaNode
                 matched_keys: $matchedKeysStr
             """.trimIndent()
             diagnosticHistory.add(stepFp)
@@ -1108,32 +1142,56 @@ class NativeThreadsEngine(
         val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
         val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
-        var parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-        recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, parseOutcome)
+        var parseOutcome: ThreadsParseOutcome? = null
+        if (desktopHtml.isNotBlank()) {
+            parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+            recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, parseOutcome)
+        } else {
+            recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, outcome = null)
+        }
 
-        // Step 2: Escalation to MOBILE_NAVIGATION on technical failure
-        if (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical) {
+        // Step 2: Escalation to MOBILE_NAVIGATION on technical failure or empty body/fetch failure
+        val needEscalateToMobile = parseOutcome == null ||
+            (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
+
+        if (needEscalateToMobile) {
             profileSteps.add("MOBILE")
             val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
             val mobileHtml = mobileResp.getOrNull()?.body ?: ""
             if (mobileHtml.isNotBlank()) {
-                parseOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, parseOutcome)
+                val mobileOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                parseOutcome = mobileOutcome
+                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, mobileOutcome)
+            } else {
+                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, outcome = null)
             }
         }
 
-        // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure
-        if (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical) {
+        // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure or empty body/fetch failure
+        val needEscalateToCrawler = parseOutcome == null ||
+            (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
+
+        if (needEscalateToCrawler) {
             profileSteps.add("CRAWLER")
             val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
             val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
-                parseOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, parseOutcome)
+                val crawlerOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                parseOutcome = crawlerOutcome
+                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, crawlerOutcome)
+            } else {
+                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, outcome = null)
             }
         }
 
         lastProfileSequence = profileSteps
+
+        if (parseOutcome == null) {
+            safeLog("[Threads] final=PARSE_ERROR")
+            return@withContext Result.failure(
+                MetaExtractionError.Technical("無法取得 Threads 頁面內容", internalReason = "EMPTY_BODY")
+            )
+        }
 
         val diag = parseOutcome.diagnostics
         val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"

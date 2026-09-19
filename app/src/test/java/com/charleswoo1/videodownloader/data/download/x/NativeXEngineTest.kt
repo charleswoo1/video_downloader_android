@@ -2,6 +2,9 @@ package com.charleswoo1.videodownloader.data.download.x
 
 import com.charleswoo1.videodownloader.data.download.PlatformErrorCode
 import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
+import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
+import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
+import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
@@ -774,5 +777,111 @@ class NativeXEngineTest {
         val res = testEngine.fetchPostViaGraphQL("123", "dummy_bearer", "stale_gt_cookie")
 
         assertTrue("Expected second attempt to succeed after token refresh", res.isSuccess)
+    }
+
+    @Test
+    fun extractMediaInfo_graphql403Retry200_showsSequenceAndAuthRefreshInFingerprint() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            var graphqlCallCount = 0
+            var guestTokenCallCount = 0
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<PlatformHttpSession.HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    guestTokenCallCount++
+                    return Result.success(PlatformHttpSession.HttpResponse(200, url, "{}", mapOf("x-guest-token" to "new_gt_token_$guestTokenCallCount")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    graphqlCallCount++
+                    if (graphqlCallCount == 1) {
+                        return Result.success(PlatformHttpSession.HttpResponse(403, url, "{\"errors\":[{\"message\":\"Forbidden\"}]}", emptyMap()))
+                    } else {
+                        val validTweetJson = """
+                            {
+                              "data": {
+                                "tweetResult": {
+                                  "result": {
+                                    "__typename": "Tweet",
+                                    "rest_id": "123",
+                                    "legacy": {
+                                      "full_text": "Test tweet",
+                                      "extended_entities": {
+                                        "media": [
+                                          {
+                                            "type": "video",
+                                            "video_info": {
+                                              "variants": [
+                                                {
+                                                  "content_type": "video/mp4",
+                                                  "url": "https://video.twimg.com/video.mp4",
+                                                  "bitrate": 1000
+                                                }
+                                              ]
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                        """.trimIndent()
+                        return Result.success(PlatformHttpSession.HttpResponse(200, url, validTweetJson, mapOf("content-type" to "application/json")))
+                    }
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/i/status/123")
+        assertTrue("Extraction should succeed on retry", result.isSuccess)
+
+        val fp = testEngine.lastDiagnosticFingerprint
+        assertNotNull(fp)
+        assertTrue("Fingerprint must show 403→200 status sequence", fp!!.contains("http_status=403→200"))
+        assertTrue("Fingerprint must indicate auth_refresh_attempted=true", fp.contains("auth_refresh_attempted=true"))
+        assertTrue("Fingerprint must include content_type", fp.contains("content_type=application/json"))
+        assertTrue("Fingerprint must include host_and_path", fp.contains("host_and_path=api.x.com/graphql"))
+        assertTrue("Fingerprint must include redirect", fp.contains("redirect=no"))
+    }
+
+    @Test
+    fun computeGraphQLDiagnostics_tweetWithVisibilityResults_checksUnwrappedTweetForQuotedStatus() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetWithVisibilityResults",
+                    "tweet": {
+                      "rest_id": "999",
+                      "quoted_status_result": {
+                        "result": {
+                          "__typename": "Tweet"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "999", retryAttempted = false)
+        assertTrue("hasQuotedStatus must be true when quoted_status_result is in unwrappedTweet", diag.hasQuotedStatus)
+        assertTrue("targetRestIdPresent must be true", diag.targetRestIdPresent)
+        assertEquals("TweetWithVisibilityResults", diag.resultTypename)
     }
 }

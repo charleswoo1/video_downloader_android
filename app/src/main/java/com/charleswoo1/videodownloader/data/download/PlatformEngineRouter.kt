@@ -88,7 +88,8 @@ class PlatformEngineRouter(
         if (fallbackResult.isSuccess) return FallbackDiagnostics("SUCCESS", null)
         val ex = fallbackResult.exceptionOrNull()
         if (ex is YtDlpExtractionException) {
-            return FallbackDiagnostics(ex.category.name, ex.primaryError)
+            val sanitized = ex.primaryError?.let { YtDlpErrorParser.sanitize(it) }
+            return FallbackDiagnostics(ex.category.name, sanitized)
         }
         val parsed = YtDlpErrorParser.parse(ex?.message, platform)
         return FallbackDiagnostics(parsed.category.name, parsed.primaryError)

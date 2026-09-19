@@ -9,6 +9,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class NativeThreadsEngineTest {
 
@@ -1004,5 +1005,54 @@ class NativeThreadsEngineTest {
         assertTrue(diag.decodedCodeInHtml)
         assertTrue(diag.targetWrapperFound)
         assertTrue(diag.mediaNodeFound)
+    }
+
+    @Test
+    fun extractMediaInfo_failedMobileAttempt_stillAppearsBetweenDesktopAndCrawlerInFingerprint() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<PlatformHttpSession.HttpResponse> {
+                return when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(200, url, "<html><body>no video data here</body></html>", emptyMap())
+                    )
+                    RequestProfile.MOBILE_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(403, url, "", emptyMap())
+                    )
+                    RequestProfile.CRAWLER_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(200, url, "<html><body>crawler fallback page</body></html>", emptyMap())
+                    )
+                    else -> Result.failure(java.io.IOException("Unsupported profile"))
+                }
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@user/post/TestCode123")
+        assertTrue("Expected failure when all profiles fail to extract video", result.isFailure)
+
+        val fp = testEngine.lastDiagnosticFingerprint
+        assertNotNull(fp)
+        assertTrue("Fingerprint must contain DESKTOP", fp!!.contains("profile=DESKTOP"))
+        assertTrue("Fingerprint must contain MOBILE", fp.contains("profile=MOBILE"))
+        assertTrue("Fingerprint must contain CRAWLER", fp.contains("profile=CRAWLER"))
+        assertTrue("Fingerprint must contain empty body indicator for MOBILE", fp.contains("http_status=403") && fp.contains("stage=EMPTY_BODY"))
+
+        val desktopIdx = fp.indexOf("profile=DESKTOP")
+        val mobileIdx = fp.indexOf("profile=MOBILE")
+        val crawlerIdx = fp.indexOf("profile=CRAWLER")
+
+        assertTrue("DESKTOP must precede MOBILE", desktopIdx < mobileIdx)
+        assertTrue("MOBILE must precede CRAWLER", mobileIdx < crawlerIdx)
     }
 }

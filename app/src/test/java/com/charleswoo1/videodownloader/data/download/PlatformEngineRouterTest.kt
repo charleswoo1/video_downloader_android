@@ -451,4 +451,25 @@ class PlatformEngineRouterTest {
         assertEquals("RATE_LIMITED", trace?.fallbackResultCategory)
         assertTrue(trace?.diagnosticFingerprint?.contains("category=RATE_LIMITED") == true)
     }
+
+    @Test
+    fun extractMediaInfo_fallbackWithStknAndSig_redactsSecretsFromTraceAndFingerprint() = runBlocking {
+        fakeInstagramEngine.extractResult = Result.failure(
+            MetaExtractionError.Technical("Technical error", internalReason = "PARSE_ERROR")
+        )
+        val rawError = "ERROR: [Instagram] DdcwYWzxZI7: Failed fetching https://www.instagram.com/reel/DdcwYWzxZI7/?stkn=SUPER_SECRET_STKN and cdn https://video.twimg.com/video.mp4?sig=SUPER_SECRET_SIG"
+        val parsed = YtDlpErrorParser.parse(rawError, Platform.INSTAGRAM)
+        fakeYtDlpEngine.extractResult = Result.failure(YtDlpExtractionException(parsed))
+
+        val result = router.extractMediaInfo("https://www.instagram.com/reel/DdcwYWzxZI7/")
+        assertTrue("Extraction must fail", result.isFailure)
+        val trace = router.lastTrace
+        assertNotNull(trace)
+        assertFalse(trace?.fallbackSanitizedError?.contains("SUPER_SECRET_STKN") == true)
+        assertFalse(trace?.fallbackSanitizedError?.contains("SUPER_SECRET_SIG") == true)
+        assertFalse(trace?.diagnosticFingerprint?.contains("SUPER_SECRET_STKN") == true)
+        assertFalse(trace?.diagnosticFingerprint?.contains("SUPER_SECRET_SIG") == true)
+        assertTrue(trace?.diagnosticFingerprint?.contains("stkn=[REDACTED]") == true)
+        assertTrue(trace?.diagnosticFingerprint?.contains("[REDACTED_QUERY]") == true)
+    }
 }

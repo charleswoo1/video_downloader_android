@@ -520,13 +520,12 @@ class NativeXEngine(
             )
         }
 
-        var ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value
+        val ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value
+            ?: httpSession.cookieJar.getCookieValue("x.com", "ct0")
         if (ct0.isNullOrBlank()) {
-            ct0 = httpSession.cookieJar.getCookieValue("x.com", "ct0")
-        }
-        if (ct0.isNullOrBlank()) {
-            val randomBytes = ByteArray(16).apply { SECURE_RANDOM.nextBytes(this) }
-            ct0 = randomBytes.joinToString("") { "%02x".format(it) }
+            return@withContext Result.failure(
+                PlatformExtractionError.LoginRequired("X Session 缺少 ct0 CSRF 憑證", internalReason = "GRAPHQL_AUTH_MISSING_CT0")
+            )
         }
 
         httpSession.syncSessionCookies(Platform.X)

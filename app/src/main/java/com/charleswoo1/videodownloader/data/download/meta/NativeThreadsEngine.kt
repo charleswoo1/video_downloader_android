@@ -1126,12 +1126,14 @@ class NativeThreadsEngine(
         pk: String,
         canonicalUrl: String
     ): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
-        // 1. Page bootstrap: GET canonical target page to extract real LSD token and cookies
+        // 1. Page bootstrap: GET canonical target page to extract real LSD token and cookies in isolated anonymous context
+        httpSession.resetAnonymousCookies()
         val bootstrapResp = httpSession.fetch(
             url = canonicalUrl,
             profile = RequestProfile.DESKTOP_NAVIGATION,
-            origin = "https://www.threads.net",
-            referer = "https://www.threads.net/"
+            origin = "https://www.threads.com",
+            referer = "https://www.threads.com/",
+            customHeaders = mapOf("X-Anonymous-Context" to "true")
         )
 
         val bootstrapObj = bootstrapResp.getOrNull()
@@ -1151,7 +1153,7 @@ class NativeThreadsEngine(
             )
         }
 
-        // Check for csrf token in cookie jar or bootstrap response
+        // Check for csrf token in isolated anonymous cookie jar or bootstrap response
         var csrfToken: String? = null
         val setCookieHeader = bootstrapObj?.headers?.entries?.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
         if (setCookieHeader != null) {
@@ -1159,11 +1161,11 @@ class NativeThreadsEngine(
             if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
         }
         if (csrfToken.isNullOrBlank()) {
-            csrfToken = httpSession.cookieJar.getCookieValue("threads.net", "csrftoken")
+            csrfToken = httpSession.anonymousCookieJar.getCookieValue("threads.com", "csrftoken")
         }
 
         // 2. POST BarcelonaPostPageContentQuery GraphQL
-        val endpoint = "https://www.threads.net/api/graphql"
+        val endpoint = "https://www.threads.com/api/graphql"
         val variables = JSONObject().apply {
             put("postID", pk)
         }.toString()
@@ -1177,12 +1179,13 @@ class NativeThreadsEngine(
             "X-ASBD-ID" to "129477",
             "X-FB-LSD" to lsdToken,
             "X-FB-Friendly-Name" to "BarcelonaPostPageContentQuery",
-            "Origin" to "https://www.threads.net",
+            "Origin" to "https://www.threads.com",
             "Referer" to canonicalUrl,
             "Accept" to "*/*",
             "Sec-Fetch-Site" to "same-origin",
             "Sec-Fetch-Mode" to "cors",
-            "Sec-Fetch-Dest" to "empty"
+            "Sec-Fetch-Dest" to "empty",
+            "X-Anonymous-Context" to "true"
         )
         if (!csrfToken.isNullOrBlank()) {
             headers["X-CSRFToken"] = csrfToken
@@ -1191,7 +1194,7 @@ class NativeThreadsEngine(
         val respResult = httpSession.fetch(
             url = endpoint,
             profile = RequestProfile.API,
-            origin = "https://www.threads.net",
+            origin = "https://www.threads.com",
             referer = canonicalUrl,
             customHeaders = headers,
             body = postData.toByteArray(Charsets.UTF_8),
@@ -1216,7 +1219,8 @@ class NativeThreadsEngine(
         }
 
         try {
-            val json = JSONObject(resp.body)
+            val cleanBody = resp.body.trimStart().removePrefix("for (;;);").trimStart()
+            val json = JSONObject(cleanBody)
             val matchingPost = findTargetPostInGraphQL(json, shortcode, pk)
                 ?: return@withContext Result.failure(
                     PlatformExtractionError.TargetNotInPageData("Threads GraphQL 回應中未找到目標貼文 ($shortcode / $pk)", internalReason = "BARCELONA_TARGET_NOT_FOUND")

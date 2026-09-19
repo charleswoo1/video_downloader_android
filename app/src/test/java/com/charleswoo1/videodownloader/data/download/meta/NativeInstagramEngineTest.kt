@@ -1275,6 +1275,7 @@ class NativeInstagramEngineTest {
             com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM,
             "sessionid=test_session_id_123456789; csrftoken=abc; ds_user_id=12345"
         )
+        sessionProvider.markActive(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM, "Validated")
 
         val apiJson = """
             {
@@ -1335,6 +1336,7 @@ class NativeInstagramEngineTest {
             com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM,
             "sessionid=expired_session; csrftoken=abc; ds_user_id=12345"
         )
+        sessionProvider.markActive(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM, "Validated")
 
         val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
             override fun fetch(
@@ -1473,5 +1475,166 @@ class NativeInstagramEngineTest {
         val decodedFormBody = java.net.URLDecoder.decode(formBody, "UTF-8")
         assertTrue("Variables must contain media_id: $expectedMediaId", decodedFormBody.contains(""""media_id":"$expectedMediaId""""))
         assertFalse("Variables MUST NOT regress to shortcode", decodedFormBody.contains(""""shortcode":"""))
+    }
+
+    @Test
+    fun fetchPolarisLoggedOutGraphQL_missingLsd_doesNotSendGraphQLWithPlaceholder() = runBlocking {
+        val shortcode = "DdSmissingLsd"
+        val capturedGqlRequests = mutableListOf<String>()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    capturedGqlRequests.add(url)
+                    return Result.failure(java.io.IOException("GraphQL must not be called when LSD is missing"))
+                }
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                }
+                // Page returns HTML without any LSD token
+                return Result.success(HttpResponse(200, url, "<html><body>No LSD token here</body></html>", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.fetchPolarisLoggedOutGraphQL(shortcode, "https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Expected failure when LSD token is missing", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be TargetNotInPageData; found: $error", error is PlatformExtractionError.TargetNotInPageData)
+        assertTrue("GraphQL POST request MUST NOT be sent with placeholder/dummy LSD", capturedGqlRequests.isEmpty())
+    }
+
+    @Test
+    fun fetchPolarisLoggedOutGraphQL_rulingTransportFailure_stillAttemptsPolaris() = runBlocking {
+        val shortcode = "DdSpreflightFail"
+        val expectedMediaId = NativeInstagramEngine.shortcodeToMediaId(shortcode)
+        val capturedGqlRequests = mutableListOf<String>()
+
+        val polarisResponseJson = """
+            {
+              "data": {
+                "xig_polaris_media": {
+                  "if_not_gated_logged_out": {
+                    "shortcode": "$shortcode",
+                    "id": "$expectedMediaId",
+                    "is_video": true,
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/polaris_resilient.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "owner": {"username": "resilient_user"}
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    // Ruling preflight fails with transport error
+                    return Result.failure(java.io.IOException("Network connection reset on ruling preflight"))
+                }
+                if (url == "https://www.instagram.com/p/$shortcode/") {
+                    return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"real_bootstrap_lsd_123"}]""", emptyMap()))
+                }
+                if (url.contains("/api/graphql")) {
+                    capturedGqlRequests.add(url)
+                    return Result.success(HttpResponse(200, url, polarisResponseJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url: $url"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/$shortcode/")
+
+        assertTrue("Extraction must succeed even if ruling preflight has transport failure", result.isSuccess)
+        val media = result.getOrNull()
+        assertEquals("https://instagram.com/cdn/polaris_resilient.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(1, capturedGqlRequests.size)
+    }
+
+    @Test
+    fun fetchPolarisLoggedOutGraphQL_ruling500_continuesAsNonFatalAdvisory() = runBlocking {
+        val shortcode = "DdSpreflight500"
+        val expectedMediaId = NativeInstagramEngine.shortcodeToMediaId(shortcode)
+        val capturedGqlRequests = mutableListOf<String>()
+
+        val polarisResponseJson = """
+            {
+              "data": {
+                "xig_polaris_media": {
+                  "if_not_gated_logged_out": {
+                    "shortcode": "$shortcode",
+                    "id": "$expectedMediaId",
+                    "is_video": true,
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/polaris_server_err_ok.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "owner": {"username": "server_err_user"}
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    // Ruling preflight returns non-terminal 500
+                    return Result.success(HttpResponse(500, url, "Internal Server Error", emptyMap()))
+                }
+                if (url == "https://www.instagram.com/p/$shortcode/") {
+                    return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"real_bootstrap_lsd_500"}]""", emptyMap()))
+                }
+                if (url.contains("/api/graphql")) {
+                    capturedGqlRequests.add(url)
+                    return Result.success(HttpResponse(200, url, polarisResponseJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url: $url"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/$shortcode/")
+
+        assertTrue("Extraction must succeed even if ruling preflight returns 500", result.isSuccess)
+        val media = result.getOrNull()
+        assertEquals("https://instagram.com/cdn/polaris_server_err_ok.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(1, capturedGqlRequests.size)
     }
 }

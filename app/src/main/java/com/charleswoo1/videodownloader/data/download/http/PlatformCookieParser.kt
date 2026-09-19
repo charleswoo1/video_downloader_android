@@ -49,7 +49,7 @@ object PlatformCookieParser {
 
     fun getDefaultDomain(platform: Platform): String = when (platform) {
         Platform.INSTAGRAM -> "instagram.com"
-        Platform.THREADS -> "threads.net"
+        Platform.THREADS -> "threads.com"
         Platform.X -> "x.com"
         else -> "unknown"
     }

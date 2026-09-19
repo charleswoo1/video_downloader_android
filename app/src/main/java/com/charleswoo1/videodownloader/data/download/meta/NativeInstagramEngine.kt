@@ -1124,53 +1124,52 @@ class NativeInstagramEngine(
             customHeaders = rulingHeaders
         )
 
-        val rulingObj = rulingResp.getOrElse {
-            return@withContext Result.failure(it)
-        }
-
-        if (rulingObj.code == 429) {
-            return@withContext Result.failure(
-                PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
-            )
-        }
-        if (rulingObj.code !in 200..299) {
-            return@withContext Result.failure(
-                PlatformExtractionError.ApiError(rulingObj.code, "Ruling preflight error HTTP ${rulingObj.code}", internalReason = "RULING_HTTP_${rulingObj.code}")
-            )
-        }
-
-        val rulingBody = rulingObj.body
-        try {
-            val rulingJson = JSONObject(rulingBody)
-            val title = rulingJson.optString("title")
-            val description = rulingJson.optString("description")
-            val isRestricted = title.contains("Restricted Video", ignoreCase = true) ||
-                    description.contains("Restricted Video", ignoreCase = true) ||
-                    rulingBody.contains("login_required", ignoreCase = true)
-
-            if (isRestricted) {
+        var csrfToken: String? = null
+        val rulingObj = rulingResp.getOrNull()
+        if (rulingObj != null) {
+            if (rulingObj.code == 429) {
                 return@withContext Result.failure(
-                    PlatformExtractionError.LoginRequired(
-                        "此 Instagram 內容為受限影片，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",
-                        internalReason = "RULING_RESTRICTED_VIDEO"
-                    )
+                    PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
                 )
             }
-        } catch (_: Exception) {}
+            if (rulingObj.code in 200..299) {
+                val rulingBody = rulingObj.body
+                try {
+                    val rulingJson = JSONObject(rulingBody)
+                    val title = rulingJson.optString("title")
+                    val description = rulingJson.optString("description")
+                    val isRestricted = title.contains("Restricted Video", ignoreCase = true) ||
+                            description.contains("Restricted Video", ignoreCase = true) ||
+                            rulingBody.contains("login_required", ignoreCase = true)
 
-        // Extract CSRF token from ruling response headers / cookies
-        var csrfToken: String? = null
-        val setCookieHeader = rulingObj.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
-        if (setCookieHeader != null) {
-            val csrfMatch = Regex("""csrftoken=([a-zA-Z0-9_-]+)""").find(setCookieHeader)
-            if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
+                    if (isRestricted) {
+                        return@withContext Result.failure(
+                            PlatformExtractionError.LoginRequired(
+                                "此 Instagram 內容為受限影片，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",
+                                internalReason = "RULING_RESTRICTED_VIDEO"
+                            )
+                        )
+                    }
+                } catch (_: Exception) {}
+            } else {
+                safeLog("[Instagram] ruling preflight returned non-2xx (${rulingObj.code}), continuing as non-fatal advisory")
+            }
+
+            // Extract CSRF token from ruling response headers / cookies
+            val setCookieHeader = rulingObj.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
+            if (setCookieHeader != null) {
+                val csrfMatch = Regex("""csrftoken=([a-zA-Z0-9_-]+)""").find(setCookieHeader)
+                if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
+            }
+        } else {
+            safeLog("[Instagram] ruling preflight transport failure (${rulingResp.exceptionOrNull()?.message}), continuing as non-fatal advisory")
         }
 
         if (csrfToken.isNullOrBlank()) {
             csrfToken = httpSession.cookieJar.getCookieValue("instagram.com", "csrftoken")
         }
 
-        // 2. Obtain LSD token context (yt-dlp alignment: from page or default)
+        // 2. Obtain LSD token context (yt-dlp alignment: from page or cookie jar)
         var lsdToken = cachedLsdToken ?: httpSession.cookieJar.getCookieValue("instagram.com", "lsd")
         if (lsdToken.isNullOrBlank()) {
             val pageResp = httpSession.fetch(
@@ -1194,7 +1193,16 @@ class NativeInstagramEngine(
             }
         }
 
-        val effectiveLsd = lsdToken ?: "AVq_dummy_lsd"
+        if (lsdToken.isNullOrBlank()) {
+            return@withContext Result.failure(
+                PlatformExtractionError.TargetNotInPageData(
+                    "無法從 Instagram 取得有效的 LSD 權杖，跳過 GraphQL 查詢",
+                    internalReason = "POLARIS_LSD_MISSING"
+                )
+            )
+        }
+
+        val effectiveLsd = lsdToken
 
         // 3. Polaris GraphQL Request
         val endpoint = "https://www.instagram.com/api/graphql"

@@ -1304,6 +1304,7 @@ class NativeXEngineTest {
         val store = InMemoryPlatformCredentialStore()
         val sessionProvider = AuthenticatedPlatformSessionProvider(store)
         sessionProvider.importSession(Platform.X, "auth_token=valid_x_token; ct0=valid_x_csrf")
+        sessionProvider.markActive(Platform.X, "Validated")
 
         var capturedAuthType: String? = null
         var capturedCsrfToken: String? = null
@@ -1353,6 +1354,7 @@ class NativeXEngineTest {
         assertEquals("valid_x_csrf", capturedCsrfToken)
         assertNull("Authenticated request must NOT send x-guest-token", capturedGuestTokenOnAuth)
         assertTrue("Cookie header must contain auth_token", capturedCookieHeader?.contains("auth_token=valid_x_token") ?: false)
+        assertTrue("Cookie header must contain ct0 identical to x-csrf-token", capturedCookieHeader?.contains("ct0=valid_x_csrf") ?: false)
         assertEquals(listOf("GRAPHQL", "GRAPHQL_AUTHENTICATED"), testEngine.lastProfileSequence)
     }
 
@@ -1374,6 +1376,7 @@ class NativeXEngineTest {
         val store = InMemoryPlatformCredentialStore()
         val sessionProvider = AuthenticatedPlatformSessionProvider(store)
         sessionProvider.importSession(Platform.X, "auth_token=expired_x_token; ct0=csrf_123")
+        sessionProvider.markActive(Platform.X, "Validated")
 
         val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
             override fun fetch(
@@ -1413,6 +1416,53 @@ class NativeXEngineTest {
         assertEquals(PlatformErrorCode.SESSION_EXPIRED, err?.code)
         assertEquals(SessionState.EXPIRED, sessionProvider.sessionStatus(Platform.X).state)
         assertEquals(listOf("GRAPHQL", "GRAPHQL_AUTHENTICATED"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun fetchPostViaAuthenticatedGraphQL_missingCt0_failsWithoutFabricatingRandomToken() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        // Manually save cookie with only auth_token (bypassing import parser to simulate corrupted store)
+        store.saveCookies(
+            Platform.X,
+            listOf(
+                okhttp3.Cookie.Builder()
+                    .domain("x.com")
+                    .path("/")
+                    .name("auth_token")
+                    .value("valid_token_without_ct0")
+                    .build()
+            )
+        )
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.markActive(Platform.X, "Validated")
+
+        var networkAttempted = false
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                networkAttempted = true
+                return Result.failure(java.io.IOException("Network should not be attempted"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.fetchPostViaAuthenticatedGraphQL("123456", "bearer_token_test")
+
+        assertTrue("Expected failure when ct0 is missing", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be LoginRequired with missing ct0 reason; found $error", error is PlatformExtractionError.LoginRequired)
+        assertEquals("GRAPHQL_AUTH_MISSING_CT0", (error as PlatformExtractionError.LoginRequired).internalReason)
+        assertFalse("Authenticated GraphQL MUST NOT fabricate random ct0 and send request", networkAttempted)
     }
 }
 

@@ -106,6 +106,12 @@ open class PlatformHttpSession(
         }
     }
 
+    val anonymousCookieJar: PlatformCookieJar = PlatformCookieJar()
+
+    open fun resetAnonymousCookies() {
+        anonymousCookieJar.clear()
+    }
+
     open fun fetch(
         url: String,
         profile: RequestProfile = RequestProfile.DESKTOP_NAVIGATION,
@@ -122,12 +128,25 @@ open class PlatformHttpSession(
         contentType: String? = "application/json",
         method: String = "GET"
     ): Result<HttpResponse> {
+        val isAnonymousContext = customHeaders["X-Anonymous-Context"] == "true"
+        val cleanCustomHeaders = if (isAnonymousContext) {
+            customHeaders.filterKeys { it != "X-Anonymous-Context" }
+        } else {
+            customHeaders
+        }
+
         val platform = PlatformDetector.detect(url)
-        if (platform != Platform.GENERIC) {
+        if (platform != Platform.GENERIC && !isAnonymousContext) {
             syncSessionCookies(platform)
         }
 
-        val effectiveClient = if (followRedirects == okHttpClient.followRedirects) {
+        val effectiveClient = if (isAnonymousContext) {
+            okHttpClient.newBuilder()
+                .cookieJar(anonymousCookieJar)
+                .followRedirects(followRedirects)
+                .followSslRedirects(followRedirects)
+                .build()
+        } else if (followRedirects == okHttpClient.followRedirects) {
             okHttpClient
         } else {
             okHttpClient.newBuilder()
@@ -149,7 +168,7 @@ open class PlatformHttpSession(
                 val requestBuilder = Request.Builder().url(url)
                 val baseHeaders = profile.buildHeaders(identity, origin, referer)
                 baseHeaders.forEach { (k, v) -> requestBuilder.header(k, v) }
-                customHeaders.forEach { (k, v) -> requestBuilder.header(k, v) }
+                cleanCustomHeaders.forEach { (k, v) -> requestBuilder.header(k, v) }
 
                 val requestBody = if (body != null) {
                     body.toRequestBody(contentType?.toMediaTypeOrNull())

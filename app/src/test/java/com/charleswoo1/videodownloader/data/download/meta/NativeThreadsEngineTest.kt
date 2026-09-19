@@ -15,6 +15,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 
 class NativeThreadsEngineTest {
 
@@ -1294,6 +1296,7 @@ class NativeThreadsEngineTest {
             Platform.THREADS,
             "sessionid=threads_session_123; csrftoken=csrftok; ds_user_id=8888"
         )
+        sessionProvider.markActive(Platform.THREADS, "Validated")
 
         val relayHtml = loadFixture("target_post_video_versions.html")
 
@@ -1336,6 +1339,7 @@ class NativeThreadsEngineTest {
             Platform.THREADS,
             "sessionid=expired_threads_session; csrftoken=csrftok; ds_user_id=8888"
         )
+        sessionProvider.markActive(Platform.THREADS, "Validated")
 
         val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
             override fun fetch(
@@ -1448,14 +1452,15 @@ class NativeThreadsEngineTest {
         assertTrue("Bootstrap request must target post URL", bootstrapReq.url.contains(shortcode))
 
         assertEquals("POST", gqlReq.method)
-        assertTrue("GraphQL request must target /api/graphql", gqlReq.url.contains("/api/graphql"))
+        assertEquals("https://www.threads.com/api/graphql", gqlReq.url)
 
         // 2. Verify headers contract
         assertEquals("captured_threads_lsd_123", gqlReq.headers["X-FB-LSD"])
         assertEquals("captured_threads_csrf_456", gqlReq.headers["X-CSRFToken"])
         assertEquals("BarcelonaPostPageContentQuery", gqlReq.headers["X-FB-Friendly-Name"])
         assertEquals(NativeThreadsEngine.THREADS_APP_ID, gqlReq.headers["X-IG-App-ID"])
-        assertEquals("https://www.threads.net", gqlReq.headers["Origin"])
+        assertEquals("https://www.threads.com", gqlReq.headers["Origin"])
+        assertEquals("https://www.threads.com/@user/post/$shortcode", gqlReq.headers["Referer"])
         assertEquals("same-origin", gqlReq.headers["Sec-Fetch-Site"])
         assertEquals("cors", gqlReq.headers["Sec-Fetch-Mode"])
 
@@ -1470,6 +1475,196 @@ class NativeThreadsEngineTest {
         // Verify postID in variables
         val decodedBody = java.net.URLDecoder.decode(bodyStr, "UTF-8")
         assertTrue("Variables must contain postID: $expectedPk", decodedBody.contains(""""postID":"$expectedPk""""))
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_antiJsonPrefix_parsesSuccessfully() = runBlocking {
+        val shortcode = "DdZantiJson"
+        val expectedPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+
+        val rawJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "id": "$expectedPk",
+                              "code": "$shortcode",
+                              "caption": {"text": "Anti-JSON test video"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/antijson_1080.mp4", "width": 1080, "height": 1920}
+                              ],
+                              "user": {"username": "antijson_tester"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        // Real Threads response prepends for (;;); to prevent JSON hijacking
+        val antiJsonBody = "for (;;);$rawJson"
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, antiJsonBody, emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"real_lsd_token"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.fetchBarcelonaGraphQL(shortcode, expectedPk, "https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Expected parsing with anti-JSON prefix to succeed", result.isSuccess)
+        val media = result.getOrNull()
+        assertEquals("https://threads.net/cdn/antijson_1080.mp4", media?.progressiveVideoUrls?.first())
+        assertEquals("antijson_tester", media?.uploader)
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_activeSession_isolatesAnonymousCookiesAndDoesNotSendSessionId() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(
+            Platform.THREADS,
+            "sessionid=authenticated_threads_session_999; csrftoken=auth_csrf"
+        )
+        sessionProvider.markActive(Platform.THREADS, "Validated")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val capturedGqlHeaders = mutableListOf<Map<String, String>>()
+        val shortcode = "DdZisolateTest"
+        val expectedPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+
+        val graphqlJson = """
+            {"data":{"data":{"edges":[{"node":{"thread_items":[{"post":{"id":"$expectedPk","code":"$shortcode","video_versions":[{"url":"https://threads.net/cdn/v.mp4","width":720,"height":1280}],"user":{"username":"u"}}}]}}]}}}
+        """.trimIndent()
+
+        val mockSession = PlatformHttpSession(
+            sessionProvider = sessionProvider,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    val request = chain.request()
+                    val urlStr = request.url.toString()
+                    if (urlStr.contains("/api/graphql")) {
+                        val headerMap = request.headers.names().associateWith { request.header(it) ?: "" }
+                        capturedGqlHeaders.add(headerMap)
+                        okhttp3.Response.Builder()
+                            .request(request)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .body(graphqlJson.toResponseBody("application/json".toMediaType()))
+                            .build()
+                    } else {
+                        // Bootstrap page setting an anonymous cookie
+                        okhttp3.Response.Builder()
+                            .request(request)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200)
+                            .header("Set-Cookie", "csrftoken=anonymous_csrf_tok; Path=/")
+                            .message("OK")
+                            .body("""<html><script>["LSD",[],{"token":"anonymous_lsd_tok"}]</script></html>""".toResponseBody("text/html".toMediaType()))
+                            .build()
+                    }
+                }
+            }
+        )
+
+        // Seed authenticated session cookie into mockSession's main cookieJar (simulating previous authenticated relay)
+        mockSession.syncSessionCookies(Platform.THREADS)
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = mockSession)
+        val result = testEngine.fetchBarcelonaGraphQL(shortcode, expectedPk, "https://www.threads.com/@u/post/$shortcode")
+
+        assertTrue("Extraction via isolated anonymous context should succeed", result.isSuccess)
+        assertEquals(1, capturedGqlHeaders.size)
+        val headers = capturedGqlHeaders[0]
+        val cookieHeader = headers["Cookie"] ?: ""
+        assertFalse("Anonymous Barcelona GraphQL MUST NOT send authenticated sessionid cookie: $cookieHeader", cookieHeader.contains("authenticated_threads_session_999"))
+        assertEquals("anonymous_lsd_tok", headers["X-FB-LSD"])
+        assertEquals("anonymous_csrf_tok", headers["X-CSRFToken"])
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_wrongTarget_rejectsUnrelatedPost() = runBlocking {
+        val shortcode = "DdZwantedPost"
+        val expectedPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+
+        val unrelatedJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "id": "999999999999",
+                              "code": "DdZunrelatedPost",
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/unrelated.mp4", "width": 1080,"height": 1920}
+                              ],
+                              "user": {"username": "wrong_user"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, unrelatedJson, emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"real_lsd_token"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.fetchBarcelonaGraphQL(shortcode, expectedPk, "https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Expected failure when GraphQL returns unrelated post", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be TargetNotInPageData; found $error", error is PlatformExtractionError.TargetNotInPageData)
     }
 
     @Test

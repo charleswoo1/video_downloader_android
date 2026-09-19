@@ -27,7 +27,7 @@ class AuthenticatedPlatformSessionProvider(
 
     override fun cookiesFor(platform: Platform): List<Cookie> {
         val status = credentialStore.getStatus(platform)
-        if (status.state != SessionState.ACTIVE && status.state != SessionState.CONFIGURED) {
+        if (status.state != SessionState.ACTIVE) {
             return emptyList()
         }
         return credentialStore.getCookies(platform)
@@ -35,7 +35,7 @@ class AuthenticatedPlatformSessionProvider(
 
     override fun hasAuthenticatedSession(platform: Platform): Boolean {
         val status = credentialStore.getStatus(platform)
-        return (status.state == SessionState.ACTIVE || status.state == SessionState.CONFIGURED) && credentialStore.getCookies(platform).isNotEmpty()
+        return status.state == SessionState.ACTIVE && credentialStore.getCookies(platform).isNotEmpty()
     }
 
     fun sessionStatus(platform: Platform): PlatformSessionInfo {
@@ -67,8 +67,9 @@ class AuthenticatedPlatformSessionProvider(
                 }
                 Platform.X -> {
                     val hasAuthToken = cookies.any { it.name.equals("auth_token", ignoreCase = true) }
-                    if (!hasAuthToken) {
-                        return Result.failure(IllegalArgumentException("匯入的 Cookie 中缺少必要的 'auth_token'"))
+                    val hasCt0 = cookies.any { it.name.equals("ct0", ignoreCase = true) }
+                    if (!hasAuthToken || !hasCt0) {
+                        return Result.failure(IllegalArgumentException("匯入的 X Cookie 中必須同時包含 'auth_token' 與 'ct0'"))
                     }
                 }
                 else -> {}
@@ -85,16 +86,44 @@ class AuthenticatedPlatformSessionProvider(
 
     /**
      * Imports Meta session cookies simultaneously for both Instagram and Threads,
-     * maintaining strict per-platform domain isolation for each and setting both to CONFIGURED.
+     * requiring explicit domain exports (Netscape/JSON) and maintaining atomic all-or-nothing storage.
      */
     fun importMetaSession(rawInput: String): Result<Pair<PlatformSessionInfo, PlatformSessionInfo>> {
-        val igResult = importSession(Platform.INSTAGRAM, rawInput)
-        if (igResult.isFailure) return Result.failure(igResult.exceptionOrNull()!!)
+        val trimmed = rawInput.trim()
+        val isExplicitDomainFormat = (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+                trimmed.lines().any { it.contains("\t") }
+        if (!isExplicitDomainFormat) {
+            return Result.failure(IllegalArgumentException("Meta 綜合匯入僅支援具明確網域標籤之 Netscape 或 JSON 匯出格式，不得使用無網域 Header 字串"))
+        }
 
-        val thResult = importSession(Platform.THREADS, rawInput)
-        if (thResult.isFailure) return Result.failure(thResult.exceptionOrNull()!!)
+        val igCookies = try {
+            PlatformCookieParser.parse(trimmed, Platform.INSTAGRAM)
+        } catch (e: Exception) {
+            return Result.failure(IllegalArgumentException("Meta 匯入失敗：缺少 Instagram 有效 Cookie (${e.message})", e))
+        }
+        val thCookies = try {
+            PlatformCookieParser.parse(trimmed, Platform.THREADS)
+        } catch (e: Exception) {
+            return Result.failure(IllegalArgumentException("Meta 匯入失敗：缺少 Threads 有效 Cookie (${e.message})", e))
+        }
 
-        return Result.success(Pair(igResult.getOrThrow(), thResult.getOrThrow()))
+        if (!igCookies.any { it.name.equals("sessionid", ignoreCase = true) }) {
+            return Result.failure(IllegalArgumentException("Meta 匯入失敗：Instagram Cookie 中缺少 'sessionid'"))
+        }
+        if (!thCookies.any { it.name.equals("sessionid", ignoreCase = true) }) {
+            return Result.failure(IllegalArgumentException("Meta 匯入失敗：Threads Cookie 中缺少 'sessionid'"))
+        }
+
+        // Atomically save both only after both are verified
+        credentialStore.saveCookies(Platform.INSTAGRAM, igCookies)
+        credentialStore.saveCookies(Platform.THREADS, thCookies)
+
+        val igInfo = credentialStore.getStatus(Platform.INSTAGRAM)
+        val thInfo = credentialStore.getStatus(Platform.THREADS)
+        _statusFlows[Platform.INSTAGRAM]?.value = igInfo
+        _statusFlows[Platform.THREADS]?.value = thInfo
+
+        return Result.success(Pair(igInfo, thInfo))
     }
 
     /**
@@ -177,10 +206,10 @@ class AuthenticatedPlatformSessionProvider(
                 }
                 Platform.X -> {
                     val authToken = cookies.firstOrNull { it.name.equals("auth_token", ignoreCase = true) }?.value
-                    val ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value ?: "00000000000000000000000000000000"
-                    if (authToken.isNullOrBlank()) {
-                        markExpired(platform, "缺少 auth_token")
-                        return@withContext Result.failure(IllegalStateException("缺少 auth_token"))
+                    val ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value
+                    if (authToken.isNullOrBlank() || ct0.isNullOrBlank()) {
+                        markExpired(platform, "缺少 auth_token 或 ct0")
+                        return@withContext Result.failure(IllegalStateException("缺少 auth_token 或 ct0"))
                     }
 
                     val respResult = httpSession.fetch(
@@ -221,8 +250,10 @@ class AuthenticatedPlatformSessionProvider(
 
                     val cookieHeader = cookies.joinToString("; ") { "${it.name}=${it.value}" }
                     val respResult = httpSession.fetch(
-                        url = "https://www.threads.net/",
+                        url = "https://www.threads.com/",
                         profile = RequestProfile.DESKTOP_NAVIGATION,
+                        origin = "https://www.threads.com",
+                        referer = "https://www.threads.com/",
                         customHeaders = mapOf(
                             "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
                             "Cookie" to cookieHeader
@@ -239,7 +270,19 @@ class AuthenticatedPlatformSessionProvider(
                         if (isRejected) {
                             markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
                         } else if (resp.code == 200) {
-                            markActive(platform, "驗證成功 (已連線)")
+                            val body = resp.body
+                            val hasAuthMarker = body.contains("DTSGInitialData") ||
+                                    body.contains("\"ACCOUNT_ID\"") ||
+                                    body.contains("\"USER_ID\"") ||
+                                    body.contains("fb_dtsg") ||
+                                    body.contains("\"IG_USER_EIMU\"")
+
+                            if (hasAuthMarker) {
+                                markActive(platform, "驗證成功 (已連線)")
+                            } else {
+                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到登入帳號標記，請確認 Cookie 是否有效")
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                            }
                         } else {
                             credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
                             _statusFlows[platform]?.value = sessionStatus(platform)

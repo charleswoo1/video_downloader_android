@@ -37,11 +37,14 @@ class AuthenticatedPlatformSessionProviderTest {
         val info = result.getOrThrow()
         assertEquals(SessionState.CONFIGURED, info.state)
         assertEquals(3, info.cookieCount)
-        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        // CONFIGURED credentials must NOT be exposed to extraction engines
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertTrue(provider.cookiesFor(Platform.INSTAGRAM).isEmpty())
 
-        val cookies = provider.cookiesFor(Platform.INSTAGRAM)
-        assertEquals(3, cookies.size)
-        assertTrue(cookies.any { it.name == "sessionid" && it.value == "test_sess_ig" })
+        // Credentials are stored and available to validator
+        val stored = store.getCookies(Platform.INSTAGRAM)
+        assertEquals(3, stored.size)
+        assertTrue(stored.any { it.name == "sessionid" && it.value == "test_sess_ig" })
     }
 
     @Test
@@ -54,29 +57,81 @@ class AuthenticatedPlatformSessionProviderTest {
     }
 
     @Test
-    fun importSession_xValidAuthToken_becomesConfigured() {
+    fun importSession_xValidAuthTokenAndCt0_becomesConfigured() {
         val raw = "auth_token=secret_auth_token_value; ct0=csrf_ct0_value"
         val result = provider.importSession(Platform.X, raw)
 
         assertTrue(result.isSuccess)
         assertEquals(SessionState.CONFIGURED, result.getOrThrow().state)
-        assertTrue(provider.hasAuthenticatedSession(Platform.X))
-        assertEquals(2, provider.cookiesFor(Platform.X).size)
+        assertFalse(provider.hasAuthenticatedSession(Platform.X))
+        assertTrue(provider.cookiesFor(Platform.X).isEmpty())
+        assertEquals(2, store.getCookies(Platform.X).size)
     }
 
     @Test
-    fun importMetaSession_populatesBothInstagramAndThreadsAsConfigured() {
+    fun importSession_xMissingCt0_fails() {
+        val raw = "auth_token=secret_auth_token_value; other=val"
+        val result = provider.importSession(Platform.X, raw)
+
+        assertTrue("Importing X without ct0 must fail", result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.X).state)
+    }
+
+    @Test
+    fun importMetaSession_domainlessInput_fails() {
         val raw = "sessionid=meta_shared_sess; ds_user_id=888; csrftoken=meta_csrf"
         val result = provider.importMetaSession(raw)
+
+        assertTrue("Domainless raw header must be rejected by importMetaSession", result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+    }
+
+    @Test
+    fun importMetaSession_validNetscapeWithBothIgAndThreads_succeedsAtomically() {
+        val netscape = """
+            # Netscape HTTP Cookie File
+            .instagram.com	TRUE	/	TRUE	1893456000	sessionid	ig_sess_123
+            .threads.com	TRUE	/	TRUE	1893456000	sessionid	th_sess_456
+        """.trimIndent()
+        val result = provider.importMetaSession(netscape)
 
         assertTrue(result.isSuccess)
         val (igInfo, thInfo) = result.getOrThrow()
         assertEquals(SessionState.CONFIGURED, igInfo.state)
         assertEquals(SessionState.CONFIGURED, thInfo.state)
-        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
-        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
-        assertEquals("instagram.com", provider.cookiesFor(Platform.INSTAGRAM)[0].domain)
-        assertEquals("threads.net", provider.cookiesFor(Platform.THREADS)[0].domain)
+        assertEquals("instagram.com", store.getCookies(Platform.INSTAGRAM)[0].domain)
+        assertEquals("threads.com", store.getCookies(Platform.THREADS)[0].domain)
+    }
+
+    @Test
+    fun importMetaSession_missingOnePlatform_doesNotPerformPartialWrite() {
+        val netscapeIgOnly = """
+            # Netscape HTTP Cookie File
+            .instagram.com	TRUE	/	TRUE	1893456000	sessionid	ig_sess_123
+        """.trimIndent()
+        val result = provider.importMetaSession(netscapeIgOnly)
+
+        assertTrue(result.isFailure)
+        // Neither platform should be written
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertTrue(store.getCookies(Platform.INSTAGRAM).isEmpty())
+        assertTrue(store.getCookies(Platform.THREADS).isEmpty())
+    }
+
+    @Test
+    fun importSession_platformSpecificImports_workIndependently() {
+        // Instagram-only import does not require Threads cookies
+        val igResult = provider.importSession(Platform.INSTAGRAM, "sessionid=ig_only_sess")
+        assertTrue(igResult.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        // Threads-only import does not require Instagram cookies
+        val thResult = provider.importSession(Platform.THREADS, "sessionid=th_only_sess")
+        assertTrue(thResult.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
     }
 
     @Test
@@ -99,6 +154,8 @@ class AuthenticatedPlatformSessionProviderTest {
         val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
         assertTrue(res.isSuccess)
         assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertEquals(1, provider.cookiesFor(Platform.INSTAGRAM).size)
     }
 
     @Test
@@ -122,6 +179,57 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(res.isSuccess)
         assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.INSTAGRAM).state)
         assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertTrue(provider.cookiesFor(Platform.INSTAGRAM).isEmpty())
+    }
+
+    @Test
+    fun validateSession_threadsPublic200WithoutAuthMarker_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        // Public Threads homepage returns HTTP 200 without login markers
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("<html><head><title>Threads</title></head><body>Public feed</body></html>".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        // Public 200 MUST NOT mark session ACTIVE
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertTrue(provider.sessionStatus(Platform.THREADS).details?.contains("未檢測到登入帳號標記") == true)
+    }
+
+    @Test
+    fun validateSession_threadsWithAuthMarker_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQ..."}]</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.THREADS).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertEquals(1, provider.cookiesFor(Platform.THREADS).size)
     }
 
     @Test
@@ -140,12 +248,17 @@ class AuthenticatedPlatformSessionProviderTest {
         // Must NOT falsely expire on network failure
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
         assertTrue(provider.sessionStatus(Platform.THREADS).details?.contains("網路連線失敗") == true)
-        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
     }
 
     @Test
     fun validateSession_threadsSuccessAndExpired_workIndependently() = kotlinx.coroutines.runBlocking {
-        provider.importMetaSession("sessionid=shared_sess")
+        val netscape = """
+            # Netscape HTTP Cookie File
+            .instagram.com	TRUE	/	TRUE	1893456000	sessionid	ig_sess_123
+            .threads.com	TRUE	/	TRUE	1893456000	sessionid	th_sess_456
+        """.trimIndent()
+        provider.importMetaSession(netscape)
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
 
@@ -172,21 +285,20 @@ class AuthenticatedPlatformSessionProviderTest {
     @Test
     fun markExpired_marksStateExpiredAndHidesCookies() {
         provider.importSession(Platform.X, "auth_token=tok; ct0=ct")
-        assertTrue(provider.hasAuthenticatedSession(Platform.X))
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.X).state)
 
         provider.markExpired(Platform.X, "HTTP 401 Unauthorized")
         val status = provider.sessionStatus(Platform.X)
         assertEquals(SessionState.EXPIRED, status.state)
         assertEquals("HTTP 401 Unauthorized", status.details)
         assertFalse(provider.hasAuthenticatedSession(Platform.X))
-        // cookiesFor returns empty list when session is expired
         assertTrue(provider.cookiesFor(Platform.X).isEmpty())
     }
 
     @Test
     fun clearSession_resetsToNotConfigured() {
         provider.importSession(Platform.INSTAGRAM, "sessionid=ig_sess")
-        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
 
         provider.clearSession(Platform.INSTAGRAM)
         val status = provider.sessionStatus(Platform.INSTAGRAM)

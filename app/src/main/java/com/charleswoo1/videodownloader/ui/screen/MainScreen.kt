@@ -265,11 +265,7 @@ fun MainScreen(
             platform = target,
             onDismiss = { importPlatform = null },
             onImport = { rawInput ->
-                val result = if (target == Platform.INSTAGRAM || target == Platform.THREADS) {
-                    viewModel.importMetaSession(rawInput)
-                } else {
-                    viewModel.importSession(target, rawInput)
-                }
+                val result = viewModel.importSession(target, rawInput)
                 result.onSuccess {
                     Toast.makeText(context, "${target.displayName} Session 已成功匯入並儲存", Toast.LENGTH_SHORT).show()
                     viewModel.validateSession(target)
@@ -814,7 +810,7 @@ fun ImportSessionDialog(
                 Text(
                     text = when (platform) {
                         Platform.X -> "請貼上含有 auth_token 與 ct0 的 Cookie 字串、Netscape 格式文字或 JSON。"
-                        else -> "請貼上含有 sessionid 的 Cookie 字串、Netscape 格式文字或 JSON（將同時套用至 Instagram 與 Threads）。"
+                        else -> "請貼上屬於 ${platform.displayName} 含有 sessionid 的 Cookie 字串、Netscape 格式文字或 JSON。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -827,7 +823,7 @@ fun ImportSessionDialog(
                         errorText = null
                     },
                     label = { Text("Cookie 內容") },
-                    placeholder = { Text("sessionid=... 或 auth_token=...") },
+                    placeholder = { Text(if (platform == Platform.X) "auth_token=...; ct0=..." else "sessionid=...") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(130.dp),

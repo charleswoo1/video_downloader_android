@@ -147,4 +147,27 @@ class PlatformCookieParserTest {
         // Importing instagram cookie into X must be rejected by domain isolation
         PlatformCookieParser.parse(metaOnly, Platform.X)
     }
+
+    @Test
+    fun getDefaultDomain_threads_returnsThreadsCom() {
+        assertEquals("threads.com", PlatformCookieParser.getDefaultDomain(Platform.THREADS))
+        assertEquals("instagram.com", PlatformCookieParser.getDefaultDomain(Platform.INSTAGRAM))
+        assertEquals("x.com", PlatformCookieParser.getDefaultDomain(Platform.X))
+    }
+
+    @Test
+    fun parseHeader_threadsCookies_defaultsDomainToThreadsCom() {
+        val header = "sessionid=threads_sess_123; csrftoken=threads_csrf_abc"
+        val cookies = PlatformCookieParser.parse(header, Platform.THREADS)
+
+        assertEquals(2, cookies.size)
+        val sessionCookie = cookies.find { it.name == "sessionid" }
+        assertNotNull(sessionCookie)
+        assertEquals("threads_sess_123", sessionCookie?.value)
+        assertEquals("threads.com", sessionCookie?.domain)
+
+        val csrfCookie = cookies.find { it.name == "csrftoken" }
+        assertEquals("threads_csrf_abc", csrfCookie?.value)
+        assertEquals("threads.com", csrfCookie?.domain)
+    }
 }

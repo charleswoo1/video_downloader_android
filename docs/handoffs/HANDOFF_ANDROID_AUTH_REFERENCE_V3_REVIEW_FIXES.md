@@ -397,16 +397,14 @@ Then:
    `GitHub → Actions → Android CI → Run workflow → feat/android-v0.1.0-initial`;
 6. use that review-approved CI run to generate the next owner-device APK.
 
-Current workflow policy is intentionally:
+Current workflow policy is intentionally manual-only:
 
 ```yaml
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 ```
 
-Feature/PR branch pushes must not automatically consume CI runs.
+Neither feature/PR pushes nor `main` pushes should automatically consume CI runs. CI is triggered only after the review gate reports no blocking findings.
 
 Return before CI review gate:
 

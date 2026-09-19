@@ -1328,10 +1328,34 @@ class NativeThreadsEngine(
 
         var successfulMedia: ExtractedMetaMedia? = null
 
-        // 1. Authenticated Relay if active session exists
-        if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
+        // 1. Primary anonymous path: BarcelonaPostPageContentQuery GraphQL
+        val targetPk = shortcodeToPk(shortcode)
+        profileSteps.add("BARCELONA_GRAPHQL")
+        safeLog("[Threads] attempting BarcelonaPostPageContentQuery GraphQL for shortcode=$shortcode pk=$targetPk")
+        val gqlResult = fetchBarcelonaGraphQL(shortcode, targetPk, canonicalUrl)
+        if (gqlResult.isSuccess) {
+            safeLog("[Threads] Barcelona GraphQL success")
+            successfulMedia = gqlResult.getOrThrow()
+            diagnosticHistory.add("[profile=BARCELONA_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+        } else {
+            val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
+            safeLog("[Threads] Barcelona GraphQL failed: ${gqlErr?.message}")
+            diagnosticHistory.add("[profile=BARCELONA_GRAPHQL stage=FAILURE error=${gqlErr?.javaClass?.simpleName}]")
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+            if (gqlErr is PlatformExtractionError.RateLimited) {
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(gqlErr)
+            } else if (gqlErr is PlatformExtractionError.NoVideo) {
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(gqlErr)
+            }
+        }
+
+        // 2. Authenticated Relay fallback if active session exists
+        if (successfulMedia == null && httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
             profileSteps.add("AUTHENTICATED_RELAY")
-            safeLog("[Threads] authenticated session available, attempting authenticated page fetch")
+            safeLog("[Threads] authenticated session available, attempting authenticated page fetch fallback")
             httpSession.syncSessionCookies(Platform.THREADS)
             val authResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
             val authRespObj = authResp.getOrNull()
@@ -1365,32 +1389,6 @@ class NativeThreadsEngine(
             }
         }
 
-        // 2. Primary anonymous path: BarcelonaPostPageContentQuery GraphQL
-        if (successfulMedia == null) {
-            val targetPk = shortcodeToPk(shortcode)
-            profileSteps.add("BARCELONA_GRAPHQL")
-            safeLog("[Threads] attempting BarcelonaPostPageContentQuery GraphQL for shortcode=$shortcode pk=$targetPk")
-            val gqlResult = fetchBarcelonaGraphQL(shortcode, targetPk, canonicalUrl)
-            if (gqlResult.isSuccess) {
-                safeLog("[Threads] Barcelona GraphQL success")
-                successfulMedia = gqlResult.getOrThrow()
-                diagnosticHistory.add("[profile=BARCELONA_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
-                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-            } else {
-                val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
-                safeLog("[Threads] Barcelona GraphQL failed: ${gqlErr?.message}")
-                diagnosticHistory.add("[profile=BARCELONA_GRAPHQL stage=FAILURE error=${gqlErr?.javaClass?.simpleName}]")
-                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-                if (gqlErr is PlatformExtractionError.RateLimited) {
-                    lastProfileSequence = profileSteps
-                    return@withContext Result.failure(gqlErr)
-                } else if (gqlErr is PlatformExtractionError.NoVideo) {
-                    lastProfileSequence = profileSteps
-                    return@withContext Result.failure(gqlErr)
-                }
-            }
-        }
-
         // 3. Fallback: Desktop / Mobile / Crawler HTML navigation profiles
         if (successfulMedia == null) {
             // Step 1: DESKTOP_NAVIGATION
@@ -1400,7 +1398,7 @@ class NativeThreadsEngine(
             val desktopResp = if (cachedResp != null) {
                 Result.success(cachedResp)
             } else {
-                httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+                httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION, customHeaders = mapOf("X-Anonymous-Context" to "true"))
             }
             val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
@@ -1418,7 +1416,7 @@ class NativeThreadsEngine(
 
             if (needEscalateToMobile) {
                 profileSteps.add("MOBILE")
-                val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
+                val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION, customHeaders = mapOf("X-Anonymous-Context" to "true"))
                 val mobileHtml = mobileResp.getOrNull()?.body ?: ""
                 if (mobileHtml.isNotBlank()) {
                     val mobileOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
@@ -1435,7 +1433,7 @@ class NativeThreadsEngine(
 
             if (needEscalateToCrawler) {
                 profileSteps.add("CRAWLER")
-                val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
+                val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION, customHeaders = mapOf("X-Anonymous-Context" to "true"))
                 val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
                 if (crawlerHtml.isNotBlank()) {
                     val crawlerOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)

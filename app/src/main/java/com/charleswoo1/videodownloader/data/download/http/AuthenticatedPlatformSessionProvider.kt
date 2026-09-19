@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
+import org.json.JSONObject
 import java.io.IOException
 
 /**
@@ -187,11 +188,30 @@ class AuthenticatedPlatformSessionProvider(
                     val resp = respResult.getOrNull()
                     if (resp != null) {
                         val body = resp.body
-                        val isLoginRedirect = resp.code == 302 || resp.finalUrl.contains("/accounts/login") || body.contains("checkpoint_required") || body.contains("login_required")
-                        if (resp.code == 200 && (body.contains("\"status\": \"ok\"") || body.contains("\"status\":\"ok\"") || body.contains("\"user\""))) {
-                            markActive(platform, "驗證成功 (已連線)")
-                        } else if (resp.code in listOf(401, 403) || isLoginRedirect) {
+                        val isLoginRedirect = resp.code == 302 || resp.finalUrl.contains("/accounts/login")
+                        val json = try { JSONObject(body) } catch (_: Exception) { null }
+                        val isAuthRejected = resp.code in listOf(401, 403) || isLoginRedirect ||
+                                body.contains("checkpoint_required") || body.contains("login_required") ||
+                                (json != null && (json.optString("message").contains("checkpoint_required") || json.optString("message").contains("login_required")))
+
+                        if (isAuthRejected) {
                             markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
+                        } else if (resp.code == 200) {
+                            val status = json?.optString("status")
+                            val userObj = json?.optJSONObject("user")
+                            val pk = userObj?.optString("pk")?.ifBlank {
+                                val numericPk = userObj.optLong("pk", 0L)
+                                if (numericPk > 0) numericPk.toString() else null
+                            }
+                            val username = userObj?.optString("username")
+                            val hasCredibleIdentity = !pk.isNullOrBlank() || !username.isNullOrBlank()
+
+                            if (status == "ok" && userObj != null && hasCredibleIdentity) {
+                                markActive(platform, "驗證成功 (已連線)")
+                            } else {
+                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效登入帳號資料，請確認 Cookie 是否有效")
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                            }
                         } else {
                             credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
                             _statusFlows[platform]?.value = sessionStatus(platform)
@@ -271,16 +291,24 @@ class AuthenticatedPlatformSessionProvider(
                             markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
                         } else if (resp.code == 200) {
                             val body = resp.body
-                            val hasAuthMarker = body.contains("DTSGInitialData") ||
-                                    body.contains("\"ACCOUNT_ID\"") ||
-                                    body.contains("\"USER_ID\"") ||
-                                    body.contains("fb_dtsg") ||
-                                    body.contains("\"IG_USER_EIMU\"")
+                            val dtsgRegex = Regex("""\["DTSGInitialData",\[\],\{"token":"([^"]+)"""")
+                            val dtsgFallbackRegex = Regex(""""token":"(AQ[^"]+)"""")
+                            val dtsgHtmlRegex = Regex("""name="fb_dtsg" value="([^"]+)"""")
+                            val dtsgToken = dtsgRegex.find(body)?.groupValues?.get(1)
+                                ?: dtsgFallbackRegex.find(body)?.groupValues?.get(1)
+                                ?: dtsgHtmlRegex.find(body)?.groupValues?.get(1)
 
-                            if (hasAuthMarker) {
+                            val userIdRegex = Regex(""""(?:ACCOUNT_ID|USER_ID|actor_id|IG_USER_EIMU)":"(\d+)"""")
+                            val userIdFallbackRegex = Regex("""(?:"currentUser"|"actorID"|"user_id"):\s*"?(\d+)"?""")
+                            val userId = userIdRegex.find(body)?.groupValues?.get(1)
+                                ?: userIdFallbackRegex.find(body)?.groupValues?.get(1)
+
+                            val hasValidProof = !dtsgToken.isNullOrBlank() && !userId.isNullOrBlank()
+
+                            if (hasValidProof) {
                                 markActive(platform, "驗證成功 (已連線)")
                             } else {
-                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到登入帳號標記，請確認 Cookie 是否有效")
+                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效登入憑證與帳號標記，請確認 Cookie 是否有效")
                                 _statusFlows[platform]?.value = sessionStatus(platform)
                             }
                         } else {

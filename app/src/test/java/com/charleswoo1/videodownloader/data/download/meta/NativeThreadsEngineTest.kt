@@ -1328,7 +1328,7 @@ class NativeThreadsEngineTest {
         assertNotNull(media)
         assertEquals("Check out this Threads video", media?.title)
         assertEquals("https://threads.net/cdn/video_1080.mp4", media?.qualityOptions?.first()?.formatSelector)
-        assertEquals(listOf("AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
+        assertEquals(listOf("BARCELONA_GRAPHQL", "AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -1366,7 +1366,7 @@ class NativeThreadsEngineTest {
         assertTrue("Error must be SessionExpired, found $error", error is PlatformExtractionError.SessionExpired)
         assertFalse("Session must be marked expired", sessionProvider.hasAuthenticatedSession(Platform.THREADS))
         assertEquals(SessionState.EXPIRED, sessionProvider.sessionStatus(Platform.THREADS).state)
-        assertEquals(listOf("AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
+        assertEquals(listOf("BARCELONA_GRAPHQL", "AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -1701,6 +1701,140 @@ class NativeThreadsEngineTest {
         val error = result.exceptionOrNull()
         assertTrue("Error should be TargetNotInPageData indicating LSD missing; found: $error", error is PlatformExtractionError.TargetNotInPageData)
         assertTrue("GraphQL request MUST NOT be sent with empty LSD", capturedGqlRequests.isEmpty())
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_publicSuccess_neverCallsAuthenticatedRelay() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZPublicPost"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val gqlPayload = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "id": "$pk",
+                              "code": "$shortcode",
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/video_anon.mp4", "width": 1080, "height": 1920}
+                              ],
+                              "user": {"username": "anon_user"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val capturedUrls = mutableListOf<String>()
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                capturedUrls.add(url)
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, gqlPayload, emptyMap()))
+                }
+                // Target page bootstrap
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"tok_123"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@anon_user/post/$shortcode")
+
+        assertTrue("Anonymous-first extraction should succeed", result.isSuccess)
+        val steps = testEngine.lastProfileSequence
+        assertEquals(listOf("BARCELONA_GRAPHQL"), steps)
+        assertFalse("AUTHENTICATED_RELAY must NOT be called when anonymous succeeds", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_barcelonaFails_fallsBackToAuthenticatedRelay() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZAuthPost"
+        val authHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$shortcode",
+                        "user": {"username": "auth_user"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/auth_video.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val capturedCalls = mutableListOf<String>()
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                capturedCalls.add(url)
+                if (url.contains("/api/graphql")) {
+                    // GraphQL fails with empty items
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                }
+                // Target page (bootstrap or authenticated relay)
+                return Result.success(HttpResponse(200, url, authHtml, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@auth_user/post/$shortcode")
+
+        assertTrue("Authenticated relay fallback should succeed", result.isSuccess)
+        val steps = testEngine.lastProfileSequence
+        assertEquals(listOf("BARCELONA_GRAPHQL", "AUTHENTICATED_RELAY"), steps)
     }
 }
 

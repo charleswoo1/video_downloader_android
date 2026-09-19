@@ -510,6 +510,24 @@ class NativeInstagramEngine(
 
         val targetId = shortcodeToId(targetShortcode)
 
+        // 3.5 Dedicated upstream provenance: inspect RelayPrefetchedStreamCache -> __bbox.result.data.xig_polaris_media
+        val relayTargetMedia = extractRelayPrefetchedTargetMedia(candidates, targetShortcode, targetId)
+        if (relayTargetMedia != null) {
+            val keys = relayTargetMedia.keys().asSequence().toList().sorted()
+            val extracted = extractFromMediaObject(relayTargetMedia, targetShortcode, canonicalUrl)
+            if (extracted != null) {
+                return InstagramParseOutcome(
+                    extracted,
+                    diagWithDecode.copy(
+                        targetWrapperSeen = true,
+                        validatedMediaNodeFound = true,
+                        matchedKeys = keys,
+                        stage = "RELAY_PREFETCH_TARGET"
+                    )
+                )
+            }
+        }
+
         // 4. Primary: inspect xdt endpoints (media shortcode web info, clips web info, shortcode media)
         for (candidate in candidates) {
             val xdtMedia = findXdtMediaItem(candidate, targetShortcode, targetId)
@@ -721,6 +739,58 @@ class NativeInstagramEngine(
         return false
     }
 
+    /**
+     * Dedicated target-isolation parser for upstream RelayPrefetchedStreamCache provenance:
+     * RelayPrefetchedStreamCache -> __bbox.result.data.xig_polaris_media -> if_not_gated_logged_out
+     * Provenance is established by the target post's dedicated preloaded stream cache.
+     */
+    fun extractRelayPrefetchedTargetMedia(
+        candidates: List<JSONObject>,
+        shortcode: String,
+        targetId: Long
+    ): JSONObject? {
+        for (candidate in candidates) {
+            val media = findRelayPrefetchedInJson(candidate, shortcode, targetId)
+            if (media != null) return media
+        }
+        return null
+    }
+
+    private fun findRelayPrefetchedInJson(root: Any?, shortcode: String, targetId: Long): JSONObject? {
+        if (root == null) return null
+        if (root is JSONObject) {
+            val bbox = root.optJSONObject("__bbox")
+            if (bbox != null) {
+                val polarisMedia = bbox.optJSONObject("result")
+                    ?.optJSONObject("data")
+                    ?.optJSONObject("xig_polaris_media")
+                if (polarisMedia != null) {
+                    val gated = polarisMedia.optJSONObject("if_not_gated_logged_out") ?: polarisMedia
+                    val code = gated.optString("code").ifBlank { gated.optString("shortcode") }
+                    val id = gated.optString("id").ifBlank { gated.optString("pk") }
+                    val codeMatch = code.isBlank() || code == shortcode
+                    val idMatch = targetId <= 0 || id.isBlank() || id == targetId.toString() || id.startsWith(targetId.toString())
+                    if (codeMatch && idMatch && (hasDirectVideoOrCarousel(gated) || isValidImageOnlyNode(gated))) {
+                        return gated
+                    }
+                }
+            }
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                if (isExcludedContainerKey(key)) continue
+                val found = findRelayPrefetchedInJson(root.opt(key), shortcode, targetId)
+                if (found != null) return found
+            }
+        } else if (root is JSONArray) {
+            for (i in 0 until root.length()) {
+                val found = findRelayPrefetchedInJson(root.opt(i), shortcode, targetId)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     private fun findXdtMediaItem(root: Any?, shortcode: String, targetId: Long): JSONObject? {
         if (root == null) return null
         if (root is JSONObject) {
@@ -783,8 +853,8 @@ class NativeInstagramEngine(
                 val gated = polarisMedia.optJSONObject("if_not_gated_logged_out") ?: polarisMedia
                 val code = gated.optString("code").ifBlank { gated.optString("shortcode") }
                 val id = gated.optString("id").ifBlank { gated.optString("pk") }
-                val isCodeMatch = code.isBlank() || code == shortcode
-                val isIdMatch = targetId <= 0 || id.isBlank() || id == targetId.toString() || id.startsWith(targetId.toString())
+                val isCodeMatch = code.isNotBlank() && code == shortcode
+                val isIdMatch = targetId > 0 && id.isNotBlank() && (id == targetId.toString() || id.startsWith(targetId.toString()))
                 if (isCodeMatch || isIdMatch) {
                     return gated
                 }
@@ -1100,11 +1170,73 @@ class NativeInstagramEngine(
         }
     }
 
+    suspend fun fetchAnonymousLsdToken(targetPageUrl: String): Pair<String?, String?> = withContext(Dispatchers.IO) {
+        var lsdToken = cachedLsdToken ?: httpSession.anonymousCookieJar.getCookieValue("instagram.com", "lsd")
+        var csrfToken = httpSession.anonymousCookieJar.getCookieValue("instagram.com", "csrftoken")
+
+        if (lsdToken.isNullOrBlank()) {
+            // 1. Base-page browser bootstrap: GET https://www.instagram.com/
+            val baseResp = httpSession.fetch(
+                url = "https://www.instagram.com/",
+                profile = RequestProfile.DESKTOP_NAVIGATION,
+                origin = "https://www.instagram.com",
+                referer = "https://www.instagram.com/",
+                customHeaders = mapOf("X-Anonymous-Context" to "true")
+            )
+            val baseHtml = baseResp.getOrNull()?.body ?: ""
+            if (baseHtml.isNotBlank()) {
+                // Parse <script id="__eqmc"> field "l"
+                val eqmcMatch = Regex("""<script[^>]*id=["']__eqmc["'][^>]*>(.*?)</script>""").find(baseHtml)
+                if (eqmcMatch != null) {
+                    try {
+                        val eqmcJson = JSONObject(eqmcMatch.groupValues[1].trim())
+                        val lVal = eqmcJson.optString("l")
+                        if (lVal.isNotBlank()) {
+                            lsdToken = lVal
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Fallback: ["LSD",[],{"token":"..."}]
+                if (lsdToken.isNullOrBlank()) {
+                    val lsdRegex = Regex("""\["LSD",\[\],\{"token":"([^"]+)"""")
+                    val lsdMatch = lsdRegex.find(baseHtml) ?: Regex(""""LSD",\[\],\{"token":"([^"]+)"""").find(baseHtml)
+                    if (lsdMatch != null) {
+                        lsdToken = lsdMatch.groupValues[1]
+                    }
+                }
+
+                if (csrfToken.isNullOrBlank()) {
+                    val setCookie = baseResp.getOrNull()?.headers?.entries?.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
+                    if (setCookie != null) {
+                        val csrfMatch = Regex("""csrftoken=([a-zA-Z0-9_-]+)""").find(setCookie)
+                        if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
+                    }
+                    if (csrfToken.isNullOrBlank()) {
+                        val csrfPageMatch = Regex("""\["CSRF",\[\],\{"token":"([^"]+)"""").find(baseHtml)
+                        if (csrfPageMatch != null) csrfToken = csrfPageMatch.groupValues[1]
+                    }
+                }
+            }
+        }
+
+
+
+        if (!lsdToken.isNullOrBlank()) {
+            cachedLsdToken = lsdToken
+        }
+        if (csrfToken.isNullOrBlank()) {
+            csrfToken = httpSession.anonymousCookieJar.getCookieValue("instagram.com", "csrftoken")
+        }
+
+        Pair(lsdToken, csrfToken)
+    }
+
     suspend fun fetchPolarisLoggedOutGraphQL(shortcode: String, canonicalUrl: String): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
         val mediaId = shortcodeToMediaId(shortcode)
         val targetPageUrl = "https://www.instagram.com/p/$shortcode/"
 
-        // 1. Content-ruling preflight check (yt-dlp alignment)
+        // 1. Content-ruling preflight check (yt-dlp alignment, non-fatal)
         val rulingUrl = "https://www.instagram.com/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=$mediaId"
         val rulingHeaders = mutableMapOf(
             "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
@@ -1113,7 +1245,8 @@ class NativeInstagramEngine(
             "X-IG-WWW-Claim" to "0",
             "Origin" to "https://www.instagram.com",
             "Referer" to targetPageUrl,
-            "Accept" to "*/*"
+            "Accept" to "*/*",
+            "X-Anonymous-Context" to "true"
         )
 
         val rulingResp = httpSession.fetch(
@@ -1165,35 +1298,17 @@ class NativeInstagramEngine(
             safeLog("[Instagram] ruling preflight transport failure (${rulingResp.exceptionOrNull()?.message}), continuing as non-fatal advisory")
         }
 
+        // 2. Obtain real LSD token via upstream bootstrap (GET https://www.instagram.com/)
+        val (bootstrapLsd, bootstrapCsrf) = fetchAnonymousLsdToken(targetPageUrl)
         if (csrfToken.isNullOrBlank()) {
-            csrfToken = httpSession.cookieJar.getCookieValue("instagram.com", "csrftoken")
+            csrfToken = bootstrapCsrf
+        }
+        if (csrfToken.isNullOrBlank()) {
+            csrfToken = httpSession.anonymousCookieJar.getCookieValue("instagram.com", "csrftoken")
         }
 
-        // 2. Obtain LSD token context (yt-dlp alignment: from page or cookie jar)
-        var lsdToken = cachedLsdToken ?: httpSession.cookieJar.getCookieValue("instagram.com", "lsd")
-        if (lsdToken.isNullOrBlank()) {
-            val pageResp = httpSession.fetch(
-                url = targetPageUrl,
-                profile = RequestProfile.API,
-                origin = "https://www.instagram.com",
-                referer = "https://www.instagram.com/"
-            )
-            val pageHtml = pageResp.getOrNull()?.body ?: ""
-            if (pageHtml.isNotBlank()) {
-                val lsdRegex = Regex("""\["LSD",\[\],\{"token":"([^"]+)"""")
-                val lsdMatch = lsdRegex.find(pageHtml) ?: Regex(""""LSD",\[\],\{"token":"([^"]+)"""").find(pageHtml)
-                if (lsdMatch != null) {
-                    lsdToken = lsdMatch.groupValues[1]
-                    cachedLsdToken = lsdToken
-                }
-                if (csrfToken.isNullOrBlank()) {
-                    val csrfPageMatch = Regex("""\["CSRF",\[\],\{"token":"([^"]+)"""").find(pageHtml)
-                    if (csrfPageMatch != null) csrfToken = csrfPageMatch.groupValues[1]
-                }
-            }
-        }
-
-        if (lsdToken.isNullOrBlank()) {
+        val effectiveLsd = bootstrapLsd
+        if (effectiveLsd.isNullOrBlank()) {
             return@withContext Result.failure(
                 PlatformExtractionError.TargetNotInPageData(
                     "無法從 Instagram 取得有效的 LSD 權杖，跳過 GraphQL 查詢",
@@ -1201,8 +1316,6 @@ class NativeInstagramEngine(
                 )
             )
         }
-
-        val effectiveLsd = lsdToken
 
         // 3. Polaris GraphQL Request
         val endpoint = "https://www.instagram.com/api/graphql"
@@ -1223,7 +1336,8 @@ class NativeInstagramEngine(
             "X-Requested-With" to "XMLHttpRequest",
             "Origin" to "https://www.instagram.com",
             "Referer" to targetPageUrl,
-            "Accept" to "*/*"
+            "Accept" to "*/*",
+            "X-Anonymous-Context" to "true"
         )
         if (!csrfToken.isNullOrBlank()) {
             headers["X-CSRFToken"] = csrfToken
@@ -1275,8 +1389,8 @@ class NativeInstagramEngine(
                     )
                 }
                 return@withContext Result.failure(
-                    PlatformExtractionError.LoginRequired(
-                        "此 Instagram 內容在未登入狀態下受限，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",
+                    PlatformExtractionError.TargetNotInPageData(
+                        "Polaris GraphQL 未包含 if_not_gated_logged_out，嘗試網頁 Relay 快取",
                         internalReason = "POLARIS_GATED_LOGGED_OUT"
                     )
                 )
@@ -1312,13 +1426,180 @@ class NativeInstagramEngine(
         val diagnosticHistory = mutableListOf<String>()
 
         var successfulMedia: ExtractedMetaMedia? = null
+        var polarisGatedOrAuthRequired = false
+        var htmlLoginRedirected = false
 
         safeLog("[Resolver] platform=INSTAGRAM")
 
-        // 1. Authenticated API if active session exists
-        if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
+        // 1. Primary anonymous path: Polaris Logged-Out GraphQL
+        profileSteps.add("POLARIS_GRAPHQL")
+        safeLog("[Instagram] attempting Polaris logged-out GraphQL query")
+        val polarisResult = fetchPolarisLoggedOutGraphQL(shortcode, canonicalUrl)
+        if (polarisResult.isSuccess) {
+            safeLog("[Instagram] Polaris GraphQL success")
+            successfulMedia = polarisResult.getOrThrow()
+            diagnosticHistory.add("[profile=POLARIS_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+        } else {
+            val polarisErr = polarisResult.exceptionOrNull() as? PlatformExtractionError
+            safeLog("[Instagram] Polaris GraphQL failed: ${polarisErr?.message}")
+            diagnosticHistory.add("[profile=POLARIS_GRAPHQL stage=FAILURE error=${polarisErr?.javaClass?.simpleName}]")
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+            if (polarisErr is PlatformExtractionError.RateLimited) {
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(polarisErr)
+            } else if (polarisErr is PlatformExtractionError.NoVideo) {
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(polarisErr)
+            } else if (polarisErr is PlatformExtractionError.LoginRequired) {
+                polarisGatedOrAuthRequired = true
+                if (!httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(polarisErr)
+                }
+            } else if (polarisErr?.internalReason == "POLARIS_GATED_LOGGED_OUT") {
+                polarisGatedOrAuthRequired = true
+            }
+        }
+
+        // 2. Fallback: Desktop / Mobile / Crawler HTML navigation profiles (Anonymous)
+        if (successfulMedia == null && (polarisResult.exceptionOrNull() !is PlatformExtractionError.LoginRequired)) {
+            val profiles = listOf(
+                "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
+                "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
+                "CRAWLER" to RequestProfile.CRAWLER_NAVIGATION
+            )
+
+            for ((name, profile) in profiles) {
+                profileSteps.add(name)
+                val requestUrl = if (profile == RequestProfile.CRAWLER_NAVIGATION) {
+                    val query = url.substringAfter('?', missingDelimiterValue = "").substringBefore('#').trim()
+                    val crawlerBase = "https://www.instagram.com/p/$shortcode/"
+                    val crawlerUrl = if (query.isNotBlank()) "$crawlerBase?$query" else crawlerBase
+                    safeLog("[Instagram] profile=CRAWLER alternate_path=/p/$shortcode has_query=${query.isNotBlank()}")
+                    crawlerUrl
+                } else {
+                    fetchUrl
+                }
+
+                val resp = httpSession.fetch(
+                    url = requestUrl,
+                    profile = profile,
+                    customHeaders = mapOf("X-Anonymous-Context" to "true")
+                )
+                val respObj = resp.getOrNull()
+                val html = respObj?.body ?: ""
+                val httpCode = respObj?.code ?: 0
+                if (httpCode == 429) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(
+                        PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
+                    )
+                }
+
+                val finalUrl = respObj?.finalUrl ?: requestUrl
+                val isLoginRedirect = finalUrl.contains("/accounts/login") || finalUrl.contains("/login")
+                if (isLoginRedirect) {
+                    htmlLoginRedirected = true
+                }
+
+                val contentType = respObj?.getHeader("content-type") ?: (if (resp.isFailure) "none" else "text/html")
+                val bodyBytes = html.toByteArray().size
+                val sizeBucket = formatSizeBucket(bodyBytes)
+                val cleanPath = cleanHostAndPath(finalUrl)
+                val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != requestUrl) "yes" else "no"
+
+                if (resp.isFailure || html.isBlank()) {
+                    val stage = if (resp.isFailure) "FETCH_FAILED" else "EMPTY_BODY"
+                    val errorClassName = if (resp.isFailure) {
+                        resp.exceptionOrNull()?.javaClass?.simpleName ?: "IOException"
+                    } else {
+                        "EMPTY_BODY"
+                    }
+                    val failureMessage = if (resp.isFailure) {
+                        "HTTP fetch failed for profile $name: ${resp.exceptionOrNull()?.message}"
+                    } else {
+                        "Empty response body for profile $name (HTTP $httpCode)"
+                    }
+                    val stepError = MetaExtractionError.Technical(failureMessage, internalReason = stage)
+                    profileErrors.add(stepError)
+
+                    val profileFp = """
+                        [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=$stage error=$errorClassName]
+                        scripts: app_json=0 data_sjs=0 generic=0
+                        target: raw=false decoded=false wrapper=false media_node=false
+                        keys: none
+                        markers: none
+                        restriction: NONE
+                    """.trimIndent()
+                    diagnosticHistory.add(profileFp)
+                    lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+
+                    safeLog("[Instagram] profile=$name fetch_failed=${resp.isFailure} empty_body=${html.isBlank()} stage=$stage")
+                    continue
+                }
+
+                val parseOutcome = parseInstagramPageWithDiagnostics(html, shortcode, canonicalUrl)
+                val parseResult = parseOutcome.result
+                val diag = parseOutcome.diagnostics
+
+                val errorClassName = when (parseResult) {
+                    is MetaExtractionResult.Success -> "NONE"
+                    is MetaExtractionResult.Failure -> parseResult.error.javaClass.simpleName
+                }
+
+                val profileFp = """
+                    [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName]
+                    scripts: app_json=${diag.appJsonCount} data_sjs=${diag.dataSjsCount} generic=${diag.genericScriptCount}
+                    target: raw=${diag.rawShortcodeSeen} decoded=${diag.decodedShortcodeSeen} wrapper=${diag.targetWrapperSeen} media_node=${diag.validatedMediaNodeFound}
+                    keys: ${if (diag.matchedKeys.isNotEmpty()) diag.matchedKeys.joinToString(",") else "none"}
+                    markers: ${if (diag.presentMarkers.isNotEmpty()) diag.presentMarkers.joinToString(",") else "none"}
+                    restriction: ${diag.restrictionPhrase}
+                """.trimIndent()
+                diagnosticHistory.add(profileFp)
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+
+                when (parseResult) {
+                    is MetaExtractionResult.Success -> {
+                        safeLog("[Instagram] profile=$name target_id_match=true actual_media=true")
+                        successfulMedia = parseResult.media
+                        break
+                    }
+                    is MetaExtractionResult.Failure -> {
+                        val error = parseResult.error
+                        profileErrors.add(error)
+                        when (error) {
+                            is MetaExtractionError.Restricted -> {
+                                if (error.reason == RestrictionReason.LOGIN_REQUIRED) {
+                                    safeLog("[Instagram] profile=$name login_gated=true")
+                                } else {
+                                    safeLog("[Instagram] profile=$name restriction=${error.reason}")
+                                    lastProfileSequence = profileSteps
+                                    safeLog("[Instagram] final=${error.code.name}")
+                                    return@withContext Result.failure(error)
+                                }
+                            }
+                            is MetaExtractionError.NoVideo -> {
+                                safeLog("[Instagram] profile=$name target_id_match=true actual_media=true no_video=true")
+                                lastProfileSequence = profileSteps
+                                safeLog("[Instagram] final=NO_VIDEO")
+                                return@withContext Result.failure(error)
+                            }
+                            else -> {
+                                val detail = (error as? MetaExtractionError.Technical)?.detail ?: error.message ?: ""
+                                val targetMatch = detail.contains("wrapper found")
+                                safeLog("[Instagram] profile=$name target_id_match=$targetMatch actual_media=false technical_error=$detail")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Authenticated API fallback if anonymous failed AND active session exists
+        if (successfulMedia == null && httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
             profileSteps.add("API_AUTHENTICATED")
-            safeLog("[Instagram] authenticated session available, attempting /api/v1/media/$targetId/info/")
+            safeLog("[Instagram] anonymous extraction failed, attempting authenticated fallback /api/v1/media/$targetId/info/")
             val authResult = fetchMediaInfoAuthenticated(shortcode, targetId, canonicalUrl)
             if (authResult.isSuccess) {
                 safeLog("[Instagram] authenticated API success")
@@ -1336,160 +1617,6 @@ class NativeInstagramEngine(
                 }
             }
         }
-
-        // 2. Primary anonymous path: Polaris Logged-Out GraphQL
-        if (successfulMedia == null) {
-            profileSteps.add("POLARIS_GRAPHQL")
-            safeLog("[Instagram] attempting Polaris logged-out GraphQL query")
-            val polarisResult = fetchPolarisLoggedOutGraphQL(shortcode, canonicalUrl)
-            if (polarisResult.isSuccess) {
-                safeLog("[Instagram] Polaris GraphQL success")
-                successfulMedia = polarisResult.getOrThrow()
-                diagnosticHistory.add("[profile=POLARIS_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
-                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-            } else {
-                val polarisErr = polarisResult.exceptionOrNull() as? PlatformExtractionError
-                safeLog("[Instagram] Polaris GraphQL failed: ${polarisErr?.message}")
-                diagnosticHistory.add("[profile=POLARIS_GRAPHQL stage=FAILURE error=${polarisErr?.javaClass?.simpleName}]")
-                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-                if (polarisErr is PlatformExtractionError.RateLimited) {
-                    lastProfileSequence = profileSteps
-                    return@withContext Result.failure(polarisErr)
-                } else if (polarisErr is PlatformExtractionError.LoginRequired) {
-                    if (!httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
-                        lastProfileSequence = profileSteps
-                        return@withContext Result.failure(polarisErr)
-                    }
-                } else if (polarisErr is PlatformExtractionError.NoVideo) {
-                    lastProfileSequence = profileSteps
-                    return@withContext Result.failure(polarisErr)
-                }
-            }
-        }
-
-        // 3. Fallback: Desktop / Mobile / Crawler HTML navigation profiles
-        if (successfulMedia == null) {
-            val profiles = listOf(
-                "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
-                "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
-                "CRAWLER" to RequestProfile.CRAWLER_NAVIGATION
-            )
-
-            for ((name, profile) in profiles) {
-                profileSteps.add(name)
-                val requestUrl = if (profile == RequestProfile.CRAWLER_NAVIGATION) {
-                val query = url.substringAfter('?', missingDelimiterValue = "").substringBefore('#').trim()
-                val crawlerBase = "https://www.instagram.com/p/$shortcode/"
-                val crawlerUrl = if (query.isNotBlank()) "$crawlerBase?$query" else crawlerBase
-                safeLog("[Instagram] profile=CRAWLER alternate_path=/p/$shortcode has_query=${query.isNotBlank()}")
-                crawlerUrl
-            } else {
-                fetchUrl
-            }
-
-            val resp = httpSession.fetch(requestUrl, profile)
-            val respObj = resp.getOrNull()
-            val html = respObj?.body ?: ""
-            val httpCode = respObj?.code ?: 0
-            if (httpCode == 429) {
-                lastProfileSequence = profileSteps
-                return@withContext Result.failure(
-                    PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
-                )
-            }
-            val contentType = respObj?.getHeader("content-type") ?: (if (resp.isFailure) "none" else "text/html")
-            val bodyBytes = html.toByteArray().size
-            val sizeBucket = formatSizeBucket(bodyBytes)
-            val finalUrl = respObj?.finalUrl ?: requestUrl
-            val cleanPath = cleanHostAndPath(finalUrl)
-            val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != requestUrl) "yes" else "no"
-
-            if (resp.isFailure || html.isBlank()) {
-                val stage = if (resp.isFailure) "FETCH_FAILED" else "EMPTY_BODY"
-                val errorClassName = if (resp.isFailure) {
-                    resp.exceptionOrNull()?.javaClass?.simpleName ?: "IOException"
-                } else {
-                    "EMPTY_BODY"
-                }
-                val failureMessage = if (resp.isFailure) {
-                    "HTTP fetch failed for profile $name: ${resp.exceptionOrNull()?.message}"
-                } else {
-                    "Empty response body for profile $name (HTTP $httpCode)"
-                }
-                val stepError = MetaExtractionError.Technical(failureMessage, internalReason = stage)
-                profileErrors.add(stepError)
-
-                val profileFp = """
-                    [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=$stage error=$errorClassName]
-                    scripts: app_json=0 data_sjs=0 generic=0
-                    target: raw=false decoded=false wrapper=false media_node=false
-                    keys: none
-                    markers: none
-                    restriction: NONE
-                """.trimIndent()
-                diagnosticHistory.add(profileFp)
-                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-
-                safeLog("[Instagram] profile=$name fetch_failed=${resp.isFailure} empty_body=${html.isBlank()} stage=$stage")
-                continue
-            }
-
-            val parseOutcome = parseInstagramPageWithDiagnostics(html, shortcode, canonicalUrl)
-            val parseResult = parseOutcome.result
-            val diag = parseOutcome.diagnostics
-
-            val errorClassName = when (parseResult) {
-                is MetaExtractionResult.Success -> "NONE"
-                is MetaExtractionResult.Failure -> parseResult.error.javaClass.simpleName
-            }
-
-            val profileFp = """
-                [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName]
-                scripts: app_json=${diag.appJsonCount} data_sjs=${diag.dataSjsCount} generic=${diag.genericScriptCount}
-                target: raw=${diag.rawShortcodeSeen} decoded=${diag.decodedShortcodeSeen} wrapper=${diag.targetWrapperSeen} media_node=${diag.validatedMediaNodeFound}
-                keys: ${if (diag.matchedKeys.isNotEmpty()) diag.matchedKeys.joinToString(",") else "none"}
-                markers: ${if (diag.presentMarkers.isNotEmpty()) diag.presentMarkers.joinToString(",") else "none"}
-                restriction: ${diag.restrictionPhrase}
-            """.trimIndent()
-            diagnosticHistory.add(profileFp)
-            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
-
-            when (parseResult) {
-                is MetaExtractionResult.Success -> {
-                    safeLog("[Instagram] profile=$name target_id_match=true actual_media=true")
-                    successfulMedia = parseResult.media
-                    break
-                }
-                is MetaExtractionResult.Failure -> {
-                    val error = parseResult.error
-                    profileErrors.add(error)
-                    when (error) {
-                        is MetaExtractionError.Restricted -> {
-                            if (error.reason == RestrictionReason.LOGIN_REQUIRED) {
-                                safeLog("[Instagram] profile=$name login_gated=true")
-                            } else {
-                                safeLog("[Instagram] profile=$name restriction=${error.reason}")
-                                lastProfileSequence = profileSteps
-                                safeLog("[Instagram] final=${error.code.name}")
-                                return@withContext Result.failure(error)
-                            }
-                        }
-                        is MetaExtractionError.NoVideo -> {
-                            safeLog("[Instagram] profile=$name target_id_match=true actual_media=true no_video=true")
-                            lastProfileSequence = profileSteps
-                            safeLog("[Instagram] final=NO_VIDEO")
-                            return@withContext Result.failure(error)
-                        }
-                        else -> {
-                            val detail = (error as? MetaExtractionError.Technical)?.detail ?: error.message ?: ""
-                            val targetMatch = detail.contains("wrapper found")
-                            safeLog("[Instagram] profile=$name target_id_match=$targetMatch actual_media=false technical_error=$detail")
-                        }
-                    }
-                }
-            }
-        }
-    }
 
         lastProfileSequence = profileSteps
 
@@ -1512,7 +1639,7 @@ class NativeInstagramEngine(
             it is MetaExtractionError.Restricted && it.reason == RestrictionReason.LOGIN_REQUIRED
         }
 
-        if (allProfilesLoginGated) {
+        if (allProfilesLoginGated || htmlLoginRedirected) {
             safeLog("[Instagram] final=LOGIN_REQUIRED")
             return@withContext Result.failure(
                 MetaExtractionError.Restricted(

@@ -671,6 +671,7 @@ class NativeInstagramEngine(
             ?: mediaObj.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges")
 
         if (carouselMedia != null && carouselMedia.length() > 0) {
+            var anyChildVideo = false
             for (i in 0 until carouselMedia.length()) {
                 var child = carouselMedia.optJSONObject(i)
                 if (child?.has("node") == true) {
@@ -682,9 +683,18 @@ class NativeInstagramEngine(
                             child.has("video_versions") ||
                             child.has("video_url")
                     if (childIsVideo) {
-                        return extractDirectVideo(child, targetShortcode, canonicalUrl, mediaObj)
+                        anyChildVideo = true
+                        val childResult = extractDirectVideo(child, targetShortcode, canonicalUrl, mediaObj)
+                        if (childResult is MetaExtractionResult.Success) {
+                            return childResult
+                        }
                     }
                 }
+            }
+            if (anyChildVideo) {
+                return MetaExtractionResult.Failure(
+                    MetaExtractionError.Technical("此 Instagram 貼文包含輪播影片，但未解析出相容的下載串流格式")
+                )
             }
         }
 
@@ -725,7 +735,7 @@ class NativeInstagramEngine(
 
         if (renditions.isEmpty()) {
             return MetaExtractionResult.Failure(
-                MetaExtractionError.NoVideo("此 Instagram 貼文未包含可下載的影片串流")
+                MetaExtractionError.Technical("此 Instagram 貼文已識別為影片，但未解析出相容的下載串流格式")
             )
         }
 

@@ -4,6 +4,7 @@ import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
 import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
 import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
 import com.charleswoo1.videodownloader.data.download.http.RequestProfile
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -874,5 +875,87 @@ class NativeInstagramEngineTest {
         val error = (result as MetaExtractionResult.Failure).error
         assertTrue("Expected Technical error, found: $error", error is MetaExtractionError.Technical)
         assertTrue("Must allow fallback / profile escalation", error.canFallback)
+    }
+
+    @Test
+    fun parseInstagramPage_explicitIsVideoTrueWithoutDownloadableRenditions_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "xdt_shortcode_media": {
+                  "shortcode": "DdXexplicitVideoNoStream",
+                  "id": "11223344",
+                  "owner": {"username": "creator_video"},
+                  "is_video": true,
+                  "media_type": 2,
+                  "video_versions": []
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXexplicitVideoNoStream", "https://www.instagram.com/reel/DdXexplicitVideoNoStream/")
+        assertTrue("Expected failure for confirmed video without renditions", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Expected Technical error, NEVER NoVideo; found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Must allow fallback / profile escalation", error.canFallback)
+    }
+
+    @Test
+    fun extractMediaInfo_explicitIsVideoWithoutRenditions_escalatesProfiles() = runBlocking {
+        val desktopNoStreamHtml = """
+            <!DOCTYPE html><html><body><script type="application/json">
+            {"data":{"xdt_shortcode_media":{"shortcode":"DdXnoStream","id":"123","is_video":true,"video_versions":[]}}}
+            </script></body></html>
+        """.trimIndent()
+        val mobileWithStreamHtml = """
+            <!DOCTYPE html><html><body><script type="application/json">
+            {"data":{"xdt_shortcode_media":{"shortcode":"DdXnoStream","id":"123","is_video":true,"video_versions":[{"url":"https://instagram.com/cdn/mobile.mp4","width":1080,"height":1920}]}}}
+            </script></body></html>
+        """.trimIndent()
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            var desktopCalled = 0
+            var mobileCalled = 0
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return when (profile) {
+                    com.charleswoo1.videodownloader.data.download.http.RequestProfile.DESKTOP_NAVIGATION -> {
+                        desktopCalled++
+                        Result.success(HttpResponse(200, url, desktopNoStreamHtml, emptyMap()))
+                    }
+                    com.charleswoo1.videodownloader.data.download.http.RequestProfile.MOBILE_NAVIGATION -> {
+                        mobileCalled++
+                        Result.success(HttpResponse(200, url, mobileWithStreamHtml, emptyMap()))
+                    }
+                    else -> Result.failure(java.io.IOException("Unexpected"))
+                }
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/DdXnoStream/")
+
+        assertTrue("Expected extraction to succeed after escalating to MOBILE", result.isSuccess)
+        assertEquals(1, fakeSession.desktopCalled)
+        assertEquals(1, fakeSession.mobileCalled)
+        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
 }

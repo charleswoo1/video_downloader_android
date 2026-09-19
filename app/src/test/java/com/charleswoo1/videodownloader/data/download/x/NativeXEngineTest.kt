@@ -457,4 +457,94 @@ class NativeXEngineTest {
         // Verify stale cookie was purged from cookie jar
         assertEquals(null, fakeSession.cookieJar.getCookieValue("x.com", "gt"))
     }
+
+    @Test
+    fun parseGraphQLTweet_explicitVideoMediaWithoutSupportedVariants_returnsMediaUrlUnsupportedWithFallbackAllowed() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "rest_id": "999999",
+                    "legacy": {
+                      "full_text": "Tweet with unsupported video stream",
+                      "extended_entities": {
+                        "media": [
+                          {
+                            "type": "video",
+                            "media_url_https": "https://pbs.twimg.com/media/thumb.jpg",
+                            "video_info": {
+                              "variants": [
+                                {
+                                  "content_type": "application/x-mpegURL",
+                                  "url": "https://video.twimg.com/ext_tw_video/m3u8/unsupported.m3u8"
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/999999", "999999")
+        assertTrue("Expected failure for video without supported variants", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(error)
+        assertEquals("Expected MEDIA_URL_UNSUPPORTED, NEVER NO_VIDEO", PlatformErrorCode.MEDIA_URL_UNSUPPORTED, error?.code)
+        assertTrue("Must allow fallback to HTML or secondary engines", error?.canFallback ?: false)
+    }
+
+    @Test
+    fun parseHtmlFallback_explicitVideoMediaWithoutSupportedVariants_returnsMediaUrlUnsupportedWithFallbackAllowed() = runBlocking {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script>
+            window.__INITIAL_STATE__ = {
+              "entities": {
+                "tweets": {
+                  "entities": {
+                    "888888": {
+                      "id_str": "888888",
+                      "full_text": "HTML fallback tweet with unsupported video variants",
+                      "extended_entities": {
+                        "media": [
+                          {
+                            "type": "video",
+                            "media_url_https": "https://pbs.twimg.com/media/thumb.jpg",
+                            "video_info": {
+                              "variants": [
+                                {
+                                  "content_type": "application/x-mpegURL",
+                                  "url": "https://video.twimg.com/m3u8/unsupported.m3u8"
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            };
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseHtmlFallback(html, "https://x.com/i/status/888888", "888888")
+        assertTrue("Expected failure for HTML video without supported variants", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(error)
+        assertEquals("Expected MEDIA_URL_UNSUPPORTED, NEVER NO_VIDEO", PlatformErrorCode.MEDIA_URL_UNSUPPORTED, error?.code)
+        assertTrue("Must allow fallback to secondary engines", error?.canFallback ?: false)
+    }
 }

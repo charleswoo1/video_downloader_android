@@ -368,12 +368,14 @@ class NativeXEngine(
         val renditions = mutableListOf<NativeMediaRendition>()
         var isGif = false
         var thumbnailUrl: String? = null
+        var hasExplicitVideoMedia = false
 
         if (mediaArray != null && mediaArray.length() > 0) {
             for (i in 0 until mediaArray.length()) {
                 val media = mediaArray.optJSONObject(i) ?: continue
                 val type = media.optString("type")
                 if (type == "video" || type == "animated_gif") {
+                    hasExplicitVideoMedia = true
                     isGif = (type == "animated_gif")
                     thumbnailUrl = media.optString("media_url_https").ifBlank { media.optString("media_url") }
 
@@ -402,6 +404,11 @@ class NativeXEngine(
         }
 
         if (renditions.isEmpty()) {
+            if (hasExplicitVideoMedia) {
+                return Result.failure(
+                    PlatformExtractionError.MediaUrlUnsupported("此 X (Twitter) 貼文包含影片媒體，但未解析出相容的下載串流格式")
+                )
+            }
             // Target tweet has no video (e.g. photo-only or text-only)
             return Result.failure(
                 PlatformExtractionError.NoVideo("此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）")
@@ -454,12 +461,14 @@ class NativeXEngine(
             val renditions = mutableListOf<NativeMediaRendition>()
             var isGif = false
             var thumb: String? = null
+            var hasExplicitVideoMedia = false
 
             if (mediaArray != null) {
                 for (i in 0 until mediaArray.length()) {
                     val media = mediaArray.optJSONObject(i) ?: continue
                     val type = media.optString("type")
                     if (type == "video" || type == "animated_gif") {
+                        hasExplicitVideoMedia = true
                         isGif = (type == "animated_gif")
                         thumb = media.optString("media_url_https")
 
@@ -480,6 +489,11 @@ class NativeXEngine(
             }
 
             if (renditions.isEmpty()) {
+                if (hasExplicitVideoMedia) {
+                    return@withContext Result.failure(
+                        PlatformExtractionError.MediaUrlUnsupported("HTML 狀態資料中包含影片媒體，但未解析出相容的下載串流格式")
+                    )
+                }
                 return@withContext Result.failure(
                     PlatformExtractionError.NoVideo("此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）")
                 )

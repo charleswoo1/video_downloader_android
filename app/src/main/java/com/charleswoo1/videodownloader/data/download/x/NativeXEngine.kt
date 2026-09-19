@@ -197,7 +197,9 @@ class NativeXEngine(
         val bodySizeBucket: String = "<10KB",
         val hostAndPath: String = "",
         val redirect: String = "no",
-        val resultTypename: String = "none",
+        val outerTypename: String = "none",
+        val effectiveTypename: String = "none",
+        val resultTypename: String = outerTypename,
         val wrapperChain: String = "none",
         val targetRestIdPresent: Boolean = false,
         val hasLegacy: Boolean = false,
@@ -220,7 +222,9 @@ class NativeXEngine(
         fun toFingerprint(attempt: Int): String {
             val typesStr = if (directMediaTypes.isNotEmpty()) directMediaTypes.joinToString(",") else "none"
             return """
-                [profile=GRAPHQL attempt=$attempt http_status=$httpStatus content_type=$contentType body_size=$bodySizeBucket host_and_path=$hostAndPath redirect=$redirect stage=GRAPHQL error=$resultTypename]
+                [profile=GRAPHQL attempt=$attempt http_status=$httpStatus content_type=$contentType body_size=$bodySizeBucket host_and_path=$hostAndPath redirect=$redirect stage=GRAPHQL error=$effectiveTypename]
+                outer_typename=$outerTypename
+                effective_typename=$effectiveTypename
                 auth_refresh_attempted=$authRefreshAttempted retry_attempted=$retryAttempted target_rest_id=$targetRestIdPresent wrapper=$wrapperChain
                 flags: legacy=$hasLegacy tweet=$hasTweet tweet_legacy=$hasTweetLegacy quoted=$hasQuotedStatus retweeted=$hasRetweetedStatus extended_entities=$hasExtendedEntities entities=$hasEntities card=$hasCard unified_card=$hasUnifiedCard note_tweet=$hasNoteTweet
                 media: count=$directMediaCount types=$typesStr video_seen=$videoSeen usable_mp4=$usableMp4Seen
@@ -238,12 +242,14 @@ class NativeXEngine(
         val initialStatePresent: Boolean = false,
         val targetStatusInHtml: Boolean = false,
         val knownMarkers: List<String> = emptyList(),
-        val outcome: String = "none"
+        val outcome: String = "none",
+        val transportError: String = "NONE"
     ) {
         fun toFingerprint(): String {
             val markersStr = if (knownMarkers.isNotEmpty()) knownMarkers.joinToString(",") else "none"
             return """
                 [profile=HTML_FALLBACK http_status=$httpStatus content_type=$contentType body_size=$bodySizeBucket host_and_path=$hostAndPath redirect=$redirect stage=HTML_FALLBACK error=$outcome]
+                transport_error=$transportError
                 initial_state_present=$initialStatePresent target_in_html=$targetStatusInHtml
                 markers=$markersStr
                 outcome=$outcome
@@ -783,16 +789,22 @@ class NativeXEngine(
         }
         val tweetResult = data.optJSONObject("data")?.optJSONObject("tweetResult")
         val rawResultObj = tweetResult?.optJSONObject("result")
-        val typename = rawResultObj?.optString("__typename")?.ifBlank { "none" } ?: "none"
-        val wrapperChain = when (typename) {
-            "TweetWithVisibilityResults" -> "tweetResult->TweetWithVisibilityResults->tweet"
-            "none" -> "none"
-            else -> "tweetResult->$typename"
-        }
-        val unwrappedTweet = if (typename == "TweetWithVisibilityResults") {
+        val outerTypename = rawResultObj?.optString("__typename")?.ifBlank { "none" } ?: "none"
+        val unwrappedTweet = if (outerTypename == "TweetWithVisibilityResults") {
             rawResultObj?.optJSONObject("tweet") ?: rawResultObj
         } else {
             rawResultObj
+        }
+        val effectiveTypename = if (outerTypename == "TweetWithVisibilityResults") {
+            rawResultObj?.optJSONObject("tweet")?.optString("__typename")?.ifBlank { "none" } ?: "none"
+        } else {
+            outerTypename
+        }
+
+        val wrapperChain = when (outerTypename) {
+            "TweetWithVisibilityResults" -> "tweetResult->TweetWithVisibilityResults->tweet"
+            "none" -> "none"
+            else -> "tweetResult->$outerTypename"
         }
 
         val restId = unwrappedTweet?.optString("rest_id")?.ifBlank {
@@ -832,7 +844,7 @@ class NativeXEngine(
             }
         }
 
-        val provTypename = if (typename in listOf("TweetUnavailable", "TweetTombstone")) typename else "none"
+        val provTypename = if (effectiveTypename in listOf("TweetUnavailable", "TweetTombstone")) effectiveTypename else "none"
 
         val cardLegacy = unwrappedTweet?.optJSONObject("card")?.optJSONObject("legacy")
             ?: rawResultObj?.optJSONObject("card")?.optJSONObject("legacy")
@@ -874,7 +886,9 @@ class NativeXEngine(
             bodySizeBucket = sizeBucket,
             hostAndPath = cleanPath,
             redirect = transport.redirect,
-            resultTypename = typename,
+            outerTypename = outerTypename,
+            effectiveTypename = effectiveTypename,
+            resultTypename = outerTypename,
             wrapperChain = wrapperChain,
             targetRestIdPresent = targetRestIdPresent,
             hasLegacy = (legacy != null),
@@ -942,6 +956,10 @@ class NativeXEngine(
             }
         } else "NOT_FETCHED"
 
+        val transportError = if (htmlResp.isFailure) {
+            htmlResp.exceptionOrNull()?.javaClass?.simpleName ?: "IOException"
+        } else "NONE"
+
         return HtmlDiagnostics(
             httpStatus = httpCode,
             contentType = contentType,
@@ -951,7 +969,8 @@ class NativeXEngine(
             initialStatePresent = initialPresent,
             targetStatusInHtml = targetInHtml,
             knownMarkers = markers,
-            outcome = outcome
+            outcome = outcome,
+            transportError = transportError
         )
     }
 

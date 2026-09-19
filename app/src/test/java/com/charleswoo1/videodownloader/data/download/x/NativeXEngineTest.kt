@@ -992,4 +992,107 @@ class NativeXEngineTest {
         assertNotNull(media)
         assertEquals("https://video.twimg.com/card_vid.mp4", media?.renditions?.first()?.url)
     }
+
+    @Test
+    fun computeGraphQLDiagnostics_visibilityWrapperWithUnavailableTweet_recordsEffectiveAndProvisionalTypename() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetWithVisibilityResults",
+                    "tweet": {
+                      "__typename": "TweetUnavailable"
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "111222", retryAttempted = false)
+        assertEquals("TweetWithVisibilityResults", diag.outerTypename)
+        assertEquals("TweetUnavailable", diag.effectiveTypename)
+        assertEquals("tweetResult->TweetWithVisibilityResults->tweet", diag.wrapperChain)
+        assertEquals("TweetUnavailable", diag.provisionalTypename)
+
+        val fp = diag.toFingerprint(1)
+        assertTrue("Fingerprint must contain outer_typename", fp.contains("outer_typename=TweetWithVisibilityResults"))
+        assertTrue("Fingerprint must contain effective_typename", fp.contains("effective_typename=TweetUnavailable"))
+        assertTrue("Fingerprint must contain provisional_typename", fp.contains("provisional_typename=TweetUnavailable"))
+
+        val parseResult = engine.parseGraphQLTweet(json, "https://x.com/user/status/111222", "111222")
+        assertTrue("Parser must return failure for TweetUnavailable", parseResult.isFailure)
+        val err = parseResult.exceptionOrNull()
+        assertTrue("Error must be ProvisionalUnavailable", err is PlatformExtractionError.ProvisionalUnavailable)
+        assertEquals("TweetUnavailable", (err as PlatformExtractionError.ProvisionalUnavailable).typename)
+    }
+
+    @Test
+    fun computeGraphQLDiagnostics_visibilityWrapperWithNormalTweet_recordsEffectiveTweetAndProvisionalNone() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetWithVisibilityResults",
+                    "tweet": {
+                      "__typename": "Tweet",
+                      "rest_id": "123",
+                      "legacy": {
+                        "full_text": "test"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "123", retryAttempted = false)
+        assertEquals("TweetWithVisibilityResults", diag.outerTypename)
+        assertEquals("Tweet", diag.effectiveTypename)
+        assertEquals("none", diag.provisionalTypename)
+        assertTrue("targetRestIdPresent must be true", diag.targetRestIdPresent)
+
+        val fp = diag.toFingerprint(1)
+        assertTrue("Fingerprint must contain outer_typename", fp.contains("outer_typename=TweetWithVisibilityResults"))
+        assertTrue("Fingerprint must contain effective_typename", fp.contains("effective_typename=Tweet"))
+    }
+
+    @Test
+    fun computeGraphQLDiagnostics_directTweetTombstone_recordsOuterAndEffectiveTombstone() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetTombstone"
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "333444", retryAttempted = false)
+        assertEquals("TweetTombstone", diag.outerTypename)
+        assertEquals("TweetTombstone", diag.effectiveTypename)
+        assertEquals("TweetTombstone", diag.provisionalTypename)
+        assertEquals("tweetResult->TweetTombstone", diag.wrapperChain)
+
+        val fp = diag.toFingerprint(1)
+        assertTrue("Fingerprint must contain outer_typename=TweetTombstone", fp.contains("outer_typename=TweetTombstone"))
+        assertTrue("Fingerprint must contain effective_typename=TweetTombstone", fp.contains("effective_typename=TweetTombstone"))
+        assertTrue("Fingerprint must contain provisional_typename=TweetTombstone", fp.contains("provisional_typename=TweetTombstone"))
+    }
+
+    @Test
+    fun computeHtmlDiagnostics_fetchFailure_recordsTransportErrorClassName() {
+        val failedResp = Result.failure<PlatformHttpSession.HttpResponse>(java.io.IOException("Connection reset"))
+        val diag = engine.computeHtmlDiagnostics(failedResp, null, "12345", "https://x.com/user/status/12345")
+
+        assertEquals("IOException", diag.transportError)
+        val fp = diag.toFingerprint()
+        assertTrue("Fingerprint must contain transport_error=IOException", fp.contains("transport_error=IOException"))
+    }
 }

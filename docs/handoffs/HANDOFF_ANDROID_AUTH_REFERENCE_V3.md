@@ -142,17 +142,16 @@ Current CI policy:
 ```yaml
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 ```
 
 Therefore:
 
 - feature/PR branch pushes do **not** run CI automatically;
-- local Gradle gates are mandatory on every implementation round;
-- after ChatGPT review reports **no blocking findings**, manually run **Actions → Android CI → Run workflow** and select the feature branch;
-- pushes to `main` still run CI automatically as the integration gate;
-- the manually triggered CI run is the only point where a new owner-device APK artifact is required.
+- `main` pushes also do **not** run CI automatically;
+- local Gradle gates are mandatory on every implementation/review-fix round;
+- after ChatGPT review reports **no blocking findings**, manually run **Actions → Android CI → Run workflow** and select the reviewed feature branch;
+- the manually triggered CI run is the only point where a new owner-device APK artifact is required;
+- after eventual merge to `main`, any desired integration CI must also be manually dispatched unless this policy is explicitly changed later.
 
 ---
 
@@ -1145,7 +1144,7 @@ Local assembleDebug:
 Review gate:
 - blocking findings remaining: YES / NO
 CI trigger:
-- NOT RUN / MANUAL workflow_dispatch / main integration
+- NOT RUN / MANUAL workflow_dispatch
 CI run:
 Artifact:
 

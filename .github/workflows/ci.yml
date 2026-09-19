@@ -1,9 +1,12 @@
 name: Android CI
 
+# CI policy:
+# - Feature/PR commits are validated locally during development.
+# - GitHub Actions is triggered manually only after review has no blocking findings.
+# - main still runs CI automatically after integration.
 on:
+  workflow_dispatch:
   push:
-    branches: [ "main" ]
-  pull_request:
     branches: [ "main" ]
 
 permissions:

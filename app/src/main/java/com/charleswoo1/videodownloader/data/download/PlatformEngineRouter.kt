@@ -29,10 +29,12 @@ import java.util.UUID
  */
 class PlatformEngineRouter(
     private val context: Context? = null,
-    private val nativeInstagramEngine: PlatformMediaEngine = NativeInstagramEngine(context),
-    private val nativeThreadsEngine: PlatformMediaEngine = NativeThreadsEngine(context),
-    private val nativeXEngine: PlatformMediaEngine = NativeXEngine(context),
-    private val ytDlpEngine: DownloadEngine = if (context != null) YtDlpDownloadEngine(context) else StubDownloadEngine
+    val sessionProvider: com.charleswoo1.videodownloader.data.download.http.PlatformSessionProvider = DownloadRepository.sessionProvider,
+    private val httpSession: com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession = com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession(sessionProvider = sessionProvider),
+    private val nativeInstagramEngine: PlatformMediaEngine = NativeInstagramEngine(context, httpSession),
+    private val nativeThreadsEngine: PlatformMediaEngine = NativeThreadsEngine(context, httpSession),
+    private val nativeXEngine: PlatformMediaEngine = NativeXEngine(context, httpSession),
+    private val ytDlpEngine: DownloadEngine = if (context != null) YtDlpDownloadEngine(context, sessionProvider = sessionProvider) else StubDownloadEngine
 ) : DownloadEngine {
 
     private object StubDownloadEngine : DownloadEngine {

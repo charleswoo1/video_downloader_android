@@ -1,6 +1,8 @@
 package com.charleswoo1.videodownloader.data.download.http
 
 import android.util.Log
+import com.charleswoo1.videodownloader.domain.model.Platform
+import com.charleswoo1.videodownloader.domain.url.PlatformDetector
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -36,12 +38,14 @@ open class PlatformHttpSession(
         )
 
         private val SENSITIVE_QUERY_PARAM_REGEX = Regex(
-            """(?i)([?&])(stkn|sig|signature|token|guest[_-]?token|gt|sessionid|csrftoken|auth_token|auth|key|secret)=[^&\s"'<>]+"""
+            """(?i)([?&])(stkn|sig|signature|token|guest[_-]?token|gt|sessionid|csrftoken|auth_token|auth|key|secret|ct0|ds_user_id)=[^&\s"'<>]+"""
         )
 
         private val REPLACEMENTS = listOf(
-            Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|auth|bearer|token|key|stkn|sig|signature|gt|guest[_-]?token)=[^&\s"'<>]+""") to "$1=[REDACTED]",
-            Regex("""(?i)bearer\s+[a-zA-Z0-9_.-]+""") to "Bearer [REDACTED]"
+            Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|auth|bearer|token|key|stkn|sig|signature|gt|guest[_-]?token|ct0|ds_user_id)=[^&\s"'<>;]+""") to "$1=[REDACTED]",
+            Regex("""(?i)\b(x-csrf-token|authorization)\s*:\s*[^\r\n]+""") to "$1: [REDACTED]",
+            Regex("""(?i)bearer\s+[a-zA-Z0-9_.-]+""") to "Bearer [REDACTED]",
+            Regex("""(?i)--cookies?\s+[^\s]+""") to "--cookies [REDACTED]"
         )
 
         fun sanitizeLogText(text: String): String {
@@ -89,6 +93,19 @@ open class PlatformHttpSession(
         fun getHeader(name: String): String? = headers[name]
     }
 
+    open fun syncSessionCookies(platform: Platform) {
+        if (sessionProvider.hasAuthenticatedSession(platform)) {
+            val cookies = sessionProvider.cookiesFor(platform)
+            for (cookie in cookies) {
+                val cleanDomain = cookie.domain.removePrefix(".")
+                val httpUrl = "https://$cleanDomain/".toHttpUrlOrNull()
+                if (httpUrl != null) {
+                    cookieJar.putCookie(httpUrl, cookie)
+                }
+            }
+        }
+    }
+
     open fun fetch(
         url: String,
         profile: RequestProfile = RequestProfile.DESKTOP_NAVIGATION,
@@ -105,6 +122,11 @@ open class PlatformHttpSession(
         contentType: String? = "application/json",
         method: String = "GET"
     ): Result<HttpResponse> {
+        val platform = PlatformDetector.detect(url)
+        if (platform != Platform.GENERIC) {
+            syncSessionCookies(platform)
+        }
+
         val effectiveClient = if (followRedirects == okHttpClient.followRedirects) {
             okHttpClient
         } else {

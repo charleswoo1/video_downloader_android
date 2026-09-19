@@ -15,6 +15,7 @@ object YtDlpErrorParser {
         PRIVATE_CONTENT,
         CHECKPOINT_REQUIRED,
         LOGIN_REQUIRED,
+        SESSION_EXPIRED,
         RATE_LIMITED,
         UNSUPPORTED_URL,
         DRM_PROTECTED,
@@ -31,11 +32,12 @@ object YtDlpErrorParser {
     )
 
     private val SENSITIVE_QUERY_PARAM_REGEX = Regex(
-        """(?i)([?&])(stkn|sig|signature|token|guest[_-]?token|gt|sessionid|csrftoken|auth_token|auth|key|secret)=[^&\s"'<>]+"""
+        """(?i)([?&])(stkn|sig|signature|token|guest[_-]?token|gt|sessionid|csrftoken|auth_token|auth|key|secret|ct0|ds_user_id)=[^&\s"'<>]+"""
     )
 
     private val REPLACEMENTS = listOf(
-        Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|auth|bearer|token|key|stkn|sig|signature|gt|guest[_-]?token)=[^&\s"'<>]+""") to "$1=[REDACTED]",
+        Regex("""(?i)(cookie[s]?|sessionid|csrftoken|auth_token|auth|bearer|token|key|stkn|sig|signature|gt|guest[_-]?token|ct0|ds_user_id)=[^&\s"'<>;]+""") to "$1=[REDACTED]",
+        Regex("""(?i)\b(x-csrf-token|authorization)\s*:\s*[^\r\n]+""") to "$1: [REDACTED]",
         Regex("""(?i)bearer\s+[a-zA-Z0-9_.-]+""") to "Bearer [REDACTED]",
         Regex("""(?i)--cookies?\s+[^\s]+""") to "--cookies [REDACTED]",
         Regex("""(?i)--plugin-dirs\s+[^\s]+""") to "--plugin-dirs [REDACTED]",
@@ -156,21 +158,33 @@ object YtDlpErrorParser {
             msg.contains("This video is private", ignoreCase = true) ->
                 Pair(ErrorCategory.PRIVATE_CONTENT, "此影片設為私人內容，無法存取")
 
+            // Session expiration detection
+            msg.contains("cookies are no longer valid", ignoreCase = true) ||
+            msg.contains("session expired", ignoreCase = true) ||
+            msg.contains("The provided Instagram account cookies are no longer valid", ignoreCase = true) ->
+                Pair(ErrorCategory.SESSION_EXPIRED, "登入狀態已失效，請重新匯入 Session")
+
             msg.contains("checkpoint_required", ignoreCase = true) ->
                 Pair(ErrorCategory.CHECKPOINT_REQUIRED, "Instagram 要求安全驗證 (checkpoint)，無法直接下載")
+
+            // Ambiguous rate-limit or login required: MUST NOT be classified as confirmed rate limiting!
+            msg.contains("rate-limit reached or login required", ignoreCase = true) ||
+            msg.contains("rate limit reached or login required", ignoreCase = true) ||
+            msg.contains("login required or rate-limit", ignoreCase = true) ->
+                Pair(ErrorCategory.LOGIN_REQUIRED, "此內容需要登入帳號驗證或暫時無法存取，請至設定匯入 Session 後再試")
 
             msg.contains("login_required", ignoreCase = true) ||
             msg.contains("Sign in to confirm you’re not a bot", ignoreCase = true) ||
             msg.contains("Sign in to confirm you're not a bot", ignoreCase = true) ||
             msg.contains("Sign in to view", ignoreCase = true) ->
-                Pair(ErrorCategory.LOGIN_REQUIRED, "來源網站需要登入帳號驗證，目前版本不支援登入下載")
+                Pair(ErrorCategory.LOGIN_REQUIRED, "來源網站需要登入帳號驗證，請至設定匯入 Session 後再試")
 
-            // Confirmed rate limiting: requires HTTP 429, Too Many Requests, or explicit rate-limit markers
+            // Confirmed rate limiting: requires HTTP 429, Too Many Requests, or unambiguous platform rate-limit codes
             msg.contains("HTTP Error 429", ignoreCase = true) ||
             msg.contains("429 Too Many Requests", ignoreCase = true) ||
             msg.contains("Too Many Requests", ignoreCase = true) ||
-            msg.contains("rate-limit", ignoreCase = true) ||
-            msg.contains("rate limit", ignoreCase = true) ->
+            (msg.contains("rate-limit", ignoreCase = true) && !msg.contains("login", ignoreCase = true)) ||
+            (msg.contains("rate limit", ignoreCase = true) && !msg.contains("login", ignoreCase = true)) ->
                 Pair(ErrorCategory.RATE_LIMITED, "存取頻率受限 (Rate Limited)，請稍候再試")
 
             // Ambiguous Instagram fallback refusal: "Please wait a few minutes" without confirmed HTTP 429
@@ -219,6 +233,8 @@ class YtDlpExtractionException(
         YtDlpErrorParser.ErrorCategory.PRIVATE_CONTENT -> PlatformErrorCode.PRIVATE_CONTENT
         YtDlpErrorParser.ErrorCategory.CHECKPOINT_REQUIRED,
         YtDlpErrorParser.ErrorCategory.LOGIN_REQUIRED -> PlatformErrorCode.LOGIN_REQUIRED
+        YtDlpErrorParser.ErrorCategory.SESSION_EXPIRED -> PlatformErrorCode.SESSION_EXPIRED
+        YtDlpErrorParser.ErrorCategory.RATE_LIMITED -> PlatformErrorCode.RATE_LIMITED
         YtDlpErrorParser.ErrorCategory.NOT_FOUND -> PlatformErrorCode.DELETED_OR_NOT_FOUND
         YtDlpErrorParser.ErrorCategory.DRM_PROTECTED -> PlatformErrorCode.AUDIENCE_RESTRICTED
         YtDlpErrorParser.ErrorCategory.NETWORK_ERROR -> PlatformErrorCode.NETWORK

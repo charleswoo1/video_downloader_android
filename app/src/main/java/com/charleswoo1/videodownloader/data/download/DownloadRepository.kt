@@ -21,6 +21,10 @@ object DownloadRepository {
     var isInitialized: Boolean = false
     private val isJobRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    var sessionProvider: com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider =
+        com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider()
+        private set
+
     val engineTrace: StateFlow<EngineTrace?>
         get() = (engine as? PlatformEngineRouter)?.traceFlow ?: _fallbackTrace
 
@@ -41,12 +45,23 @@ object DownloadRepository {
     }
 
     fun initialize(context: Context) {
+        val appContext = context.applicationContext
+        if (sessionProvider.sessionStatus(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM).state == com.charleswoo1.videodownloader.data.download.http.SessionState.NOT_CONFIGURED &&
+            sessionProvider.sessionStatus(com.charleswoo1.videodownloader.domain.model.Platform.X).state == com.charleswoo1.videodownloader.data.download.http.SessionState.NOT_CONFIGURED) {
+            sessionProvider = com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider(
+                com.charleswoo1.videodownloader.data.download.http.EncryptedPlatformCredentialStore(appContext)
+            )
+        }
         if (engine == null) {
-            engine = PlatformEngineRouter(context.applicationContext)
+            engine = PlatformEngineRouter(appContext, sessionProvider = sessionProvider)
         }
         if (storage == null) {
-            storage = DownloadStorage(context.applicationContext)
+            storage = DownloadStorage(appContext)
         }
+    }
+
+    fun setSessionProviderForTesting(provider: com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider) {
+        this.sessionProvider = provider
     }
 
     fun setEngineForTesting(testEngine: DownloadEngine?) {

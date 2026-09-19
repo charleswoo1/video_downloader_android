@@ -19,7 +19,10 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
+class YtDlpDownloadEngine(
+    private val context: Context,
+    private val sessionProvider: com.charleswoo1.videodownloader.data.download.http.PlatformSessionProvider = DownloadRepository.sessionProvider
+) : DownloadEngine {
 
     companion object {
         private const val TAG = "YtDlpDownloadEngine"
@@ -64,10 +67,22 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
             val runtimeVer = getRuntimeVersion() ?: "bundled"
             Log.d(TAG, "[Diagnostics] Analyzing $url with yt-dlp runtime version: $runtimeVer")
 
-            val request = YoutubeDLRequest(url)
-            request.addOption("--no-playlist")
+            val cookies = if (sessionProvider.hasAuthenticatedSession(platform)) {
+                sessionProvider.cookiesFor(platform)
+            } else emptyList()
 
-            val videoInfo = YoutubeDL.getInstance().getInfo(request)
+            val videoInfo = if (cookies.isNotEmpty()) {
+                com.charleswoo1.videodownloader.data.download.http.YtDlpSessionHandoff.withTemporaryCookieFile(context, cookies) { cookieFile ->
+                    val request = YoutubeDLRequest(url)
+                    request.addOption("--no-playlist")
+                    request.addOption("--cookies", cookieFile.absolutePath)
+                    YoutubeDL.getInstance().getInfo(request)
+                }
+            } else {
+                val request = YoutubeDLRequest(url)
+                request.addOption("--no-playlist")
+                YoutubeDL.getInstance().getInfo(request)
+            }
             val options = buildQualityOptions(videoInfo)
 
             val mediaInfo = MediaInfo(
@@ -99,12 +114,25 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
 
         val pluginDir = pluginInstall.getOrThrow()
         try {
-            val request = YoutubeDLRequest(url)
-            request.addOption("--no-playlist")
-            request.addOption("--plugin-dirs", pluginDir.absolutePath)
+            val cookies = if (sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
+                sessionProvider.cookiesFor(Platform.THREADS)
+            } else emptyList()
 
             Log.d(TAG, "[Diagnostics] Analyzing Threads URL via yt-dlp with plugin-dirs: ${pluginDir.name}")
-            val videoInfo = YoutubeDL.getInstance().getInfo(request)
+            val videoInfo = if (cookies.isNotEmpty()) {
+                com.charleswoo1.videodownloader.data.download.http.YtDlpSessionHandoff.withTemporaryCookieFile(context, cookies) { cookieFile ->
+                    val request = YoutubeDLRequest(url)
+                    request.addOption("--no-playlist")
+                    request.addOption("--plugin-dirs", pluginDir.absolutePath)
+                    request.addOption("--cookies", cookieFile.absolutePath)
+                    YoutubeDL.getInstance().getInfo(request)
+                }
+            } else {
+                val request = YoutubeDLRequest(url)
+                request.addOption("--no-playlist")
+                request.addOption("--plugin-dirs", pluginDir.absolutePath)
+                YoutubeDL.getInstance().getInfo(request)
+            }
 
             val options = buildQualityOptions(videoInfo)
             val mediaInfo = MediaInfo(
@@ -272,18 +300,33 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
                 return@withContext Result.failure(InterruptedException("下載已取消"))
             }
 
-            val response = YoutubeDL.getInstance().execute(ytRequest, processId) { progress, etaInSeconds, line ->
-                if (cancelledProcessIds.contains(processId)) {
-                    try {
-                        YoutubeDL.getInstance().destroyProcessById(processId)
-                    } catch (_: Exception) {}
-                    return@execute
+            val cookies = if (sessionProvider.hasAuthenticatedSession(platform)) {
+                sessionProvider.cookiesFor(platform)
+            } else emptyList()
+
+            val executeBlock = { req: YoutubeDLRequest ->
+                YoutubeDL.getInstance().execute(req, processId) { progress, etaInSeconds, line ->
+                    if (cancelledProcessIds.contains(processId)) {
+                        try {
+                            YoutubeDL.getInstance().destroyProcessById(processId)
+                        } catch (_: Exception) {}
+                        return@execute
+                    }
+                    val speed = extractSpeed(line)
+                    if (line.contains("[Merger]") || line.contains("[ExtractAudio]")) {
+                        onStatus("正在合併音視訊與後製處理…")
+                    }
+                    onProgress(progress, etaInSeconds, speed)
                 }
-                val speed = extractSpeed(line)
-                if (line.contains("[Merger]") || line.contains("[ExtractAudio]")) {
-                    onStatus("正在合併音視訊與後製處理…")
+            }
+
+            val response = if (cookies.isNotEmpty()) {
+                com.charleswoo1.videodownloader.data.download.http.YtDlpSessionHandoff.withTemporaryCookieFile(context, cookies) { cookieFile ->
+                    ytRequest.addOption("--cookies", cookieFile.absolutePath)
+                    executeBlock(ytRequest)
                 }
-                onProgress(progress, etaInSeconds, speed)
+            } else {
+                executeBlock(ytRequest)
             }
 
             if (cancelledProcessIds.contains(processId) || !currentCoroutineContext().isActive) {

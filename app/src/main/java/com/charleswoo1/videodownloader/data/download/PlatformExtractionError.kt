@@ -8,10 +8,12 @@ enum class PlatformErrorCode(val isTerminal: Boolean) {
     NO_VIDEO(isTerminal = true),
     PRIVATE_CONTENT(isTerminal = true),
     LOGIN_REQUIRED(isTerminal = true),
+    SESSION_EXPIRED(isTerminal = true),
     AUDIENCE_RESTRICTED(isTerminal = true),
     AGE_RESTRICTED(isTerminal = true),
     DELETED_OR_NOT_FOUND(isTerminal = true),
     GEO_RESTRICTED(isTerminal = true),
+    RATE_LIMITED(isTerminal = true),
 
     // Technical / fallback-eligible errors (fallback permitted)
     NETWORK(isTerminal = false),
@@ -55,6 +57,16 @@ open class PlatformExtractionError(
         userMessage: String = "此平台要求登入帳號後方可檢視內容",
         internalReason: String? = null
     ) : PlatformExtractionError(PlatformErrorCode.LOGIN_REQUIRED, userMessage, canFallback = false, internalReason = internalReason)
+
+    class SessionExpired(
+        userMessage: String = "登入狀態已失效，請重新匯入 Session",
+        internalReason: String? = null
+    ) : PlatformExtractionError(PlatformErrorCode.SESSION_EXPIRED, userMessage, canFallback = false, internalReason = internalReason)
+
+    class RateLimited(
+        userMessage: String = "來源網站暫時限制存取頻率，請稍後再試",
+        internalReason: String? = null
+    ) : PlatformExtractionError(PlatformErrorCode.RATE_LIMITED, userMessage, canFallback = false, internalReason = internalReason)
 
     class AudienceRestricted(
         userMessage: String = "此內容受到年齡或特定受眾限制，無法公開存取",

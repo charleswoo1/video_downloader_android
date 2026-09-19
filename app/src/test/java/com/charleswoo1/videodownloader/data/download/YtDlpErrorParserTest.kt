@@ -106,7 +106,7 @@ class YtDlpErrorParserTest {
         val result = YtDlpErrorParser.parse(stderr, Platform.YOUTUBE)
 
         assertEquals(YtDlpErrorParser.ErrorCategory.LOGIN_REQUIRED, result.category)
-        assertEquals("來源網站需要登入帳號驗證，目前版本不支援登入下載", result.userMessage)
+        assertEquals("來源網站需要登入帳號驗證，請至設定匯入 Session 後再試", result.userMessage)
     }
 
     @Test

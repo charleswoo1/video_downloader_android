@@ -48,6 +48,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val engineTrace: StateFlow<com.charleswoo1.videodownloader.data.download.EngineTrace?> = DownloadRepository.engineTrace
 
+    val sessionProvider = DownloadRepository.sessionProvider
+    val instagramSession: StateFlow<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>? = sessionProvider.statusFlow(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM)
+    val threadsSession: StateFlow<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>? = sessionProvider.statusFlow(com.charleswoo1.videodownloader.domain.model.Platform.THREADS)
+    val xSession: StateFlow<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>? = sessionProvider.statusFlow(com.charleswoo1.videodownloader.domain.model.Platform.X)
+
+    fun importSession(platform: com.charleswoo1.videodownloader.domain.model.Platform, rawInput: String): Result<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo> {
+        return sessionProvider.importSession(platform, rawInput)
+    }
+
+    fun importMetaSession(rawInput: String): Result<Pair<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo, com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>> {
+        return sessionProvider.importMetaSession(rawInput)
+    }
+
+    fun clearSession(platform: com.charleswoo1.videodownloader.domain.model.Platform) {
+        sessionProvider.clearSession(platform)
+    }
+
+    fun validateSession(platform: com.charleswoo1.videodownloader.domain.model.Platform) {
+        viewModelScope.launch {
+            val httpSession = com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession(sessionProvider = sessionProvider)
+            sessionProvider.validateSession(platform, httpSession)
+        }
+    }
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.collectDiagnostics(application)

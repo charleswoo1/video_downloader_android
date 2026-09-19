@@ -75,8 +75,12 @@ The required workflow is:
 GitHub reference
 → implementation comparison
 → port/adapt
-→ tests
-→ CI
+→ local test/lint/assemble
+→ push feature branch
+→ ChatGPT review
+   ├─ blockers found → fix locally, push, review again; DO NOT run GitHub CI
+   └─ no blocking findings → manually trigger GitHub Actions CI
+→ CI artifact
 → owner real-device verification
 ```
 
@@ -121,7 +125,7 @@ Do not:
 - create a tag;
 - publish a Release.
 
-After implementation run:
+After every implementation/review-fix round, run locally:
 
 ```bash
 ./gradlew test
@@ -129,7 +133,26 @@ After implementation run:
 ./gradlew assembleDebug
 ```
 
-CI must upload a new Android debug APK artifact for owner testing.
+Then push the feature branch for review.
+
+**Do not trigger GitHub Actions CI while review blockers remain.**
+
+Current CI policy:
+
+```yaml
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+```
+
+Therefore:
+
+- feature/PR branch pushes do **not** run CI automatically;
+- local Gradle gates are mandatory on every implementation round;
+- after ChatGPT review reports **no blocking findings**, manually run **Actions → Android CI → Run workflow** and select the feature branch;
+- pushes to `main` still run CI automatically as the integration gate;
+- the manually triggered CI run is the only point where a new owner-device APK artifact is required.
 
 ---
 
@@ -880,9 +903,9 @@ Implement:
 - quote/repost handling;
 - tests.
 
-## Phase F — full regression + CI
+## Phase F — full local regression + review gate + manual CI
 
-Run:
+Run locally:
 
 ```bash
 ./gradlew test
@@ -890,7 +913,13 @@ Run:
 ./gradlew assembleDebug
 ```
 
-Push to the existing PR #2 branch and obtain a new CI APK artifact.
+Then:
+
+1. push to the existing PR #2 branch;
+2. request ChatGPT review;
+3. if review finds blockers, return to implementation and repeat the local gates — **do not trigger GitHub CI**;
+4. only after review reports **no blocking findings**, manually trigger `Android CI` via `workflow_dispatch` for the feature branch;
+5. use that green manual CI run to produce the next APK artifact for owner-device testing.
 
 ---
 
@@ -1061,11 +1090,12 @@ Code-side completion requires all of the following:
 
 ## Validation
 
-- [ ] Unit tests pass.
-- [ ] Lint passes.
-- [ ] Debug assemble passes.
-- [ ] CI passes.
-- [ ] APK artifact is uploaded.
+- [ ] Local unit tests pass on every implementation/review-fix round.
+- [ ] Local lint passes on every implementation/review-fix round.
+- [ ] Local debug assemble passes on every implementation/review-fix round.
+- [ ] Feature branch was reviewed with no blocking findings before CI was triggered.
+- [ ] Manual GitHub Actions CI passes after the review gate.
+- [ ] APK artifact is uploaded from that review-approved CI run.
 - [ ] No merge/tag/release performed.
 - [ ] Owner receives exact manual test plan.
 
@@ -1109,9 +1139,13 @@ Branch:
 Head commit:
 
 Tests:
-Unit tests:
-Lint:
-assembleDebug:
+Local unit tests:
+Local lint:
+Local assembleDebug:
+Review gate:
+- blocking findings remaining: YES / NO
+CI trigger:
+- NOT RUN / MANUAL workflow_dispatch / main integration
 CI run:
 Artifact:
 

@@ -1,0 +1,31 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "Tweet",
+        "core": {
+          "user_results": {
+            "result": {
+              "legacy": {
+                "screen_name": "PhotoCreator"
+              }
+            }
+          }
+        },
+        "legacy": {
+          "id_str": "3456789012",
+          "full_text": "Here is a high resolution photograph from today's trip.",
+          "extended_entities": {
+            "media": [
+              {
+                "id_str": "777666555",
+                "type": "photo",
+                "media_url_https": "https://pbs.twimg.com/media/pic1.jpg"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

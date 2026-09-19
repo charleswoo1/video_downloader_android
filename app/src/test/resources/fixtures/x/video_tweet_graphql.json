@@ -1,0 +1,56 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "Tweet",
+        "core": {
+          "user_results": {
+            "result": {
+              "legacy": {
+                "screen_name": "TwitterVideoCreator"
+              }
+            }
+          }
+        },
+        "legacy": {
+          "id_str": "1234567890",
+          "full_text": "Check out this amazing public video! #tech",
+          "extended_entities": {
+            "media": [
+              {
+                "id_str": "999888777",
+                "type": "video",
+                "media_url_https": "https://pbs.twimg.com/media/thumb.jpg",
+                "video_info": {
+                  "aspect_ratio": [16, 9],
+                  "duration_millis": 30000,
+                  "variants": [
+                    {
+                      "content_type": "application/x-mpegURL",
+                      "url": "https://video.twimg.com/ext_tw_video/123/pu/pl/manifest.m3u8"
+                    },
+                    {
+                      "bitrate": 256000,
+                      "content_type": "video/mp4",
+                      "url": "https://video.twimg.com/ext_tw_video/123/pu/vid/480x270/low.mp4"
+                    },
+                    {
+                      "bitrate": 2176000,
+                      "content_type": "video/mp4",
+                      "url": "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/high.mp4"
+                    },
+                    {
+                      "bitrate": 832000,
+                      "content_type": "video/mp4",
+                      "url": "https://video.twimg.com/ext_tw_video/123/pu/vid/640x360/med.mp4"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

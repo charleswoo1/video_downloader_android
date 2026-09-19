@@ -1,0 +1,22 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "Tweet",
+        "core": {
+          "user_results": {
+            "result": {
+              "legacy": {
+                "screen_name": "TextOnlyUser"
+              }
+            }
+          }
+        },
+        "legacy": {
+          "id_str": "4567890123",
+          "full_text": "Just thought I'd share this thought with everyone today!"
+        }
+      }
+    }
+  }
+}

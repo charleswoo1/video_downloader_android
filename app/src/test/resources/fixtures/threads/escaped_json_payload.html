@@ -1,0 +1,17 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Threads post with escaped JSON payload</title>
+</head>
+<body>
+    <script type="application/json" data-sjs>
+    {
+        "require": [
+            ["RelayPrefetchedStreamCache", "next", [], [
+                "xdt_api__v1__post__graphql:{\"data\":{\"data\":{\"containing_thread\":{\"thread_items\":[{\"post\":{\"id\":\"3580000000000099\",\"code\":\"EscapedPostCode\",\"user\":{\"username\":\"escaped_author\"},\"caption\":{\"text\":\"Video from escaped JSON\"},\"image_versions2\":{\"candidates\":[{\"url\":\"https://threads.net/thumb_escaped.jpg\"}]},\"video_versions\":[{\"url\":\"https://threads.net/cdn/escaped_1080.mp4?sig=abc+123&amp;stkn=tok+456\",\"width\":1080,\"height\":1920}]}}]}}}}"
+            ]]
+        ]
+    }
+    </script>
+</body>
+</html>

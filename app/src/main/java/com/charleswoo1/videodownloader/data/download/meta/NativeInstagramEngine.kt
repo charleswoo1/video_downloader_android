@@ -789,7 +789,7 @@ class NativeInstagramEngine(
                 val query = url.substringAfter('?', missingDelimiterValue = "").substringBefore('#').trim()
                 val crawlerBase = "https://www.instagram.com/p/$shortcode/"
                 val crawlerUrl = if (query.isNotBlank()) "$crawlerBase?$query" else crawlerBase
-                safeLog("[Instagram] profile=CRAWLER alternate_path=/p/$shortcode url=$crawlerUrl")
+                safeLog("[Instagram] profile=CRAWLER alternate_path=/p/$shortcode has_query=${query.isNotBlank()}")
                 crawlerUrl
             } else {
                 fetchUrl

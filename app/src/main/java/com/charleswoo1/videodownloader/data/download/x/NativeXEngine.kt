@@ -176,14 +176,20 @@ class NativeXEngine(
         FALLBACK_BEARER_TOKEN
     }
 
-    suspend fun ensureGuestToken(bearerToken: String): String? = withContext(Dispatchers.IO) {
-        cachedGuestToken?.let { return@withContext it }
+    suspend fun ensureGuestToken(bearerToken: String, forceRefresh: Boolean = false): String? = withContext(Dispatchers.IO) {
+        if (forceRefresh) {
+            cachedGuestToken = null
+            httpSession.cookieJar.removeCookie("x.com", "gt")
+            httpSession.cookieJar.removeCookie("twitter.com", "gt")
+        } else {
+            cachedGuestToken?.let { return@withContext it }
 
-        // 1. Check cookie jar first
-        val cookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
-        if (!cookieGt.isNullOrBlank()) {
-            cachedGuestToken = cookieGt
-            return@withContext cookieGt
+            // 1. Check cookie jar first
+            val cookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
+            if (!cookieGt.isNullOrBlank()) {
+                cachedGuestToken = cookieGt
+                return@withContext cookieGt
+            }
         }
 
         // 2. Request hashflags endpoint with Bearer, transaction id, and active user/language headers
@@ -530,8 +536,10 @@ class NativeXEngine(
                     // Refresh guest session and retry GraphQL once
                     safeLog("[X] guest_refresh=true")
                     cachedGuestToken = null
+                    httpSession.cookieJar.removeCookie("x.com", "gt")
+                    httpSession.cookieJar.removeCookie("twitter.com", "gt")
                     val newBearer = ensureBearerToken()
-                    val newGuest = ensureGuestToken(newBearer)
+                    val newGuest = ensureGuestToken(newBearer, forceRefresh = true)
                     safeLog("[X] graphql_attempt=2")
                     val retryGql = fetchPostViaGraphQL(statusId, newBearer, newGuest)
                     if (retryGql.isSuccess) {

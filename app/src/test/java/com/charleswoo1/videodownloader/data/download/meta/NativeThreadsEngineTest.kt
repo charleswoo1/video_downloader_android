@@ -632,6 +632,8 @@ class NativeThreadsEngineTest {
               "data": {
                 "target_post": {
                   "code": "TargetImagePost",
+                  "is_video": false,
+                  "media_type": 1,
                   "image_versions2": {
                     "candidates": [
                       {"url": "https://threads.net/cdn/target_image.jpg", "width": 1080, "height": 1080}
@@ -693,5 +695,147 @@ class NativeThreadsEngineTest {
         val error = (result as MetaExtractionResult.Failure).error
         assertTrue("Error must be Technical, NOT NoVideo and NOT Success; found: $error", error is MetaExtractionError.Technical)
         assertTrue("Technical error MUST allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseThreadsPage_targetWithUserAndCaptionAndUnknownMediaContainer_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "post": {
+                  "code": "DdcLVjtknJ2",
+                  "user": {"username": "threads_creator"},
+                  "caption": {"text": "Post with unknown media container"},
+                  "unknown_custom_media_container": {
+                    "raw_data": "some_unsupported_format"
+                  }
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "DdcLVjtknJ2", "https://www.threads.com/@threads_creator/post/DdcLVjtknJ2")
+        assertTrue("Unknown container must result in Failure", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error must be Technical, NOT NoVideo; found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST allow fallback", error.canFallback)
+    }
+
+    @Test
+    fun parseThreadsPage_canonicalCodeDdcLVjtknJ2_inContainingThreadItems_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "DdcLVjtknJ2",
+                        "user": {"username": "creator_ddc"},
+                        "caption": {"text": "Canonical DdcLVjtknJ2 video"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/ddc_video_1080.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "DdcLVjtknJ2", "https://www.threads.com/@creator_ddc/post/DdcLVjtknJ2")
+        assertTrue("Expected success for canonical DdcLVjtknJ2 post", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("DdcLVjtknJ2", media.postId)
+        assertEquals("creator_ddc", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/ddc_video_1080.mp4"))
+    }
+
+    @Test
+    fun parseThreadsPage_canonicalCodeDdaQOUWkpua_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "DdaQOUWkpua",
+                        "user": {"username": "creator_dda"},
+                        "caption": {"text": "Canonical DdaQOUWkpua video"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/dda_video_1080.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "DdaQOUWkpua", "https://www.threads.com/@creator_dda/post/DdaQOUWkpua")
+        assertTrue("Expected success for canonical DdaQOUWkpua post", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("DdaQOUWkpua", media.postId)
+        assertEquals("creator_dda", media.uploader)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/dda_video_1080.mp4"))
+    }
+
+    @Test
+    fun parseThreadsPage_nestedJsonWithSignedMediaUrl_preservesExactUrl() {
+        val signedUrl = "https://threads.net/cdn/video_1080.mp4?sig=abc+123&amp;stkn=tok+456+xyz\\u0026hash=def"
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "require": [
+                [
+                  "RelayPrefetchedStreamCache",
+                  "next",
+                  [],
+                  [
+                    "xdt_api__v1__post__graphql:{\"data\":{\"data\":{\"containing_thread\":{\"thread_items\":[{\"post\":{\"id\":\"111\",\"code\":\"SignedUrlPost\",\"user\":{\"username\":\"signed_user\"},\"video_versions\":[{\"url\":\"$signedUrl\",\"width\":1080,\"height\":1920}]}}]}}}}"
+                  ]
+                ]
+              ]
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "SignedUrlPost", "https://www.threads.com/@signed_user/post/SignedUrlPost")
+        assertTrue("Expected success for signed URL nested JSON", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        val extractedUrl = media.progressiveVideoUrls.first()
+        // Verify literal '+' in query tokens is preserved and not replaced or corrupted
+        assertTrue("Literal '+' in sig must be preserved", extractedUrl.contains("sig=abc+123"))
+        assertTrue("Literal '+' in stkn must be preserved", extractedUrl.contains("stkn=tok+456+xyz"))
+        assertTrue("Query param after unicode escape must be preserved", extractedUrl.contains("hash=def"))
     }
 }

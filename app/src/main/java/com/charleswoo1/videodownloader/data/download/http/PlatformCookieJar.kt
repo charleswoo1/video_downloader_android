@@ -80,6 +80,16 @@ class PlatformCookieJar : CookieJar {
         hostStore[cookie.name] = cookie
     }
 
+    fun removeCookie(domain: String, name: String) {
+        val cleanTarget = domain.removePrefix(".")
+        cookieStore[cleanTarget]?.remove(name)
+        for ((storeDomain, store) in cookieStore) {
+            if (cleanTarget.endsWith(".$storeDomain", ignoreCase = true) || storeDomain.endsWith(".$cleanTarget", ignoreCase = true)) {
+                store.remove(name)
+            }
+        }
+    }
+
     fun clear() {
         cookieStore.clear()
     }

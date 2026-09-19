@@ -121,17 +121,6 @@ class NativeThreadsEngine(
                                 }
                             }
                         } catch (_: Exception) {}
-
-                        if (sub.contains("\\\"")) {
-                            try {
-                                val unescaped = sub.replace("\\\"", "\"").replace("\\\\", "\\")
-                                if (unescaped.startsWith("{")) {
-                                    val obj = JSONObject(unescaped)
-                                    candidates.add(obj)
-                                    collectNestedJsonStrings(obj, candidates, currentDepth + 1, maxDepth)
-                                }
-                            } catch (_: Exception) {}
-                        }
                     }
                 }
                 return
@@ -470,10 +459,29 @@ class NativeThreadsEngine(
     }
 
     private fun isThreadsImageOrTextPost(obj: JSONObject): Boolean {
-        val hasImages = obj.optJSONObject("image_versions2")?.optJSONArray("candidates")?.let { it.length() > 0 } ?: false
-        val hasUser = obj.has("user")
-        val hasCaption = obj.has("caption")
-        return hasImages || (hasUser && hasCaption)
+        val typename = obj.optString("__typename")
+        if (typename == "XDTGraphImage" || typename == "GraphImage" || typename == "XDTTextPost" || typename == "TextPost") {
+            return true
+        }
+
+        val mediaType = obj.optInt("media_type", 0)
+        if (mediaType == 1 || mediaType == 19) {
+            return true
+        }
+
+        if (obj.optString("post_type") == "text" || obj.optBoolean("is_text_only", false)) {
+            return true
+        }
+
+        if (obj.has("is_video") && !obj.optBoolean("is_video", true)) {
+            val hasImages = obj.optJSONObject("image_versions2")?.optJSONArray("candidates")?.let { it.length() > 0 } ?: false
+            val hasDisplayUrl = obj.optString("display_url").isNotBlank()
+            if (hasImages || hasDisplayUrl) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun searchTargetPost(candidates: List<JSONObject>, targetCode: String, scriptSource: String): ThreadsPostSearchResult {
@@ -569,15 +577,6 @@ class NativeThreadsEngine(
                             val found = findPostByCode(parsed, targetCode)
                             if (found.wrapperSeen || found.postNode != null) return found
                         } catch (_: Exception) {}
-
-                        if (sub.contains("\\\"")) {
-                            try {
-                                val unescaped = sub.replace("\\\"", "\"").replace("\\\\", "\\")
-                                val parsed = if (unescaped.startsWith("{")) JSONObject(unescaped) else JSONArray(unescaped)
-                                val found = findPostByCode(parsed, targetCode)
-                                if (found.wrapperSeen || found.postNode != null) return found
-                            } catch (_: Exception) {}
-                        }
                     }
                 }
             }

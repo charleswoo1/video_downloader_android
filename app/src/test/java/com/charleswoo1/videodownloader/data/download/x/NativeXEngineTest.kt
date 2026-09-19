@@ -3,6 +3,7 @@ package com.charleswoo1.videodownloader.data.download.x
 import com.charleswoo1.videodownloader.data.download.PlatformErrorCode
 import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -399,5 +400,61 @@ class NativeXEngineTest {
         assertEquals(PlatformErrorCode.DELETED_OR_NOT_FOUND, error?.code)
         assertFalse("Terminal DeletedOrNotFound must not allow fallback", error?.canFallback ?: true)
         assertEquals(listOf("GRAPHQL", "HTML_FALLBACK"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_provisionalUnavailable_withPreloadedCookieJar_invalidatesCookieAndRefreshes() = runBlocking {
+        val videoJson = loadFixture("video_tweet_graphql.json")
+        val unavailableJson = loadFixture("tweet_unavailable_graphql.json")
+        var graphqlCallCount = 0
+        val capturedGuestTokens = mutableListOf<String?>()
+
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "fresh_guest_token_retry")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    graphqlCallCount++
+                    capturedGuestTokens.add(customHeaders["x-guest-token"])
+                    val payload = if (graphqlCallCount == 1) unavailableJson else videoJson
+                    return Result.success(HttpResponse(200, url, payload, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        // Preload stale gt cookie in cookieJar
+        val staleCookie = okhttp3.Cookie.Builder()
+            .domain("x.com")
+            .name("gt")
+            .value("stale_cookie_gt_123")
+            .path("/")
+            .build()
+        fakeSession.cookieJar.putCookie("https://x.com/".toHttpUrl(), staleCookie)
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/TwitterVideoCreator/status/1234567890")
+
+        assertTrue("Expected extraction to succeed after refresh", result.isSuccess)
+        assertEquals(2, graphqlCallCount)
+        assertEquals("stale_cookie_gt_123", capturedGuestTokens[0])
+        assertEquals("fresh_guest_token_retry", capturedGuestTokens[1])
+        // Verify stale cookie was purged from cookie jar
+        assertEquals(null, fakeSession.cookieJar.getCookieValue("x.com", "gt"))
     }
 }

@@ -205,6 +205,30 @@ class AuthenticatedPlatformSessionProviderTest {
     }
 
     @Test
+    fun validateSession_instagramStatusOk_usernameOnlyWithoutPk_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=valid_sess")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""{"status":"ok","user":{"username":"ig_username_only"}}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        // Username without numeric pk/id must NOT mark ACTIVE
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertTrue(provider.sessionStatus(Platform.INSTAGRAM).details?.contains("未檢測到有效登入帳號資料") == true)
+    }
+
+    @Test
     fun validateSession_instagramRejection_becomesExpired() = kotlinx.coroutines.runBlocking {
         provider.importSession(Platform.INSTAGRAM, "sessionid=expired_sess")
 
@@ -326,6 +350,77 @@ class AuthenticatedPlatformSessionProviderTest {
         assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.THREADS).state)
         assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
         assertEquals(1, provider.cookiesFor(Platform.THREADS).size)
+    }
+
+    @Test
+    fun validateSession_threadsArbitraryTokenWithUserId_withoutDtsg_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>{"token":"AQarbitrary_token","ACCOUNT_ID":"987654321"}</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        // Arbitrary AQ-looking token without DTSGInitialData / fb_dtsg must NOT mark ACTIVE
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertTrue(provider.sessionStatus(Platform.THREADS).details?.contains("未檢測到有效登入憑證與帳號標記") == true)
+    }
+
+    @Test
+    fun validateSession_threadsDtsgTokenWithDsUserIdCookie_withoutPageUserId_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess; ds_user_id=12345678")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQtest_dtsg"}]</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.THREADS).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
+    }
+
+    @Test
+    fun validateSession_threadsDtsgTokenWithDocumentedPageUserId_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQtest_dtsg"}],{"IG_USER_EIMU":"987654321"}</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.THREADS).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
     }
 
     @Test

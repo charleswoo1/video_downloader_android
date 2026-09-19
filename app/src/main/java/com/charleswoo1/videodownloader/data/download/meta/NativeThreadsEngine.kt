@@ -1223,7 +1223,10 @@ class NativeThreadsEngine(
             val json = JSONObject(cleanBody)
             val matchingPost = findTargetPostInGraphQL(json, shortcode, pk)
                 ?: return@withContext Result.failure(
-                    PlatformExtractionError.TargetNotInPageData("Threads GraphQL 回應中未找到目標貼文 ($shortcode / $pk)", internalReason = "BARCELONA_TARGET_NOT_FOUND")
+                    PlatformExtractionError.TargetNotInPageData(
+                        "Threads GraphQL 回應中未找到目標貼文或內容受限 ($shortcode / $pk)",
+                        internalReason = "THREADS_AUTH_FALLBACK_ELIGIBLE"
+                    )
                 )
 
             val parseRes = extractMediaFromPost(matchingPost, shortcode, canonicalUrl)
@@ -1352,10 +1355,13 @@ class NativeThreadsEngine(
             }
         }
 
-        // 2. Authenticated Relay fallback if active session exists
-        if (successfulMedia == null && httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
+        val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
+        val isAuthFallbackEligible = (gqlErr?.internalReason == "THREADS_AUTH_FALLBACK_ELIGIBLE")
+
+        // 2. Authenticated Relay fallback ONLY if auth-fallback eligible AND active session exists
+        if (successfulMedia == null && isAuthFallbackEligible && httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
             profileSteps.add("AUTHENTICATED_RELAY")
-            safeLog("[Threads] authenticated session available, attempting authenticated page fetch fallback")
+            safeLog("[Threads] authenticated session available and post is restricted/unavailable in anonymous GraphQL, attempting authenticated page fetch fallback")
             httpSession.syncSessionCookies(Platform.THREADS)
             val authResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
             val authRespObj = authResp.getOrNull()

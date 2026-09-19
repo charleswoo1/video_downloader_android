@@ -742,7 +742,7 @@ class NativeInstagramEngine(
     /**
      * Dedicated target-isolation parser for upstream RelayPrefetchedStreamCache provenance:
      * RelayPrefetchedStreamCache -> __bbox.result.data.xig_polaris_media -> if_not_gated_logged_out
-     * Provenance is established by the target post's dedicated preloaded stream cache.
+     * Provenance is strictly established by the target post's dedicated preloaded stream cache.
      */
     fun extractRelayPrefetchedTargetMedia(
         candidates: List<JSONObject>,
@@ -750,45 +750,100 @@ class NativeInstagramEngine(
         targetId: Long
     ): JSONObject? {
         for (candidate in candidates) {
-            val media = findRelayPrefetchedInJson(candidate, shortcode, targetId)
-            if (media != null) return media
+            val streamCacheEntries = mutableListOf<JSONArray>()
+            findRelayStreamCacheEntries(candidate, streamCacheEntries)
+            for (entry in streamCacheEntries) {
+                val media = extractMediaFromRelayStreamCacheEntry(entry, shortcode, targetId)
+                if (media != null) return media
+            }
         }
         return null
     }
 
-    private fun findRelayPrefetchedInJson(root: Any?, shortcode: String, targetId: Long): JSONObject? {
-        if (root == null) return null
+    private fun findRelayStreamCacheEntries(root: Any?, result: MutableList<JSONArray>) {
+        if (root == null) return
+        if (root is JSONArray) {
+            if (root.length() > 0 && root.opt(0) == "RelayPrefetchedStreamCache") {
+                result.add(root)
+                return
+            }
+            for (i in 0 until root.length()) {
+                findRelayStreamCacheEntries(root.opt(i), result)
+            }
+        } else if (root is JSONObject) {
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                if (isExcludedContainerKey(key)) continue
+                findRelayStreamCacheEntries(root.opt(key), result)
+            }
+        }
+    }
+
+    private fun extractMediaFromRelayStreamCacheEntry(
+        entry: JSONArray,
+        shortcode: String,
+        targetId: Long
+    ): JSONObject? {
+        val bboxes = mutableListOf<JSONObject>()
+        findBboxesInJson(entry, bboxes)
+        for (bbox in bboxes) {
+            val polarisMedia = bbox.optJSONObject("result")
+                ?.optJSONObject("data")
+                ?.optJSONObject("xig_polaris_media")
+                ?: continue
+
+            // Strictly require if_not_gated_logged_out; do NOT fall back to outer polarisMedia!
+            val gated = polarisMedia.optJSONObject("if_not_gated_logged_out") ?: continue
+
+            val code = gated.optString("code").ifBlank { gated.optString("shortcode") }
+            val id = gated.optString("id").ifBlank { gated.optString("pk") }
+            val codeMatch = code.isBlank() || code == shortcode
+            val idMatch = targetId <= 0 || id.isBlank() || id == targetId.toString() || id.startsWith(targetId.toString())
+
+            if (codeMatch && idMatch && (hasDirectVideoOrCarousel(gated) || isValidImageOnlyNode(gated))) {
+                return gated
+            }
+        }
+        return null
+    }
+
+    private fun findBboxesInJson(root: Any?, result: MutableList<JSONObject>) {
+        if (root == null) return
         if (root is JSONObject) {
             val bbox = root.optJSONObject("__bbox")
             if (bbox != null) {
-                val polarisMedia = bbox.optJSONObject("result")
-                    ?.optJSONObject("data")
-                    ?.optJSONObject("xig_polaris_media")
-                if (polarisMedia != null) {
-                    val gated = polarisMedia.optJSONObject("if_not_gated_logged_out") ?: polarisMedia
-                    val code = gated.optString("code").ifBlank { gated.optString("shortcode") }
-                    val id = gated.optString("id").ifBlank { gated.optString("pk") }
-                    val codeMatch = code.isBlank() || code == shortcode
-                    val idMatch = targetId <= 0 || id.isBlank() || id == targetId.toString() || id.startsWith(targetId.toString())
-                    if (codeMatch && idMatch && (hasDirectVideoOrCarousel(gated) || isValidImageOnlyNode(gated))) {
-                        return gated
-                    }
-                }
+                result.add(bbox)
             }
             val keys = root.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
                 if (isExcludedContainerKey(key)) continue
-                val found = findRelayPrefetchedInJson(root.opt(key), shortcode, targetId)
-                if (found != null) return found
+                findBboxesInJson(root.opt(key), result)
             }
         } else if (root is JSONArray) {
             for (i in 0 until root.length()) {
-                val found = findRelayPrefetchedInJson(root.opt(i), shortcode, targetId)
-                if (found != null) return found
+                findBboxesInJson(root.opt(i), result)
+            }
+        } else if (root is String) {
+            val trimmed = root.trim()
+            if (trimmed.contains("__bbox")) {
+                val start = minOf(
+                    trimmed.indexOf('{').takeIf { it >= 0 } ?: Int.MAX_VALUE,
+                    trimmed.indexOf('[').takeIf { it >= 0 } ?: Int.MAX_VALUE
+                )
+                if (start != Int.MAX_VALUE) {
+                    val isObj = trimmed[start] == '{'
+                    val end = if (isObj) trimmed.lastIndexOf('}') else trimmed.lastIndexOf(']')
+                    if (end > start) {
+                        try {
+                            val parsed = if (isObj) JSONObject(trimmed.substring(start, end + 1)) else JSONArray(trimmed.substring(start, end + 1))
+                            findBboxesInJson(parsed, result)
+                        } catch (_: Exception) {}
+                    }
+                }
             }
         }
-        return null
     }
 
     private fun findXdtMediaItem(root: Any?, shortcode: String, targetId: Long): JSONObject? {
@@ -1428,6 +1483,8 @@ class NativeInstagramEngine(
         var successfulMedia: ExtractedMetaMedia? = null
         var polarisGatedOrAuthRequired = false
         var htmlLoginRedirected = false
+        var authFallbackEligible = false
+        var polarisLoginRequiredError: PlatformExtractionError.LoginRequired? = null
 
         safeLog("[Resolver] platform=INSTAGRAM")
 
@@ -1453,6 +1510,8 @@ class NativeInstagramEngine(
                 return@withContext Result.failure(polarisErr)
             } else if (polarisErr is PlatformExtractionError.LoginRequired) {
                 polarisGatedOrAuthRequired = true
+                authFallbackEligible = true
+                polarisLoginRequiredError = polarisErr
                 if (!httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
                     lastProfileSequence = profileSteps
                     return@withContext Result.failure(polarisErr)
@@ -1501,6 +1560,25 @@ class NativeInstagramEngine(
                 val isLoginRedirect = finalUrl.contains("/accounts/login") || finalUrl.contains("/login")
                 if (isLoginRedirect) {
                     htmlLoginRedirected = true
+                    authFallbackEligible = true
+                    val loginError = MetaExtractionError.Restricted(
+                        RestrictionReason.LOGIN_REQUIRED,
+                        "來源網站需要登入帳號驗證，目前版本不支援登入下載"
+                    )
+                    profileErrors.add(loginError)
+
+                    val profileFp = """
+                        [profile=$name http_status=$httpCode content_type=${respObj?.getHeader("content-type") ?: "text/html"} body_size=${formatSizeBucket(html.toByteArray().size)} host_and_path=${cleanHostAndPath(finalUrl)} redirect=${if (respObj?.finalUrl != null && respObj.finalUrl != requestUrl) "yes" else "no"} stage=LOGIN_REDIRECT error=LOGIN_REQUIRED]
+                        scripts: app_json=0 data_sjs=0 generic=0
+                        target: raw=false decoded=false wrapper=false media_node=false
+                        keys: none
+                        markers: none
+                        restriction: LOGIN_REQUIRED
+                    """.trimIndent()
+                    diagnosticHistory.add(profileFp)
+                    lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+                    safeLog("[Instagram] profile=$name login_redirect=true stage=LOGIN_REDIRECT")
+                    continue
                 }
 
                 val contentType = respObj?.getHeader("content-type") ?: (if (resp.isFailure) "none" else "text/html")
@@ -1571,6 +1649,7 @@ class NativeInstagramEngine(
                         when (error) {
                             is MetaExtractionError.Restricted -> {
                                 if (error.reason == RestrictionReason.LOGIN_REQUIRED) {
+                                    authFallbackEligible = true
                                     safeLog("[Instagram] profile=$name login_gated=true")
                                 } else {
                                     safeLog("[Instagram] profile=$name restriction=${error.reason}")
@@ -1596,10 +1675,10 @@ class NativeInstagramEngine(
             }
         }
 
-        // 3. Authenticated API fallback if anonymous failed AND active session exists
-        if (successfulMedia == null && httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
+        // 3. Authenticated API fallback ONLY if auth-fallback eligible AND active session exists
+        if (successfulMedia == null && authFallbackEligible && httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
             profileSteps.add("API_AUTHENTICATED")
-            safeLog("[Instagram] anonymous extraction failed, attempting authenticated fallback /api/v1/media/$targetId/info/")
+            safeLog("[Instagram] anonymous extraction failed with auth requirement, attempting authenticated fallback /api/v1/media/$targetId/info/")
             val authResult = fetchMediaInfoAuthenticated(shortcode, targetId, canonicalUrl)
             if (authResult.isSuccess) {
                 safeLog("[Instagram] authenticated API success")
@@ -1638,15 +1717,19 @@ class NativeInstagramEngine(
         val allProfilesLoginGated = profileErrors.isNotEmpty() && profileErrors.all {
             it is MetaExtractionError.Restricted && it.reason == RestrictionReason.LOGIN_REQUIRED
         }
+        val hasTechnicalFailure = profileErrors.any { it is MetaExtractionError.Technical }
+        val finalAnonymousLoginRequired = polarisLoginRequiredError != null ||
+                allProfilesLoginGated ||
+                (htmlLoginRedirected && !hasTechnicalFailure)
 
-        if (allProfilesLoginGated || htmlLoginRedirected) {
+        if (finalAnonymousLoginRequired) {
             safeLog("[Instagram] final=LOGIN_REQUIRED")
-            return@withContext Result.failure(
-                MetaExtractionError.Restricted(
+            val terminalError = polarisLoginRequiredError
+                ?: MetaExtractionError.Restricted(
                     RestrictionReason.LOGIN_REQUIRED,
                     "此 Instagram 貼文需要登入帳號驗證，請至設定匯入 Instagram Session"
                 )
-            )
+            return@withContext Result.failure(terminalError)
         }
 
         safeLog("[Instagram] final=TECHNICAL")

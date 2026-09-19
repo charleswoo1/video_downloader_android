@@ -199,14 +199,11 @@ class AuthenticatedPlatformSessionProvider(
                         } else if (resp.code == 200) {
                             val status = json?.optString("status")
                             val userObj = json?.optJSONObject("user")
-                            val pk = userObj?.optString("pk")?.ifBlank {
-                                val numericPk = userObj.optLong("pk", 0L)
-                                if (numericPk > 0) numericPk.toString() else null
-                            }
-                            val username = userObj?.optString("username")
-                            val hasCredibleIdentity = !pk.isNullOrBlank() || !username.isNullOrBlank()
+                            val pkStr = userObj?.optString("pk")?.trim()?.ifBlank { null }
+                            val pk = pkStr ?: userObj?.optLong("pk", 0L)?.takeIf { it > 0 }?.toString()
+                            val hasCredibleUserId = pk != null && pk.all { it.isDigit() } && (pk.toLongOrNull() ?: 0L) > 0L
 
-                            if (status == "ok" && userObj != null && hasCredibleIdentity) {
+                            if (status == "ok" && userObj != null && hasCredibleUserId) {
                                 markActive(platform, "驗證成功 (已連線)")
                             } else {
                                 credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效登入帳號資料，請確認 Cookie 是否有效")
@@ -292,16 +289,18 @@ class AuthenticatedPlatformSessionProvider(
                         } else if (resp.code == 200) {
                             val body = resp.body
                             val dtsgRegex = Regex("""\["DTSGInitialData",\[\],\{"token":"([^"]+)"""")
-                            val dtsgFallbackRegex = Regex(""""token":"(AQ[^"]+)"""")
                             val dtsgHtmlRegex = Regex("""name="fb_dtsg" value="([^"]+)"""")
+                            val dtsgJsonRegex = Regex(""""fb_dtsg":"([^"]+)"""")
                             val dtsgToken = dtsgRegex.find(body)?.groupValues?.get(1)
-                                ?: dtsgFallbackRegex.find(body)?.groupValues?.get(1)
                                 ?: dtsgHtmlRegex.find(body)?.groupValues?.get(1)
+                                ?: dtsgJsonRegex.find(body)?.groupValues?.get(1)
 
-                            val userIdRegex = Regex(""""(?:ACCOUNT_ID|USER_ID|actor_id|IG_USER_EIMU)":"(\d+)"""")
-                            val userIdFallbackRegex = Regex("""(?:"currentUser"|"actorID"|"user_id"):\s*"?(\d+)"?""")
-                            val userId = userIdRegex.find(body)?.groupValues?.get(1)
-                                ?: userIdFallbackRegex.find(body)?.groupValues?.get(1)
+                            val userIdRegex = Regex(""""(?:ACCOUNT_ID|USER_ID|IG_USER_EIMU)":"(\d+)"""")
+                            val pageUserId = userIdRegex.find(body)?.groupValues?.get(1)
+                            val dsUserIdCookie = cookies.firstOrNull { it.name.equals("ds_user_id", ignoreCase = true) }?.value?.trim()?.takeIf {
+                                it.isNotBlank() && it.all { ch -> ch.isDigit() } && (it.toLongOrNull() ?: 0L) > 0L
+                            }
+                            val userId = pageUserId ?: dsUserIdCookie
 
                             val hasValidProof = !dtsgToken.isNullOrBlank() && !userId.isNullOrBlank()
 

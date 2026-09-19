@@ -1313,10 +1313,15 @@ class NativeThreadsEngineTest {
                 contentType: String?,
                 method: String
             ): Result<HttpResponse> {
-                if (profile == RequestProfile.DESKTOP_NAVIGATION) {
-                    return Result.success(HttpResponse(200, url, relayHtml, emptyMap()))
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
                 }
-                return Result.failure(java.io.IOException("Not called"))
+                val html = if (customHeaders.containsKey("X-Anonymous-Context")) {
+                    """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>"""
+                } else {
+                    relayHtml
+                }
+                return Result.success(HttpResponse(200, url, html, emptyMap()))
             }
         }
 
@@ -1354,6 +1359,13 @@ class NativeThreadsEngineTest {
                 contentType: String?,
                 method: String
             ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                }
+                if (customHeaders.containsKey("X-Anonymous-Context")) {
+                    return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+                }
+                // Authenticated Relay call receives 401 Unauthorized
                 return Result.success(HttpResponse(401, url, "Unauthorized", emptyMap()))
             }
         }
@@ -1802,6 +1814,7 @@ class NativeThreadsEngineTest {
               }
             }
             </script>
+            <script>["LSD",[],{"token":"tok_valid_lsd"}]</script>
             </body></html>
         """.trimIndent()
 
@@ -1835,6 +1848,80 @@ class NativeThreadsEngineTest {
         assertTrue("Authenticated relay fallback should succeed", result.isSuccess)
         val steps = testEngine.lastProfileSequence
         assertEquals(listOf("BARCELONA_GRAPHQL", "AUTHENTICATED_RELAY"), steps)
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_lsdBootstrapFailure_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdLsdFailPost"
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                // Return page without LSD token
+                return Result.success(HttpResponse(200, url, "<html><body>Missing LSD token</body></html>", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@anon_user/post/$shortcode")
+
+        assertTrue("Should fail without target media", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on LSD bootstrap failure", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_malformedGraphQLJson_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdBadJsonPost"
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    // Malformed JSON response
+                    return Result.success(HttpResponse(200, url, "invalid json payload {", emptyMap()))
+                }
+                // Target page bootstrap returns valid LSD
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"tok_valid_lsd"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@anon_user/post/$shortcode")
+
+        assertTrue("Should fail without target media", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on malformed GraphQL JSON", steps.contains("AUTHENTICATED_RELAY"))
     }
 }
 

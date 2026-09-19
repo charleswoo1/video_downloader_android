@@ -2194,4 +2194,364 @@ class NativeInstagramEngineTest {
         assertEquals("https://instagram.com/cdn/provenance_target_video.mp4", media.progressiveVideoUrls.first())
         assertEquals("RELAY_PREFETCH_TARGET", outcomeRelay.diagnostics.stage)
     }
+
+    @Test
+    fun targetIsolation_relayProvenance_underUnrelatedCacheName_isRejected() {
+        val targetShortcode = "DdSExactTarget"
+        val unrelatedCacheHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "require": [
+                [
+                  "UnrelatedStreamCache",
+                  "next",
+                  [],
+                  [
+                    "PolarisQuery",
+                    {
+                      "__bbox": {
+                        "result": {
+                          "data": {
+                            "xig_polaris_media": {
+                              "if_not_gated_logged_out": {
+                                "code": "",
+                                "id": "",
+                                "is_video": true,
+                                "video_versions": [
+                                  {"url": "https://instagram.com/cdn/unrelated_cache_video.mp4", "width": 1080, "height": 1920}
+                                ],
+                                "owner": {"username": "unrelated_owner"}
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                ]
+              ]
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(unrelatedCacheHtml, targetShortcode, "https://www.instagram.com/p/$targetShortcode/")
+        assertTrue("Relay provenance MUST reject media under unrelated cache name", outcome.result is MetaExtractionResult.Failure)
+    }
+
+    @Test
+    fun targetIsolation_relayProvenance_missingIfNotGatedLoggedOut_doesNotExtractOuterObject() {
+        val targetShortcode = "DdSExactTarget"
+        val missingGatedHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "require": [
+                [
+                  "RelayPrefetchedStreamCache",
+                  "next",
+                  [],
+                  [
+                    "PolarisQuery",
+                    {
+                      "__bbox": {
+                        "result": {
+                          "data": {
+                            "xig_polaris_media": {
+                              "code": "",
+                              "id": "",
+                              "is_video": true,
+                              "video_versions": [
+                                {"url": "https://instagram.com/cdn/outer_video.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                ]
+              ]
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(missingGatedHtml, targetShortcode, "https://www.instagram.com/p/$targetShortcode/")
+        assertTrue("Relay provenance MUST NOT extract anonymous media from outer object when if_not_gated_logged_out is missing", outcome.result is MetaExtractionResult.Failure)
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_anonymousTechnicalFailure_authApiNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.INSTAGRAM, "sessionid=active_sess_123")
+        sessionProvider.markActive(Platform.INSTAGRAM, "Active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM))
+
+        val shortcode = "DdSTechFail"
+        val capturedUrls = mutableListOf<String>()
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                capturedUrls.add(url)
+                if (url == "https://www.instagram.com/") {
+                    // Bootstrap failure (no LSD)
+                    return Result.success(HttpResponse(200, url, "<html>No LSD</html>", emptyMap()))
+                }
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                }
+                // HTML profiles fail with technical/empty
+                return Result.success(HttpResponse(500, url, "", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Should fail with technical error", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("Authenticated API MUST NOT be called on purely technical failures", steps.contains("API_AUTHENTICATED"))
+        assertFalse("Auth API url must not be called", capturedUrls.any { it.contains("/api/v1/media/") })
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_explicitRestrictedRuling_callsAuthenticatedApi() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.INSTAGRAM, "sessionid=active_sess_123")
+        sessionProvider.markActive(Platform.INSTAGRAM, "Active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM))
+
+        val shortcode = "DdSAuthRuling"
+        val authApiSuccess = """
+            {
+              "items": [
+                {
+                  "code": "$shortcode",
+                  "id": "12345678",
+                  "user": {"username": "auth_creator"},
+                  "video_versions": [
+                    {"url": "https://instagram.com/cdn/auth_success.mp4", "width": 1080, "height": 1920}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val capturedUrls = mutableListOf<String>()
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                capturedUrls.add(url)
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok","title":"Restricted Video","description":"Restricted Video"}""", emptyMap()))
+                }
+                if (url.contains("/api/v1/media/")) {
+                    return Result.success(HttpResponse(200, url, authApiSuccess, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unexpected URL: $url"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Expected success via authenticated API fallback", result.isSuccess)
+        val steps = testEngine.lastProfileSequence
+        assertTrue("Must call API_AUTHENTICATED on explicit Restricted Video ruling", steps.contains("API_AUTHENTICATED"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_targetLoginRedirect_callsAuthenticatedApi() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.INSTAGRAM, "sessionid=active_sess_123")
+        sessionProvider.markActive(Platform.INSTAGRAM, "Active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM))
+
+        val shortcode = "DdSLoginRedir"
+        val authApiSuccess = """
+            {
+              "items": [
+                {
+                  "code": "$shortcode",
+                  "id": "12345678",
+                  "user": {"username": "auth_creator"},
+                  "video_versions": [
+                    {"url": "https://instagram.com/cdn/auth_success.mp4", "width": 1080, "height": 1920}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == "https://www.instagram.com/") {
+                    // Polaris bootstrap fails
+                    return Result.success(HttpResponse(200, url, "<html>No LSD</html>", emptyMap()))
+                }
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                }
+                if (url.contains("/p/$shortcode/")) {
+                    // Navigation profile redirects to login
+                    return Result.success(HttpResponse(200, "https://www.instagram.com/accounts/login/?next=/p/$shortcode/", "<html><head><title>Login • Instagram</title></head></html>", emptyMap()))
+                }
+                if (url.contains("/api/v1/media/")) {
+                    return Result.success(HttpResponse(200, url, authApiSuccess, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unexpected URL: $url"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Expected success via authenticated API on login redirect", result.isSuccess)
+        val steps = testEngine.lastProfileSequence
+        assertTrue("Must call API_AUTHENTICATED on login redirect", steps.contains("API_AUTHENTICATED"))
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_desktopLoginRedirectAndMobileCrawlerTechnical_returnsTechnicalNotLoginRequired() = runBlocking {
+        val shortcode = "DdSMixedEvidence"
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == "https://www.instagram.com/") {
+                    return Result.success(HttpResponse(200, url, "<html>No LSD</html>", emptyMap()))
+                }
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                }
+                if (profile == RequestProfile.DESKTOP_NAVIGATION) {
+                    // DESKTOP redirects to login
+                    return Result.success(HttpResponse(200, "https://www.instagram.com/accounts/login/", "<html><head><title>Login • Instagram</title></head></html>", emptyMap()))
+                }
+                // MOBILE and CRAWLER return technical/transport failures
+                return Result.failure(java.io.IOException("Network connection reset"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Mixed evidence must return Failure", result.isFailure)
+        val err = result.exceptionOrNull()
+        assertTrue("Mixed evidence must return Technical (fallback-eligible), not terminal LOGIN_REQUIRED: $err", err is MetaExtractionError.Technical)
+        assertFalse("Must NOT be Restricted.LOGIN_REQUIRED", err is MetaExtractionError.Restricted)
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_allProfilesLoginRedirect_returnsLoginRequired() = runBlocking {
+        val shortcode = "DdSAllLoginGated"
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == "https://www.instagram.com/") {
+                    return Result.success(HttpResponse(200, url, "<html>No LSD</html>", emptyMap()))
+                }
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                }
+                // All navigation profiles redirect to login
+                return Result.success(HttpResponse(200, "https://www.instagram.com/accounts/login/", "<html><head><title>Login • Instagram</title></head></html>", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("All login-gated profiles must return Failure", result.isFailure)
+        val err = result.exceptionOrNull()
+        assertTrue("Consistent login redirect on all profiles must return Restricted.LOGIN_REQUIRED: $err",
+            err is MetaExtractionError.Restricted && err.reason == RestrictionReason.LOGIN_REQUIRED)
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_explicitRestrictedRuling_returnsLoginRequired() = runBlocking {
+        val shortcode = "DdSRulingRestricted"
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                    return Result.success(HttpResponse(200, url, """{"status":"ok","title":"Restricted Video","description":"Restricted Video"}""", emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unexpected URL: $url"))
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/p/$shortcode/")
+
+        assertTrue("Restricted ruling must return Failure", result.isFailure)
+        val err = result.exceptionOrNull()
+        assertTrue("Explicit ruling must return PlatformExtractionError.LoginRequired: $err",
+            err is PlatformExtractionError.LoginRequired)
+    }
 }

@@ -1,8 +1,13 @@
 package com.charleswoo1.videodownloader.data.download.meta
 
+import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
+import com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider
 import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
+import com.charleswoo1.videodownloader.data.download.http.InMemoryPlatformCredentialStore
 import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
 import com.charleswoo1.videodownloader.data.download.http.RequestProfile
+import com.charleswoo1.videodownloader.data.download.http.SessionState
+import com.charleswoo1.videodownloader.domain.model.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -1054,5 +1059,309 @@ class NativeThreadsEngineTest {
 
         assertTrue("DESKTOP must precede MOBILE", desktopIdx < mobileIdx)
         assertTrue("MOBILE must precede CRAWLER", mobileIdx < crawlerIdx)
+    }
+
+    @Test
+    fun shortcodeToPk_calculatesExpectedNumericPkAndRoundtrips() {
+        val shortcode = "DdcJ4wwkjVQ"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        assertTrue("PK should be non-empty digits", pk.isNotBlank() && pk.all { it.isDigit() })
+        val backToShortcode = NativeThreadsEngine.pkToShortcode(pk)
+        assertEquals(shortcode, backToShortcode)
+    }
+
+    @Test
+    fun extractMediaInfo_barcelonaGraphQL_success_targetCodeMatch() = runBlocking {
+        val shortcode = "DdZtargetPost"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val graphqlJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "code": "$shortcode",
+                              "pk": "$pk",
+                              "user": {"username": "graphql_user"},
+                              "caption": {"text": "GraphQL video caption"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/gql_video.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not called"))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@graphql_user/post/$shortcode")
+
+        assertTrue("Expected extraction success via Barcelona GraphQL", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("GraphQL video caption", media?.title)
+        assertEquals("https://threads.net/cdn/gql_video.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(listOf("BARCELONA_GRAPHQL"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_barcelonaGraphQL_success_targetPkMatch() = runBlocking {
+        val shortcode = "DdZtargetPost"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val graphqlJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "pk": "$pk",
+                              "user": {"username": "pk_user"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/pk_video.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not called"))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@pk_user/post/$shortcode")
+
+        assertTrue("Expected extraction success via PK match", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("https://threads.net/cdn/pk_video.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(listOf("BARCELONA_GRAPHQL"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_barcelonaGraphQL_targetNotFound_unrelatedVideoExists_refusesToExtractAndFallsBackOrFails() = runBlocking {
+        val targetShortcode = "DdZWantedPost"
+        val unrelatedShortcode = "DdZUnrelated999"
+        val unrelatedPk = "999888777"
+        val graphqlJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "code": "$unrelatedShortcode",
+                              "pk": "$unrelatedPk",
+                              "user": {"username": "unrelated_user"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/unrelated_video.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, "<html><body>no data</body></html>", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@user/post/$targetShortcode")
+
+        assertTrue("Target isolation MUST reject unrelated video from GraphQL and fail", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue(error is MetaExtractionError.Technical || error is PlatformExtractionError)
+        assertFalse("Must never download unrelated video URL", result.getOrNull()?.qualityOptions?.any { it.formatSelector.contains("unrelated_video") } == true)
+        assertTrue("Sequence should include BARCELONA_GRAPHQL and fallback profiles", testEngine.lastProfileSequence.contains("BARCELONA_GRAPHQL"))
+    }
+
+    @Test
+    fun extractMediaInfo_barcelonaGraphQL_explicit429_returnsRateLimitedImmediately() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(429, url, "Too Many Requests", emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not called"))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@user/post/TestCode429")
+
+        assertTrue("Expected failure on HTTP 429", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be RateLimited, found $error", error is PlatformExtractionError.RateLimited)
+        assertEquals(listOf("BARCELONA_GRAPHQL"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_authenticatedSession_extractsSuccessfully() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(
+            Platform.THREADS,
+            "sessionid=threads_session_123; csrftoken=csrftok; ds_user_id=8888"
+        )
+
+        val relayHtml = loadFixture("target_post_video_versions.html")
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (profile == RequestProfile.DESKTOP_NAVIGATION) {
+                    return Result.success(HttpResponse(200, url, relayHtml, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not called"))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@test_user/post/DdZtargetPost")
+
+        assertTrue("Expected success via Authenticated Relay", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("Check out this Threads video", media?.title)
+        assertEquals("https://threads.net/cdn/video_1080.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(listOf("AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_authenticatedSession_sessionExpired401_marksExpiredAndReturnsSessionExpired() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(
+            Platform.THREADS,
+            "sessionid=expired_threads_session; csrftoken=csrftok; ds_user_id=8888"
+        )
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(401, url, "Unauthorized", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.net/@user/post/ExpiredPost")
+
+        assertTrue("Expected failure on 401 expired session", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be SessionExpired, found $error", error is PlatformExtractionError.SessionExpired)
+        assertFalse("Session must be marked expired", sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+        assertEquals(SessionState.EXPIRED, sessionProvider.sessionStatus(Platform.THREADS).state)
+        assertEquals(listOf("AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
     }
 }

@@ -17,6 +17,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.math.BigInteger
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
@@ -39,6 +41,72 @@ class NativeThreadsEngine(
     companion object {
         private const val TAG = "NativeThreadsEngine"
         const val ENGINE_NAME = "NativeThreadsEngine"
+
+        const val BARCELONA_DOC_ID = "25460088156920903"
+        const val THREADS_APP_ID = "238260118697367"
+        private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+        fun shortcodeToPk(shortcode: String): String {
+            var id = BigInteger.ZERO
+            val base = BigInteger.valueOf(64L)
+            for (char in shortcode) {
+                val index = ALPHABET.indexOf(char)
+                if (index == -1) continue
+                id = id.multiply(base).add(BigInteger.valueOf(index.toLong()))
+            }
+            return id.toString()
+        }
+
+        fun pkToShortcode(pk: String): String {
+            var num = try {
+                BigInteger(pk)
+            } catch (_: Exception) {
+                return ""
+            }
+            if (num == BigInteger.ZERO) return "A"
+            val base = BigInteger.valueOf(64L)
+            val sb = StringBuilder()
+            while (num > BigInteger.ZERO) {
+                val rem = num.mod(base).toInt()
+                sb.append(ALPHABET[rem])
+                num = num.divide(base)
+            }
+            return sb.reverse().toString()
+        }
+
+        fun findTargetPostInGraphQL(root: Any?, targetCode: String, targetPk: String): JSONObject? {
+            if (root == null) return null
+            when (root) {
+                is JSONObject -> {
+                    val hasPostShape = root.has("code") || root.has("pk") || root.has("video_versions") || root.has("carousel_media")
+                    if (hasPostShape) {
+                        val code = root.optString("code")
+                        val pk = root.optString("pk").ifBlank {
+                            val pkLong = root.optLong("pk", 0L)
+                            if (pkLong > 0L) pkLong.toString() else ""
+                        }
+                        if ((code.isNotBlank() && code == targetCode) || (pk.isNotBlank() && pk == targetPk)) {
+                            return root
+                        }
+                    }
+                    val keys = root.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        if (isExcludedContainerKey(key)) continue
+                        val child = root.opt(key)
+                        val found = findTargetPostInGraphQL(child, targetCode, targetPk)
+                        if (found != null) return found
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until root.length()) {
+                        val found = findTargetPostInGraphQL(root.opt(i), targetCode, targetPk)
+                        if (found != null) return found
+                    }
+                }
+            }
+            return null
+        }
 
         private val POST_ID_PATTERN = Pattern.compile("""/(?:post|t)/([A-Za-z0-9_-]+)""")
         private val SCRIPT_JSON_PATTERN = Pattern.compile(
@@ -1051,6 +1119,76 @@ class NativeThreadsEngine(
         return null
     }
 
+    suspend fun fetchBarcelonaGraphQL(
+        shortcode: String,
+        pk: String,
+        canonicalUrl: String
+    ): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
+        val endpoint = "https://www.threads.net/api/graphql"
+        val variables = JSONObject().apply {
+            put("postID", pk)
+        }.toString()
+
+        val postData = "av=0&__user=0&__a=1&__req=1&dpr=1&lsd=&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=BarcelonaPostPageContentQuery&variables=${URLEncoder.encode(variables, "UTF-8")}&server_timestamps=true&doc_id=$BARCELONA_DOC_ID"
+
+        val headers = mutableMapOf(
+            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+            "Content-Type" to "application/x-www-form-urlencoded",
+            "X-IG-App-ID" to THREADS_APP_ID,
+            "X-ASBD-ID" to "129477",
+            "X-FB-Friendly-Name" to "BarcelonaPostPageContentQuery",
+            "Origin" to "https://www.threads.net",
+            "Referer" to canonicalUrl,
+            "Accept" to "*/*"
+        )
+
+        val respResult = httpSession.fetch(
+            url = endpoint,
+            profile = RequestProfile.API,
+            origin = "https://www.threads.net",
+            referer = canonicalUrl,
+            customHeaders = headers,
+            body = postData.toByteArray(Charsets.UTF_8),
+            contentType = "application/x-www-form-urlencoded",
+            method = "POST"
+        )
+
+        val resp = respResult.getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        if (resp.code == 429) {
+            return@withContext Result.failure(
+                PlatformExtractionError.RateLimited("Threads 存取頻率受限 (HTTP 429)，請稍候再試")
+            )
+        }
+
+        if (resp.code !in 200..299) {
+            return@withContext Result.failure(
+                PlatformExtractionError.ApiError(resp.code, "Threads GraphQL 回傳錯誤碼 ${resp.code}", internalReason = "BARCELONA_HTTP_${resp.code}")
+            )
+        }
+
+        try {
+            val json = JSONObject(resp.body)
+            val matchingPost = findTargetPostInGraphQL(json, shortcode, pk)
+                ?: return@withContext Result.failure(
+                    PlatformExtractionError.TargetNotInPageData("Threads GraphQL 回應中未找到目標貼文 ($shortcode / $pk)", internalReason = "BARCELONA_TARGET_NOT_FOUND")
+                )
+
+            val parseRes = extractMediaFromPost(matchingPost, shortcode, canonicalUrl)
+            if (parseRes is MetaExtractionResult.Success) {
+                Result.success(parseRes.media)
+            } else if (parseRes is MetaExtractionResult.Failure && parseRes.error is MetaExtractionError.NoVideo) {
+                Result.failure(PlatformExtractionError.NoVideo(parseRes.error.userMessage, internalReason = "BARCELONA_NO_VIDEO"))
+            } else {
+                Result.failure(PlatformExtractionError.MediaUrlUnsupported("未找到相容的影片串流格式", internalReason = "BARCELONA_NO_COMPATIBLE_VIDEO"))
+            }
+        } catch (e: Exception) {
+            Result.failure(PlatformExtractionError.ParseError("無法解析 Threads GraphQL 回應", cause = e))
+        }
+    }
+
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         lastDiagnosticFingerprint = null
         lastProfileSequence = emptyList()
@@ -1137,89 +1275,151 @@ class NativeThreadsEngine(
             lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
         }
 
-        // Step 1: DESKTOP_NAVIGATION
-        profileSteps.add("DESKTOP")
-        val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
-        val desktopHtml = desktopResp.getOrNull()?.body ?: ""
+        var successfulMedia: ExtractedMetaMedia? = null
 
-        var parseOutcome: ThreadsParseOutcome? = null
-        if (desktopHtml.isNotBlank()) {
-            parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-            recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, parseOutcome)
-        } else {
-            recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, outcome = null)
-        }
-
-        // Step 2: Escalation to MOBILE_NAVIGATION on technical failure or empty body/fetch failure
-        val needEscalateToMobile = parseOutcome == null ||
-            (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
-
-        if (needEscalateToMobile) {
-            profileSteps.add("MOBILE")
-            val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
-            val mobileHtml = mobileResp.getOrNull()?.body ?: ""
-            if (mobileHtml.isNotBlank()) {
-                val mobileOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-                parseOutcome = mobileOutcome
-                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, mobileOutcome)
+        // 1. Authenticated Relay if active session exists
+        if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
+            profileSteps.add("AUTHENTICATED_RELAY")
+            safeLog("[Threads] authenticated session available, attempting authenticated page fetch")
+            httpSession.syncSessionCookies(Platform.THREADS)
+            val authResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+            val authRespObj = authResp.getOrNull()
+            val authCode = authRespObj?.code ?: 0
+            if (authCode == 401 || authCode == 403) {
+                httpSession.sessionProvider.markExpired(Platform.THREADS, "HTTP $authCode")
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(
+                    PlatformExtractionError.SessionExpired(
+                        "Threads 登入狀態已失效（HTTP $authCode），請至設定重新匯入 Session",
+                        internalReason = "THREADS_AUTH_EXPIRED:$authCode"
+                    )
+                )
+            }
+            val authHtml = authRespObj?.body ?: ""
+            if (authHtml.isNotBlank()) {
+                val authOutcome = parseThreadsPageWithDiagnostics(authHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                recordStepDiagnostics("AUTHENTICATED_RELAY", authResp, authHtml, authOutcome)
+                if (authOutcome.result is MetaExtractionResult.Success) {
+                    safeLog("[Threads] authenticated relay success")
+                    successfulMedia = authOutcome.result.media
+                } else {
+                    val authErr = authOutcome.result as? MetaExtractionResult.Failure
+                    if (authErr?.error is MetaExtractionError.NoVideo) {
+                        lastProfileSequence = profileSteps
+                        return@withContext Result.failure(authErr.error)
+                    }
+                }
             } else {
-                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, outcome = null)
+                recordStepDiagnostics("AUTHENTICATED_RELAY", authResp, authHtml, outcome = null)
             }
         }
 
-        // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure or empty body/fetch failure
-        val needEscalateToCrawler = parseOutcome == null ||
-            (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
-
-        if (needEscalateToCrawler) {
-            profileSteps.add("CRAWLER")
-            val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
-            val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
-            if (crawlerHtml.isNotBlank()) {
-                val crawlerOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
-                parseOutcome = crawlerOutcome
-                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, crawlerOutcome)
+        // 2. Primary anonymous path: BarcelonaPostPageContentQuery GraphQL
+        if (successfulMedia == null) {
+            val targetPk = shortcodeToPk(shortcode)
+            profileSteps.add("BARCELONA_GRAPHQL")
+            safeLog("[Threads] attempting BarcelonaPostPageContentQuery GraphQL for shortcode=$shortcode pk=$targetPk")
+            val gqlResult = fetchBarcelonaGraphQL(shortcode, targetPk, canonicalUrl)
+            if (gqlResult.isSuccess) {
+                safeLog("[Threads] Barcelona GraphQL success")
+                successfulMedia = gqlResult.getOrThrow()
+                diagnosticHistory.add("[profile=BARCELONA_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
             } else {
-                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, outcome = null)
+                val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
+                safeLog("[Threads] Barcelona GraphQL failed: ${gqlErr?.message}")
+                diagnosticHistory.add("[profile=BARCELONA_GRAPHQL stage=FAILURE error=${gqlErr?.javaClass?.simpleName}]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+                if (gqlErr is PlatformExtractionError.RateLimited) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(gqlErr)
+                } else if (gqlErr is PlatformExtractionError.NoVideo) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(gqlErr)
+                }
+            }
+        }
+
+        // 3. Fallback: Desktop / Mobile / Crawler HTML navigation profiles
+        if (successfulMedia == null) {
+            // Step 1: DESKTOP_NAVIGATION
+            profileSteps.add("DESKTOP")
+            val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+            val desktopHtml = desktopResp.getOrNull()?.body ?: ""
+
+            var parseOutcome: ThreadsParseOutcome? = null
+            if (desktopHtml.isNotBlank()) {
+                parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, parseOutcome)
+            } else {
+                recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, outcome = null)
+            }
+
+            // Step 2: Escalation to MOBILE_NAVIGATION on technical failure or empty body/fetch failure
+            val needEscalateToMobile = parseOutcome == null ||
+                (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
+
+            if (needEscalateToMobile) {
+                profileSteps.add("MOBILE")
+                val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
+                val mobileHtml = mobileResp.getOrNull()?.body ?: ""
+                if (mobileHtml.isNotBlank()) {
+                    val mobileOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                    parseOutcome = mobileOutcome
+                    recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, mobileOutcome)
+                } else {
+                    recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, outcome = null)
+                }
+            }
+
+            // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure or empty body/fetch failure
+            val needEscalateToCrawler = parseOutcome == null ||
+                (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical)
+
+            if (needEscalateToCrawler) {
+                profileSteps.add("CRAWLER")
+                val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
+                val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
+                if (crawlerHtml.isNotBlank()) {
+                    val crawlerOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                    parseOutcome = crawlerOutcome
+                    recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, crawlerOutcome)
+                } else {
+                    recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, outcome = null)
+                }
+            }
+
+            if (parseOutcome != null && parseOutcome.result is MetaExtractionResult.Success) {
+                successfulMedia = parseOutcome.result.media
+            } else if (parseOutcome != null && parseOutcome.result is MetaExtractionResult.Failure) {
+                val finalStatus = if (parseOutcome.result.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
+                safeLog("[Threads] final=$finalStatus")
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(parseOutcome.result.error)
+            } else {
+                safeLog("[Threads] final=PARSE_ERROR")
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(
+                    MetaExtractionError.Technical("無法取得 Threads 頁面內容", internalReason = "EMPTY_BODY")
+                )
             }
         }
 
         lastProfileSequence = profileSteps
 
-        if (parseOutcome == null) {
-            safeLog("[Threads] final=PARSE_ERROR")
-            return@withContext Result.failure(
-                MetaExtractionError.Technical("無法取得 Threads 頁面內容", internalReason = "EMPTY_BODY")
-            )
-        }
-
-        val diag = parseOutcome.diagnostics
-        val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
-
-        safeLog("platform=THREADS is_share_input=$isShareInput share_resolved=$shareResolved script_source=${diag.scriptSource} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper=${diag.targetWrapperFound} actual_media=${diag.mediaNodeFound} matched_keys=$matchedKeysStr")
-
-        when (val res = parseOutcome.result) {
-            is MetaExtractionResult.Success -> {
-                safeLog("[Threads] final=SUCCESS")
-                val media = res.media
-                val options = buildQualityOptions(media)
-                val info = MediaInfo(
-                    sourceUrl = canonicalUrl,
-                    title = media.title,
-                    platform = Platform.THREADS,
-                    extractor = ENGINE_NAME,
-                    thumbnailUrl = media.thumbnailUrl,
-                    durationSeconds = media.durationSeconds,
-                    qualityOptions = options
-                )
-                Result.success(info)
-            }
-            is MetaExtractionResult.Failure -> {
-                val finalStatus = if (res.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
-                safeLog("[Threads] final=$finalStatus")
-                Result.failure(res.error)
-            }
-        }
+        safeLog("[Threads] final=SUCCESS")
+        val media = successfulMedia!!
+        val options = buildQualityOptions(media)
+        val info = MediaInfo(
+            sourceUrl = canonicalUrl,
+            title = media.title,
+            platform = Platform.THREADS,
+            extractor = ENGINE_NAME,
+            thumbnailUrl = media.thumbnailUrl,
+            durationSeconds = media.durationSeconds,
+            qualityOptions = options
+        )
+        return@withContext Result.success(info)
     }
 
     private fun safeLog(msg: String) {

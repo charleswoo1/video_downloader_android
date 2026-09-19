@@ -394,4 +394,26 @@ class PlatformEngineRouterTest {
         assertTrue(fakeXEngine.cancelCalled)
         assertTrue(fakeYtDlpEngine.cancelCalled)
     }
+
+    @Test
+    fun extractMediaInfo_primaryParseError_fallbackFailure_retainsPrimaryParseError() = runBlocking {
+        fakeThreadsEngine.extractResult = Result.failure(
+            PlatformExtractionError.ParseError(
+                "Threads 已找到貼文連結，但目前頁面未提供可解析的目標媒體資料。",
+                internalReason = "NO_TARGET_FOUND"
+            )
+        )
+        fakeYtDlpEngine.extractResult = Result.failure(
+            PlatformExtractionError.DeletedOrNotFound(
+                "Threads 貼文不存在、設為私人內容或需要登入帳號驗證"
+            )
+        )
+
+        val result = router.extractMediaInfo("https://www.threads.com/@user/post/DdcJ4wwkjVQ")
+        assertTrue("Extraction must fail", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertEquals(PlatformErrorCode.PARSE_ERROR, err?.code)
+        assertEquals("NO_TARGET_FOUND", err?.internalReason)
+        assertTrue(err?.userMessage?.contains("Threads 已找到貼文連結") == true)
+    }
 }

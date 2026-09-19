@@ -18,7 +18,8 @@ data class EngineTrace(
     val fallbackResultCategory: String? = null,
     val finalEngine: String,
     val finalResult: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val diagnosticFingerprint: String? = null
 ) {
     /**
      * Compact display string for Debug UI badges and user-facing diagnostics.

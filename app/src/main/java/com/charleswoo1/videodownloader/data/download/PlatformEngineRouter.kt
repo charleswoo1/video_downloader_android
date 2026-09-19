@@ -70,10 +70,26 @@ class PlatformEngineRouter(
         }
     }
 
+    private fun formatPrimaryCategory(error: Throwable?): String {
+        val pe = error as? PlatformExtractionError ?: return "TECHNICAL_FAILURE"
+        return if (!pe.internalReason.isNullOrBlank()) {
+            "${pe.code.name} (${pe.internalReason})"
+        } else {
+            pe.code.name
+        }
+    }
+
+    private fun getFallbackCategory(fallbackResult: Result<MediaInfo>, platform: Platform): String {
+        if (fallbackResult.isSuccess) return "SUCCESS"
+        val msg = fallbackResult.exceptionOrNull()?.message
+        return YtDlpErrorParser.parse(msg, platform).category.name
+    }
+
     private suspend fun routeInstagram(url: String, opId: String): Result<MediaInfo> {
         val primaryEngineName = nativeInstagramEngine.name
         val result = nativeInstagramEngine.extractMediaInfo(url)
         val profiles = (nativeInstagramEngine as? NativeInstagramEngine)?.lastProfileSequence ?: emptyList()
+        val diagFingerprint = nativeInstagramEngine.lastDiagnosticFingerprint
 
         if (result.isSuccess) {
             recordTrace(
@@ -85,35 +101,39 @@ class PlatformEngineRouter(
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
-                    finalResult = "SUCCESS"
+                    finalResult = "SUCCESS",
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return result
         }
 
         val error = result.exceptionOrNull()
+        val primaryCategory = formatPrimaryCategory(error)
+
         if (error is PlatformExtractionError && !error.canFallback) {
             recordTrace(
                 EngineTrace(
                     operationId = opId,
                     platform = Platform.INSTAGRAM,
                     primaryEngine = primaryEngineName,
-                    primaryResultCategory = error.code.name,
+                    primaryResultCategory = primaryCategory,
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
-                    finalResult = error.code.name
+                    finalResult = primaryCategory,
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return Result.failure(error)
         }
 
         // Technical failure: attempt yt-dlp fallback
-        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
         safeLog("Instagram native extraction failed ($primaryCategory); falling back to yt-dlp")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.INSTAGRAM)
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
-        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
         recordTrace(
             EngineTrace(
                 operationId = opId,
@@ -123,9 +143,10 @@ class PlatformEngineRouter(
                 requestProfileSequence = profiles,
                 fallbackAttempted = true,
                 fallbackEngine = "YtDlpDownloadEngine",
-                fallbackResultCategory = finalResultStatus,
+                fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
-                finalResult = finalResultStatus
+                finalResult = finalResultStatus,
+                diagnosticFingerprint = diagFingerprint
             )
         )
         return fallbackResult
@@ -135,6 +156,7 @@ class PlatformEngineRouter(
         val primaryEngineName = nativeThreadsEngine.name
         val result = nativeThreadsEngine.extractMediaInfo(url)
         val profiles = (nativeThreadsEngine as? NativeThreadsEngine)?.lastProfileSequence ?: emptyList()
+        val diagFingerprint = nativeThreadsEngine.lastDiagnosticFingerprint
 
         if (result.isSuccess) {
             recordTrace(
@@ -146,35 +168,39 @@ class PlatformEngineRouter(
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
-                    finalResult = "SUCCESS"
+                    finalResult = "SUCCESS",
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return result
         }
 
         val error = result.exceptionOrNull()
+        val primaryCategory = formatPrimaryCategory(error)
+
         if (error is PlatformExtractionError && !error.canFallback) {
             recordTrace(
                 EngineTrace(
                     operationId = opId,
                     platform = Platform.THREADS,
                     primaryEngine = primaryEngineName,
-                    primaryResultCategory = error.code.name,
+                    primaryResultCategory = primaryCategory,
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
-                    finalResult = error.code.name
+                    finalResult = primaryCategory,
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return Result.failure(error)
         }
 
         // Technical failure: attempt yt-dlp fallback
-        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
         safeLog("Threads native extraction failed ($primaryCategory); falling back to yt-dlp + plugin")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.THREADS)
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
-        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
         recordTrace(
             EngineTrace(
                 operationId = opId,
@@ -184,18 +210,38 @@ class PlatformEngineRouter(
                 requestProfileSequence = profiles,
                 fallbackAttempted = true,
                 fallbackEngine = "YtDlpDownloadEngine",
-                fallbackResultCategory = finalResultStatus,
+                fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
-                finalResult = finalResultStatus
+                finalResult = finalResultStatus,
+                diagnosticFingerprint = diagFingerprint
             )
         )
-        return fallbackResult
+
+        if (fallbackResult.isSuccess) {
+            return fallbackResult
+        }
+
+        // Section 4.2: When native engine already produced PARSE_ERROR, the fallback message must not be treated as authoritative content classification.
+        // Do not rewrite the native result as PRIVATE/DELETED unless independent evidence supports it.
+        val primaryErr = error as? PlatformExtractionError
+        val primaryInternalReason = primaryErr?.internalReason
+        val detailMsg = primaryErr?.message ?: "Threads 備援解析失敗；原始內容可能使用不同的公開頁面資料格式"
+        val userMsg = primaryErr?.userMessage ?: "Threads 備援解析遭拒或失敗；此內容可能使用不同的公開頁面資料格式 (原生: $primaryCategory)"
+        return Result.failure(
+            PlatformExtractionError.ParseError(
+                detail = detailMsg,
+                userMessage = userMsg,
+                internalReason = primaryInternalReason ?: "FALLBACK_$fallbackCategory",
+                cause = fallbackResult.exceptionOrNull()
+            )
+        )
     }
 
     private suspend fun routeX(url: String, opId: String): Result<MediaInfo> {
         val primaryEngineName = nativeXEngine.name
         val result = nativeXEngine.extractMediaInfo(url)
         val profiles = (nativeXEngine as? NativeXEngine)?.lastProfileSequence ?: emptyList()
+        val diagFingerprint = nativeXEngine.lastDiagnosticFingerprint
 
         if (result.isSuccess) {
             recordTrace(
@@ -207,35 +253,39 @@ class PlatformEngineRouter(
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
-                    finalResult = "SUCCESS"
+                    finalResult = "SUCCESS",
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return result
         }
 
         val error = result.exceptionOrNull()
+        val primaryCategory = formatPrimaryCategory(error)
+
         if (error is PlatformExtractionError && !error.canFallback) {
             recordTrace(
                 EngineTrace(
                     operationId = opId,
                     platform = Platform.X,
                     primaryEngine = primaryEngineName,
-                    primaryResultCategory = error.code.name,
+                    primaryResultCategory = primaryCategory,
                     requestProfileSequence = profiles,
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
-                    finalResult = error.code.name
+                    finalResult = primaryCategory,
+                    diagnosticFingerprint = diagFingerprint
                 )
             )
             return Result.failure(error)
         }
 
         // Technical failure: attempt yt-dlp fallback
-        val primaryCategory = (error as? PlatformExtractionError)?.code?.name ?: "TECHNICAL_FAILURE"
         safeLog("X native extraction failed ($primaryCategory); falling back to yt-dlp")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
+        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.X)
+        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
-        val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else "FAILURE"
         recordTrace(
             EngineTrace(
                 operationId = opId,
@@ -245,9 +295,10 @@ class PlatformEngineRouter(
                 requestProfileSequence = profiles,
                 fallbackAttempted = true,
                 fallbackEngine = "YtDlpDownloadEngine",
-                fallbackResultCategory = finalResultStatus,
+                fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
-                finalResult = finalResultStatus
+                finalResult = finalResultStatus,
+                diagnosticFingerprint = diagFingerprint
             )
         )
         return fallbackResult
@@ -344,6 +395,9 @@ class PlatformEngineRouter(
         lastTrace = trace
         _traceFlow.value = trace
         safeLog("[EngineTrace] ${trace.toDisplaySummary()}")
+        if (!trace.diagnosticFingerprint.isNullOrBlank()) {
+            safeLog("[EngineTrace-Diagnostics]\n${trace.diagnosticFingerprint}")
+        }
     }
 
     private fun safeLog(msg: String) {

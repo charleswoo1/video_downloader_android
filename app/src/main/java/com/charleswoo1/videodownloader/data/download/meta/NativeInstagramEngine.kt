@@ -57,6 +57,41 @@ class NativeInstagramEngine(
             """<script\b(?=[^>]*\bdata-sjs\b)[^>]*>(.*?)</script>""",
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
+        private val GENERIC_SCRIPT_PATTERN = Pattern.compile(
+            """<script\b[^>]*>(.*?)</script>""",
+            Pattern.CASE_INSENSITIVE or Pattern.DOTALL
+        )
+
+        val INSTAGRAM_MARKERS = listOf(
+            "xdt_shortcode_media",
+            "xdt_api__v1__media__shortcode__web_info",
+            "xdt_api__v1__clips__clips__web_info",
+            "xdt_api__v1__clips_home__web_info",
+            "if_not_gated_logged_out",
+            "video_versions",
+            "video_url",
+            "carousel_media",
+            "image_versions2",
+            "media_type",
+            "is_video"
+        )
+
+        fun formatSizeBucket(bytes: Int): String = when {
+            bytes < 10 * 1024 -> "<10KB"
+            bytes <= 100 * 1024 -> "10-100KB"
+            else -> ">100KB"
+        }
+
+        fun cleanHostAndPath(urlStr: String): String {
+            return try {
+                val uri = java.net.URI(urlStr)
+                val host = uri.host ?: ""
+                val path = uri.path ?: ""
+                "$host$path"
+            } catch (_: Exception) {
+                urlStr.substringBefore('?').substringBefore('#')
+            }
+        }
 
         fun isExcludedContainerKey(key: String): Boolean {
             return key in listOf(
@@ -103,39 +138,46 @@ class NativeInstagramEngine(
             maxDepth: Int
         ) {
             if (root == null || currentDepth > maxDepth) return
+            if (root is String) {
+                val trimmed = root.trim()
+                val start = minOf(
+                    trimmed.indexOf('{').takeIf { it >= 0 } ?: Int.MAX_VALUE,
+                    trimmed.indexOf('[').takeIf { it >= 0 } ?: Int.MAX_VALUE
+                )
+                if (start != Int.MAX_VALUE) {
+                    val isObj = trimmed[start] == '{'
+                    val end = if (isObj) trimmed.lastIndexOf('}') else trimmed.lastIndexOf(']')
+                    if (end > start) {
+                        val sub = trimmed.substring(start, end + 1)
+                        try {
+                            if (isObj) {
+                                val obj = JSONObject(sub)
+                                candidates.add(obj)
+                                collectNestedJsonStrings(obj, candidates, currentDepth + 1, maxDepth)
+                            } else {
+                                val arr = JSONArray(sub)
+                                for (i in 0 until arr.length()) {
+                                    collectNestedJsonStrings(arr.opt(i), candidates, currentDepth + 1, maxDepth)
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                return
+            }
             if (root is JSONObject) {
                 val keys = root.keys()
                 while (keys.hasNext()) {
                     val key = keys.next()
                     if (isExcludedContainerKey(key)) continue
                     val value = root.opt(key)
-                    if (value is String) {
-                        val trimmed = value.trim()
-                        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-                            try {
-                                val nestedObj = JSONObject(trimmed)
-                                candidates.add(nestedObj)
-                                collectNestedJsonStrings(nestedObj, candidates, currentDepth + 1, maxDepth)
-                            } catch (_: Exception) {}
-                        } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-                            try {
-                                val nestedArr = JSONArray(trimmed)
-                                for (i in 0 until nestedArr.length()) {
-                                    val item = nestedArr.optJSONObject(i)
-                                    if (item != null) {
-                                        candidates.add(item)
-                                        collectNestedJsonStrings(item, candidates, currentDepth + 1, maxDepth)
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    } else if (value is JSONObject) {
+                    if (value is String || value is JSONObject || value is JSONArray) {
                         collectNestedJsonStrings(value, candidates, currentDepth, maxDepth)
-                    } else if (value is JSONArray) {
-                        for (i in 0 until value.length()) {
-                            collectNestedJsonStrings(value.opt(i), candidates, currentDepth, maxDepth)
-                        }
                     }
+                }
+            } else if (root is JSONArray) {
+                for (i in 0 until root.length()) {
+                    collectNestedJsonStrings(root.opt(i), candidates, currentDepth, maxDepth)
                 }
             }
         }
@@ -303,6 +345,9 @@ class NativeInstagramEngine(
     var lastProfileSequence: List<String> = emptyList()
         private set
 
+    override var lastDiagnosticFingerprint: String? = null
+        private set
+
     override fun supports(platform: Platform): Boolean = platform == Platform.INSTAGRAM
 
     override fun cancelDownload() {
@@ -346,16 +391,67 @@ class NativeInstagramEngine(
         return if (query.isNotBlank()) "$canonical?$query" else canonical
     }
 
+    data class InstagramDiagnostics(
+        val appJsonCount: Int = 0,
+        val dataSjsCount: Int = 0,
+        val genericScriptCount: Int = 0,
+        val rawShortcodeSeen: Boolean = false,
+        val decodedShortcodeSeen: Boolean = false,
+        val targetWrapperSeen: Boolean = false,
+        val validatedMediaNodeFound: Boolean = false,
+        val matchedKeys: List<String> = emptyList(),
+        val presentMarkers: List<String> = emptyList(),
+        val restrictionPhrase: String = "NONE",
+        val stage: String = "INIT"
+    )
+
+    data class InstagramParseOutcome(
+        val result: MetaExtractionResult,
+        val diagnostics: InstagramDiagnostics
+    )
+
     fun parseInstagramPage(html: String, targetShortcode: String, canonicalUrl: String): MetaExtractionResult {
+        return parseInstagramPageWithDiagnostics(html, targetShortcode, canonicalUrl).result
+    }
+
+    fun parseInstagramPageWithDiagnostics(
+        html: String,
+        targetShortcode: String,
+        canonicalUrl: String
+    ): InstagramParseOutcome {
+        val rawShortcodeSeen = html.contains(targetShortcode)
+        val presentMarkers = INSTAGRAM_MARKERS.filter { html.contains(it) }
+
+        fun countMatches(p: Pattern): Int {
+            val m = p.matcher(html)
+            var c = 0
+            while (m.find()) c++
+            return c
+        }
+        val appJsonCount = countMatches(SCRIPT_JSON_PATTERN)
+        val dataSjsCount = countMatches(DATA_SJS_PATTERN)
+        val genericScriptCount = countMatches(GENERIC_SCRIPT_PATTERN)
+
+        val baseDiag = InstagramDiagnostics(
+            appJsonCount = appJsonCount,
+            dataSjsCount = dataSjsCount,
+            genericScriptCount = genericScriptCount,
+            rawShortcodeSeen = rawShortcodeSeen,
+            presentMarkers = presentMarkers
+        )
+
         // 1. Check for audience/content restriction
         if (html.contains("This content isn't available to everyone", ignoreCase = true) ||
             html.contains("It can't be seen by certain audiences", ignoreCase = true)
         ) {
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Restricted(
-                    RestrictionReason.AUDIENCE_RESTRICTED,
-                    "此 Instagram 內容限制部分使用者觀看，匿名模式無法存取。"
-                )
+            return InstagramParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Restricted(
+                        RestrictionReason.AUDIENCE_RESTRICTED,
+                        "此 Instagram 內容限制部分使用者觀看，匿名模式無法存取。"
+                    )
+                ),
+                baseDiag.copy(restrictionPhrase = "AUDIENCE_RESTRICTED", stage = "RESTRICTION_CHECK")
             )
         }
 
@@ -363,15 +459,18 @@ class NativeInstagramEngine(
         if (html.contains("Sorry, this page isn't available.", ignoreCase = true) ||
             html.contains("The link you followed may be broken, or the page may have been removed.", ignoreCase = true)
         ) {
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Restricted(
-                    RestrictionReason.DELETED_OR_PRIVATE,
-                    "Instagram 貼文不存在、設為私人內容或已被刪除"
-                )
+            return InstagramParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Restricted(
+                        RestrictionReason.DELETED_OR_PRIVATE,
+                        "Instagram 貼文不存在、設為私人內容或已被刪除"
+                    )
+                ),
+                baseDiag.copy(restrictionPhrase = "DELETED_OR_PRIVATE", stage = "DELETED_CHECK")
             )
         }
 
-        // 3. Scan script tags for JSON payloads (application/json, _sharedData, data-sjs, etc.)
+        // 3. Scan script tags for JSON payloads (application/json, _sharedData, data-sjs, generic scripts)
         val candidates = mutableListOf<JSONObject>()
 
         fun scanScriptPatterns(pattern: Pattern, targetMarker: String? = null) {
@@ -385,15 +484,30 @@ class NativeInstagramEngine(
         scanScriptPatterns(SCRIPT_JSON_PATTERN)
         scanScriptPatterns(SHARED_DATA_PATTERN)
         scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode)
+        scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode)
+
+        val decodedShortcodeSeen = candidates.any { it.toString().contains(targetShortcode) }
+        val diagWithDecode = baseDiag.copy(decodedShortcodeSeen = decodedShortcodeSeen)
 
         val targetId = shortcodeToId(targetShortcode)
 
-        // 4. Primary: inspect xdt_api__v1__media__shortcode__web_info.items[0]
+        // 4. Primary: inspect xdt endpoints (media shortcode web info, clips web info, shortcode media)
         for (candidate in candidates) {
             val xdtMedia = findXdtMediaItem(candidate, targetShortcode, targetId)
             if (xdtMedia != null) {
+                val keys = xdtMedia.keys().asSequence().toList().sorted()
                 val extracted = extractFromMediaObject(xdtMedia, targetShortcode, canonicalUrl)
-                if (extracted != null) return extracted
+                if (extracted != null) {
+                    return InstagramParseOutcome(
+                        extracted,
+                        diagWithDecode.copy(
+                            targetWrapperSeen = true,
+                            validatedMediaNodeFound = true,
+                            matchedKeys = keys,
+                            stage = "XDT_MEDIA"
+                        )
+                    )
+                }
             }
         }
 
@@ -410,28 +524,62 @@ class NativeInstagramEngine(
         }
 
         if (matchedMediaNode != null) {
+            val keys = matchedMediaNode.keys().asSequence().toList().sorted()
             val extracted = extractFromMediaObject(matchedMediaNode, targetShortcode, canonicalUrl)
-            if (extracted != null) return extracted
-
-            // Only return terminal NoVideo if target media node is positively verified to have no video
-            if (isValidImageOnlyNode(matchedMediaNode)) {
-                return MetaExtractionResult.Failure(
-                    MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (可能為純圖片貼文)")
+            if (extracted != null) {
+                return InstagramParseOutcome(
+                    extracted,
+                    diagWithDecode.copy(
+                        targetWrapperSeen = true,
+                        validatedMediaNodeFound = true,
+                        matchedKeys = keys,
+                        stage = "SHORTCODE_SEARCH"
+                    )
                 )
             }
 
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Technical(
-                    "Target shortcode $targetShortcode media node found but lacks recognized video structure or explicit photo type"
+            // Only return terminal NoVideo if target media node is positively verified to have no video
+            if (isValidImageOnlyNode(matchedMediaNode)) {
+                return InstagramParseOutcome(
+                    MetaExtractionResult.Failure(
+                        MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (可能為純圖片貼文)")
+                    ),
+                    diagWithDecode.copy(
+                        targetWrapperSeen = true,
+                        validatedMediaNodeFound = true,
+                        matchedKeys = keys,
+                        stage = "NO_VIDEO_VALIDATED"
+                    )
+                )
+            }
+
+            return InstagramParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Technical(
+                        "Target shortcode $targetShortcode media node found but lacks recognized video structure or explicit photo type"
+                    )
+                ),
+                diagWithDecode.copy(
+                    targetWrapperSeen = true,
+                    validatedMediaNodeFound = false,
+                    matchedKeys = keys,
+                    stage = "MEDIA_NODE_LACKS_VIDEO"
                 )
             )
         }
 
         // If target wrapper was found but no validated media node resolved, do NOT return NoVideo
         if (targetWrapperSeen) {
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Technical(
-                    "Target shortcode $targetShortcode wrapper found in page data, but no validated media node resolved"
+            return InstagramParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Technical(
+                        "Target shortcode $targetShortcode wrapper found in page data, but no validated media node resolved"
+                    )
+                ),
+                diagWithDecode.copy(
+                    targetWrapperSeen = true,
+                    validatedMediaNodeFound = false,
+                    stage = "WRAPPER_SEEN_NO_MEDIA"
                 )
             )
         }
@@ -466,7 +614,7 @@ class NativeInstagramEngine(
                                 ld.optString("description").ifBlank { "Instagram 影片 ($targetShortcode)" }
                             }
                             val thumb = ld.optString("thumbnailUrl").ifBlank { null }?.let { normalizeCdnUrl(it) }
-                            return MetaExtractionResult.Success(
+                            val res = MetaExtractionResult.Success(
                                 ExtractedMetaMedia(
                                     postId = targetShortcode,
                                     canonicalUrl = canonicalUrl,
@@ -478,6 +626,14 @@ class NativeInstagramEngine(
                                     heights = listOf(1080)
                                 )
                             )
+                            return InstagramParseOutcome(
+                                res,
+                                diagWithDecode.copy(
+                                    targetWrapperSeen = true,
+                                    validatedMediaNodeFound = true,
+                                    stage = "LD_JSON_VIDEO"
+                                )
+                            )
                         }
                     }
                 }
@@ -486,19 +642,28 @@ class NativeInstagramEngine(
 
         // 7. Check if login-gated without target media
         if (html.contains("/accounts/login/") || html.contains("<title>Login • Instagram</title>", ignoreCase = true)) {
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Restricted(
-                    RestrictionReason.LOGIN_REQUIRED,
-                    "來源網站需要登入帳號驗證，目前版本不支援登入下載"
+            return InstagramParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Restricted(
+                        RestrictionReason.LOGIN_REQUIRED,
+                        "來源網站需要登入帳號驗證，目前版本不支援登入下載"
+                    )
+                ),
+                diagWithDecode.copy(
+                    restrictionPhrase = "LOGIN_REQUIRED",
+                    stage = "LOGIN_GATED"
                 )
             )
         }
 
         // 8. Technical failure: target shortcode missing from page data
-        return MetaExtractionResult.Failure(
-            MetaExtractionError.Technical(
-                "Target shortcode $targetShortcode not found in page data"
-            )
+        return InstagramParseOutcome(
+            MetaExtractionResult.Failure(
+                MetaExtractionError.Technical(
+                    "Target shortcode $targetShortcode not found in page data"
+                )
+            ),
+            diagWithDecode.copy(stage = "TARGET_NOT_IN_PAGE")
         )
     }
 
@@ -540,12 +705,24 @@ class NativeInstagramEngine(
     private fun findXdtMediaItem(root: Any?, shortcode: String, targetId: Long): JSONObject? {
         if (root == null) return null
         if (root is JSONObject) {
-            val xdt = root.optJSONObject("xdt_api__v1__media__shortcode__web_info")
-            if (xdt != null) {
-                val items = xdt.optJSONArray("items")
+            val xdtWebInfo = root.optJSONObject("xdt_api__v1__media__shortcode__web_info")
+                ?: root.optJSONObject("xdt_api__v1__clips__clips__web_info")
+                ?: root.optJSONObject("xdt_api__v1__clips__home__web_info")
+                ?: root.optJSONObject("xdt_api__v1__clips_home__web_info")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_api__v1__clips__clips__web_info")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_api__v1__clips__home__web_info")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_api__v1__clips_home__web_info")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_api__v1__media__shortcode__web_info")
+            if (xdtWebInfo != null) {
+                val items = xdtWebInfo.optJSONArray("items")
+                    ?: xdtWebInfo.optJSONArray("clips_items")
+                    ?: xdtWebInfo.optJSONArray("edges")
                 if (items != null && items.length() > 0) {
                     for (i in 0 until items.length()) {
-                        val item = items.optJSONObject(i) ?: continue
+                        val rawItem = items.optJSONObject(i) ?: continue
+                        val item = rawItem.optJSONObject("media")
+                            ?: rawItem.optJSONObject("node")
+                            ?: rawItem
                         val code = item.optString("code").ifBlank { item.optString("shortcode") }
                         val id = item.optString("id").ifBlank { item.optString("pk") }
                         val isCodeMatch = code.isNotBlank() && code == shortcode
@@ -558,6 +735,25 @@ class NativeInstagramEngine(
                             return item
                         }
                     }
+                }
+            }
+
+            // Check xdt_shortcode_media or shortcode_media directly
+            val shortcodeMedia = root.optJSONObject("xdt_shortcode_media")
+                ?: root.optJSONObject("shortcode_media")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_shortcode_media")
+                ?: root.optJSONObject("data")?.optJSONObject("shortcode_media")
+            if (shortcodeMedia != null) {
+                val code = shortcodeMedia.optString("shortcode").ifBlank { shortcodeMedia.optString("code") }
+                val id = shortcodeMedia.optString("id").ifBlank { shortcodeMedia.optString("pk") }
+                val isCodeMatch = code.isNotBlank() && code == shortcode
+                val isIdMatch = targetId > 0 && id.isNotBlank() && (id == targetId.toString() || id.startsWith(targetId.toString()))
+                if (isCodeMatch || isIdMatch) {
+                    val gated = shortcodeMedia.optJSONObject("if_not_gated_logged_out")
+                    if (gated != null && hasDirectVideoOrCarousel(gated)) {
+                        return gated
+                    }
+                    return shortcodeMedia
                 }
             }
 
@@ -581,14 +777,15 @@ class NativeInstagramEngine(
         if (root == null) return MediaSearchResult()
         var wrapperSeen = false
         if (root is JSONObject) {
-            val code = root.optString("shortcode").ifBlank { root.optString("code") }
-            val id = root.optString("id").ifBlank { root.optString("pk") }
+            val targetObj = root.optJSONObject("media") ?: root
+            val code = targetObj.optString("shortcode").ifBlank { targetObj.optString("code") }
+            val id = targetObj.optString("id").ifBlank { targetObj.optString("pk") }
             val isCodeMatch = code.isNotBlank() && code == shortcode
             val isIdMatch = targetId > 0 && id.isNotBlank() && (id == targetId.toString() || id.startsWith(targetId.toString()))
 
             if (isCodeMatch || isIdMatch) {
                 wrapperSeen = true
-                val gated = root.optJSONObject("if_not_gated_logged_out")
+                val gated = targetObj.optJSONObject("if_not_gated_logged_out")
                 if (gated != null) {
                     val gatedCode = gated.optString("shortcode").ifBlank { gated.optString("code") }
                     val gatedId = gated.optString("id").ifBlank { gated.optString("pk") }
@@ -603,22 +800,22 @@ class NativeInstagramEngine(
                     }
                 }
 
-                if (hasDirectVideoOrCarousel(root)) {
-                    return MediaSearchResult(mediaNode = root, wrapperSeen = true)
+                if (hasDirectVideoOrCarousel(targetObj)) {
+                    return MediaSearchResult(mediaNode = targetObj, wrapperSeen = true)
                 }
 
-                val keys = root.keys()
+                val keys = targetObj.keys()
                 while (keys.hasNext()) {
                     val key = keys.next()
                     if (isExcludedContainerKey(key)) continue
-                    val child = root.opt(key)
+                    val child = targetObj.opt(key)
                     val childResult = findMediaWithShortcode(child, shortcode, targetId)
                     if (childResult.wrapperSeen) wrapperSeen = true
                     if (childResult.mediaNode != null) return childResult
                 }
 
-                if (isValidImageOnlyNode(root)) {
-                    return MediaSearchResult(mediaNode = root, wrapperSeen = true)
+                if (isValidImageOnlyNode(targetObj)) {
+                    return MediaSearchResult(mediaNode = targetObj, wrapperSeen = true)
                 }
 
                 return MediaSearchResult(mediaNode = null, wrapperSeen = true)
@@ -811,7 +1008,30 @@ class NativeInstagramEngine(
             val resp = httpSession.fetch(requestUrl, profile)
             val html = resp.getOrNull()?.body ?: ""
 
-            val parseResult = parseInstagramPage(html, shortcode, canonicalUrl)
+            val parseOutcome = parseInstagramPageWithDiagnostics(html, shortcode, canonicalUrl)
+            val parseResult = parseOutcome.result
+            val diag = parseOutcome.diagnostics
+
+            val httpCode = resp.getOrNull()?.code ?: 0
+            val contentType = resp.getOrNull()?.getHeader("content-type") ?: "text/html"
+            val bodyBytes = html.toByteArray().size
+            val sizeBucket = formatSizeBucket(bodyBytes)
+            val cleanPath = cleanHostAndPath(requestUrl)
+            val redirect = if (resp.getOrNull()?.finalUrl != null && resp.getOrNull()?.finalUrl != requestUrl) "yes" else "no"
+            val errorClassName = when (parseResult) {
+                is MetaExtractionResult.Success -> "NONE"
+                is MetaExtractionResult.Failure -> parseResult.error.javaClass.simpleName
+            }
+
+            lastDiagnosticFingerprint = """
+                platform=INSTAGRAM shortcode=$shortcode profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName fallback_attempted=no
+                scripts: app_json=${diag.appJsonCount} data_sjs=${diag.dataSjsCount} generic=${diag.genericScriptCount}
+                target: raw=${diag.rawShortcodeSeen} decoded=${diag.decodedShortcodeSeen} wrapper=${diag.targetWrapperSeen} media_node=${diag.validatedMediaNodeFound}
+                keys: ${if (diag.matchedKeys.isNotEmpty()) diag.matchedKeys.joinToString(",") else "none"}
+                markers: ${if (diag.presentMarkers.isNotEmpty()) diag.presentMarkers.joinToString(",") else "none"}
+                restriction: ${diag.restrictionPhrase}
+            """.trimIndent()
+
             when (parseResult) {
                 is MetaExtractionResult.Success -> {
                     safeLog("[Instagram] profile=$name target_id_match=true actual_media=true")

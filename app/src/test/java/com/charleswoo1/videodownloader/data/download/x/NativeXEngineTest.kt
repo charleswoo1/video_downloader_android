@@ -547,4 +547,143 @@ class NativeXEngineTest {
         assertEquals("Expected MEDIA_URL_UNSUPPORTED, NEVER NO_VIDEO", PlatformErrorCode.MEDIA_URL_UNSUPPORTED, error?.code)
         assertTrue("Must allow fallback to secondary engines", error?.canFallback ?: false)
     }
+
+    @Test
+    fun parseGraphQLTweet_distinguishableInternalReasons() {
+        // Missing legacy
+        val missingLegacyJson = JSONObject("""{"data":{"tweetResult":{"result":{"__typename":"Tweet"}}}}""")
+        val resLegacy = engine.parseGraphQLTweet(missingLegacyJson, "https://x.com/i/status/1", "1")
+        val errLegacy = resLegacy.exceptionOrNull() as? PlatformExtractionError
+        assertEquals("GRAPHQL_MISSING_LEGACY", errLegacy?.internalReason)
+
+        // Provisional unavailable
+        val unavailJson = JSONObject("""{"data":{"tweetResult":{"result":{"__typename":"TweetUnavailable"}}}}""")
+        val resUnavail = engine.parseGraphQLTweet(unavailJson, "https://x.com/i/status/2", "2")
+        val errUnavail = resUnavail.exceptionOrNull() as? PlatformExtractionError
+        assertEquals("GRAPHQL_PROVISIONAL_UNAVAILABLE:TweetUnavailable", errUnavail?.internalReason)
+
+        // Target wrapper unsupported
+        val wrapperJson = JSONObject("""{"data":{}}""")
+        val resWrapper = engine.parseGraphQLTweet(wrapperJson, "https://x.com/i/status/3", "3")
+        val errWrapper = resWrapper.exceptionOrNull() as? PlatformExtractionError
+        assertEquals("GRAPHQL_TARGET_WRAPPER_UNSUPPORTED", errWrapper?.internalReason)
+
+        // No direct media
+        val noMediaJson = JSONObject("""{"data":{"tweetResult":{"result":{"legacy":{"full_text":"Hi"}}}}}""")
+        val resNoMedia = engine.parseGraphQLTweet(noMediaJson, "https://x.com/i/status/4", "4")
+        val errNoMedia = resNoMedia.exceptionOrNull() as? PlatformExtractionError
+        assertEquals("GRAPHQL_NO_DIRECT_MEDIA", errNoMedia?.internalReason)
+    }
+
+    @Test
+    fun parseGraphQLTweet_quotedTweetMedia_extractsSuccessfully() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "legacy": {"full_text": "Check out this quoted tweet"},
+                    "quoted_status_result": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "legacy": {
+                          "extended_entities": {
+                            "media": [
+                              {
+                                "type": "video",
+                                "video_info": {
+                                  "variants": [
+                                    {"content_type": "video/mp4", "url": "https://video.twimg.com/quoted.mp4", "bitrate": 500000}
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/555", "555")
+        assertTrue("Quoted tweet media must be extracted successfully", result.isSuccess)
+        val media = result.getOrThrow()
+        assertEquals("https://video.twimg.com/quoted.mp4", media.renditions.first().url)
+    }
+
+    @Test
+    fun parseGraphQLTweet_unifiedCardMedia_extractsSuccessfully() {
+        val unifiedCardJsonStr = JSONObject().apply {
+            put("media_entities", JSONObject().apply {
+                put("card_media_1", JSONObject().apply {
+                    put("type", "video")
+                    put("video_info", JSONObject().apply {
+                        put("variants", org.json.JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("content_type", "video/mp4")
+                                put("url", "https://video.twimg.com/card_video.mp4")
+                                put("bitrate", 800000)
+                            })
+                        })
+                    })
+                })
+            })
+        }.toString()
+
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "legacy": {"full_text": "Card tweet"},
+                    "card": {
+                      "legacy": {
+                        "binding_values": [
+                          {
+                            "key": "unified_card",
+                            "value": {
+                              "string_value": ${JSONObject.quote(unifiedCardJsonStr)}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/777", "777")
+        assertTrue("Card media must be extracted successfully", result.isSuccess)
+        val media = result.getOrThrow()
+        assertEquals("https://video.twimg.com/card_video.mp4", media.renditions.first().url)
+    }
+
+    @Test
+    fun parseHtmlFallback_openGraphVideoFallback_extractsSuccessfully() = runBlocking {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta property="og:title" content="OpenGraph Video Title" />
+              <meta property="og:image" content="https://pbs.twimg.com/media/og_thumb.jpg" />
+              <meta property="og:video:url" content="https://video.twimg.com/ext_tw_video/og_stream.mp4" />
+            </head>
+            <body>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseHtmlFallback(html, "https://x.com/i/status/999", "999")
+        assertTrue("OpenGraph stream should be extracted successfully", result.isSuccess)
+        val media = result.getOrThrow()
+        assertEquals("OpenGraph Video Title", media.title)
+        assertEquals("https://video.twimg.com/ext_tw_video/og_stream.mp4", media.renditions.first().url)
+    }
 }

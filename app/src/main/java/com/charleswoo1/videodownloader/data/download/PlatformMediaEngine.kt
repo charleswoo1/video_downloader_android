@@ -11,6 +11,8 @@ import java.io.File
 interface PlatformMediaEngine {
     val name: String
 
+    val lastDiagnosticFingerprint: String? get() = null
+
     fun supports(platform: Platform): Boolean
 
     suspend fun extractMediaInfo(url: String): Result<MediaInfo>

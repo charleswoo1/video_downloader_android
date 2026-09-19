@@ -874,4 +874,135 @@ class NativeThreadsEngineTest {
         assertTrue("Expected Technical error allowing fallback, found: $error", error is MetaExtractionError.Technical)
         assertTrue("Must be fallback-eligible", error.canFallback)
     }
+
+    @Test
+    fun parseThreadsPage_replyPostDdcJ4wwkjVQ_inReplyThreads_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "reply_threads": [
+                    {
+                      "thread_items": [
+                        {
+                          "post": {
+                            "code": "DdcJ4wwkjVQ",
+                            "user": {"username": "reply_user"},
+                            "caption": {"text": "Reply video in reply_threads"},
+                            "video_versions": [
+                              {"url": "https://threads.net/cdn/reply_video.mp4", "width": 1080, "height": 1920}
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseThreadsPageWithDiagnostics(html, "DdcJ4wwkjVQ", "https://www.threads.com/@reply_user/post/DdcJ4wwkjVQ")
+        assertTrue("Expected success for reply post DdcJ4wwkjVQ", outcome.result is MetaExtractionResult.Success)
+        val media = (outcome.result as MetaExtractionResult.Success).media
+        assertEquals("DdcJ4wwkjVQ", media.postId)
+        assertEquals("reply_user", media.uploader)
+        assertTrue(outcome.diagnostics.targetWrapperFound)
+        assertTrue(outcome.diagnostics.mediaNodeFound)
+    }
+
+    @Test
+    fun parseThreadsPage_nestedMediaPostDdbxeeBjzNO_inTextPostAppInfoMedia_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "DdbxeeBjzNO",
+                        "user": {"username": "nested_user"},
+                        "caption": {"text": "Nested media post"},
+                        "text_post_app_info": {
+                          "share_info": {
+                            "media": {
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/nested_video.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseThreadsPageWithDiagnostics(html, "DdbxeeBjzNO", "https://www.threads.com/@nested_user/post/DdbxeeBjzNO")
+        assertTrue("Expected success for DdbxeeBjzNO in share_info.media", outcome.result is MetaExtractionResult.Success)
+        val media = (outcome.result as MetaExtractionResult.Success).media
+        assertEquals("DdbxeeBjzNO", media.postId)
+        assertEquals("nested_user", media.uploader)
+        assertTrue(outcome.diagnostics.targetWrapperFound)
+        assertTrue(outcome.diagnostics.mediaNodeFound)
+    }
+
+    @Test
+    fun parseThreadsPage_targetIsolationRejectsMismatchedPostCode() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "UnrelatedPost123",
+                        "video_versions": [{"url": "https://threads.net/cdn/unrelated.mp4", "width": 720, "height": 1280}]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseThreadsPageWithDiagnostics(html, "WantedPostCode", "https://www.threads.com/@u/post/WantedPostCode")
+        assertTrue("Target isolation must reject mismatched code", outcome.result is MetaExtractionResult.Failure)
+        assertFalse(outcome.diagnostics.targetWrapperFound)
+        assertFalse(outcome.diagnostics.mediaNodeFound)
+    }
+
+    @Test
+    fun parseThreadsPage_diagnosticFingerprintContainsExpectedFields() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {"data":{"post":{"code":"DiagPost123","video_versions":[{"url":"https://threads.net/v.mp4","width":720,"height":1280}]}}}
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseThreadsPageWithDiagnostics(html, "DiagPost123", "https://www.threads.com/@u/post/DiagPost123", resolvedShare = true)
+        val diag = outcome.diagnostics
+        assertTrue(diag.resolvedShare)
+        assertEquals(1, diag.scriptCount)
+        assertTrue(diag.rawCodeInHtml)
+        assertTrue(diag.decodedCodeInHtml)
+        assertTrue(diag.targetWrapperFound)
+        assertTrue(diag.mediaNodeFound)
+    }
 }

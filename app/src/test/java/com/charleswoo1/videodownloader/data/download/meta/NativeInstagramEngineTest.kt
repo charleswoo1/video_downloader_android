@@ -958,4 +958,104 @@ class NativeInstagramEngineTest {
         assertEquals(1, fakeSession.mobileCalled)
         assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
+
+    @Test
+    fun parseInstagramPage_reelDdcwYWzxZI7_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "require": [
+                [
+                  "RelayPrefetchedStreamCache",
+                  "next",
+                  [],
+                  [
+                    "xdt_api__v1__clips__home__web_info:{\"data\":{\"xdt_api__v1__clips__home__web_info\":{\"items\":[{\"media\":{\"code\":\"DdcwYWzxZI7\",\"id\":\"333444\",\"owner\":{\"username\":\"creator_ddcw\"},\"video_versions\":[{\"url\":\"https://cdninstagram.com/o1/v/t2/f2/m/ddcw.mp4\",\"width\":1080,\"height\":1920}]}}]}}}"
+                  ]
+                ]
+              ]
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(html, "DdcwYWzxZI7", "https://www.instagram.com/reel/DdcwYWzxZI7/")
+        assertTrue("Expected success for DdcwYWzxZI7", outcome.result is MetaExtractionResult.Success)
+        val media = (outcome.result as MetaExtractionResult.Success).media
+        assertEquals("DdcwYWzxZI7", media.postId)
+        assertEquals("creator_ddcw", media.uploader)
+        assertTrue(outcome.diagnostics.targetWrapperSeen)
+        assertTrue(outcome.diagnostics.validatedMediaNodeFound)
+    }
+
+    @Test
+    fun parseInstagramPage_reelDcvXZ8PnbK_clipsContainer_extractsSuccessfully() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "xdt_api__v1__clips__clips__web_info": {
+                  "items": [
+                    {
+                      "code": "DcvXZ-8PnbK",
+                      "id": "777888",
+                      "owner": {"username": "creator_dcv"},
+                      "video_versions": [
+                        {"url": "https://cdninstagram.com/o1/v/t2/f2/m/dcv.mp4", "width": 1080, "height": 1920}
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(html, "DcvXZ-8PnbK", "https://www.instagram.com/reel/DcvXZ-8PnbK/")
+        assertTrue("Expected success for DcvXZ-8PnbK clips container", outcome.result is MetaExtractionResult.Success)
+        val media = (outcome.result as MetaExtractionResult.Success).media
+        assertEquals("DcvXZ-8PnbK", media.postId)
+        assertEquals("creator_dcv", media.uploader)
+        assertTrue(outcome.diagnostics.targetWrapperSeen)
+        assertTrue(outcome.diagnostics.validatedMediaNodeFound)
+    }
+
+    @Test
+    fun parseInstagramPage_diagnosticFingerprintContainsExpectedFields() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {"data":{"xdt_shortcode_media":{"code":"DiagTestPost","id":"123","video_versions":[{"url":"https://cdninstagram.com/v.mp4","width":720,"height":1280}]}}}
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(html, "DiagTestPost", "https://www.instagram.com/reel/DiagTestPost/")
+        val diag = outcome.diagnostics
+        assertEquals(1, diag.appJsonCount)
+        assertTrue(diag.rawShortcodeSeen)
+        assertTrue(diag.decodedShortcodeSeen)
+        assertTrue(diag.targetWrapperSeen)
+        assertTrue(diag.validatedMediaNodeFound)
+        assertTrue(diag.matchedKeys.contains("video_versions"))
+    }
+
+    @Test
+    fun parseInstagramPage_targetIsolationRejectsMismatchedShortcode() {
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {"data":{"xdt_shortcode_media":{"code":"OtherPost","id":"999","video_versions":[{"url":"https://cdninstagram.com/other.mp4","width":720,"height":1280}]}}}
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val outcome = engine.parseInstagramPageWithDiagnostics(html, "TargetPostWanted", "https://www.instagram.com/reel/TargetPostWanted/")
+        assertTrue("Target isolation must reject mismatched shortcode", outcome.result is MetaExtractionResult.Failure)
+        assertFalse(outcome.diagnostics.targetWrapperSeen)
+        assertFalse(outcome.diagnostics.validatedMediaNodeFound)
+    }
 }

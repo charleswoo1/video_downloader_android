@@ -22,8 +22,9 @@ sealed class MetaExtractionError(
     code: PlatformErrorCode,
     userMessage: String,
     canFallback: Boolean,
+    internalReason: String? = null,
     cause: Throwable? = null
-) : PlatformExtractionError(code, userMessage, canFallback, cause) {
+) : PlatformExtractionError(code, userMessage, canFallback, internalReason, cause) {
 
     /**
      * Technical failures where secondary engine fallback is reasonable
@@ -32,11 +33,13 @@ sealed class MetaExtractionError(
     class Technical(
         val detail: String,
         userMessage: String = "暫時無法解析此貼文。平台可能未提供匿名媒體資料，或頁面格式已變更。",
+        internalReason: String? = null,
         cause: Throwable? = null
     ) : MetaExtractionError(
         PlatformErrorCode.PARSE_ERROR,
         userMessage,
         canFallback = true,
+        internalReason = internalReason,
         cause = cause
     )
 
@@ -46,7 +49,8 @@ sealed class MetaExtractionError(
      */
     class Restricted(
         val reason: RestrictionReason,
-        userMessage: String
+        userMessage: String,
+        internalReason: String? = null
     ) : MetaExtractionError(
         when (reason) {
             RestrictionReason.AUDIENCE_RESTRICTED -> PlatformErrorCode.AUDIENCE_RESTRICTED
@@ -54,7 +58,8 @@ sealed class MetaExtractionError(
             RestrictionReason.DELETED_OR_PRIVATE -> PlatformErrorCode.DELETED_OR_NOT_FOUND
         },
         userMessage,
-        canFallback = false
+        canFallback = false,
+        internalReason = internalReason
     )
 
     /**
@@ -62,15 +67,17 @@ sealed class MetaExtractionError(
      * Strictly prohibited from falling back to prevent grabbing unrelated recommended videos.
      */
     class NoVideo(
-        userMessage: String = "此貼文未包含可下載的影片內容 (可能為純文字或純圖片)"
-    ) : MetaExtractionError(PlatformErrorCode.NO_VIDEO, userMessage, canFallback = false)
+        userMessage: String = "此貼文未包含可下載的影片內容 (可能為純文字或純圖片)",
+        internalReason: String? = null
+    ) : MetaExtractionError(PlatformErrorCode.NO_VIDEO, userMessage, canFallback = false, internalReason = internalReason)
 
     /**
      * Malformed or unrecognized URL structure.
      */
     class InvalidUrl(
-        userMessage: String = "無效的貼文網址，無法識別目標內容"
-    ) : MetaExtractionError(PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED, userMessage, canFallback = false)
+        userMessage: String = "無效的貼文網址，無法識別目標內容",
+        internalReason: String? = null
+    ) : MetaExtractionError(PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED, userMessage, canFallback = false, internalReason = internalReason)
 }
 
 /**

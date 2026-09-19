@@ -198,12 +198,23 @@ fun MainScreen(
                         containerColor = MaterialTheme.colorScheme.secondaryContainer
                     )
                 ) {
-                    Text(
-                        text = engineTrace!!.toDisplaySummary(),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    Column(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
+                    ) {
+                        Text(
+                            text = engineTrace!!.toDisplaySummary(),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        engineTrace?.diagnosticFingerprint?.takeIf { it.isNotBlank() }?.let { diag ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = diag,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
                 }
             }
 

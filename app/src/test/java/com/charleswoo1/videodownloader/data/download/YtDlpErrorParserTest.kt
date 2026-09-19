@@ -150,4 +150,21 @@ class YtDlpErrorParserTest {
         assertFalse(result.warnings.first().contains("/data/user/0"))
         assertTrue(result.warnings.first().contains("[REDACTED]") || result.warnings.first().contains("[PRIVATE_PATH]"))
     }
+
+    @Test
+    fun parse_instagramPleaseWaitAFewMinutes_mapsToExtractorFailureNotRateLimited() {
+        val stderr = "ERROR: [Instagram] DdcwYWzxZI7: Please wait a few minutes before you try again."
+        val result = YtDlpErrorParser.parse(stderr, Platform.INSTAGRAM)
+        assertEquals(YtDlpErrorParser.ErrorCategory.EXTRACTOR_FAILURE, result.category)
+        assertTrue(result.userMessage.contains("Instagram 備援解析遭平台拒絕"))
+        assertFalse(result.userMessage.contains("存取頻率受限"))
+    }
+
+    @Test
+    fun parse_confirmedHttp429_mapsToRateLimited() {
+        val stderr = "ERROR: [Instagram] DdcwYWzxZI7: HTTP Error 429: Too Many Requests"
+        val result = YtDlpErrorParser.parse(stderr, Platform.INSTAGRAM)
+        assertEquals(YtDlpErrorParser.ErrorCategory.RATE_LIMITED, result.category)
+        assertTrue(result.userMessage.contains("存取頻率受限"))
+    }
 }

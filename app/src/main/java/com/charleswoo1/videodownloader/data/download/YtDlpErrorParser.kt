@@ -147,10 +147,21 @@ object YtDlpErrorParser {
             msg.contains("Sign in to view", ignoreCase = true) ->
                 Pair(ErrorCategory.LOGIN_REQUIRED, "來源網站需要登入帳號驗證，目前版本不支援登入下載")
 
+            // Confirmed rate limiting: requires HTTP 429, Too Many Requests, or explicit rate-limit markers
+            msg.contains("HTTP Error 429", ignoreCase = true) ||
+            msg.contains("429 Too Many Requests", ignoreCase = true) ||
+            msg.contains("Too Many Requests", ignoreCase = true) ||
             msg.contains("rate-limit", ignoreCase = true) ||
-            msg.contains("rate limit", ignoreCase = true) ||
-            msg.contains("Please wait a few minutes", ignoreCase = true) ->
+            msg.contains("rate limit", ignoreCase = true) ->
                 Pair(ErrorCategory.RATE_LIMITED, "存取頻率受限 (Rate Limited)，請稍候再試")
+
+            // Ambiguous Instagram fallback refusal: "Please wait a few minutes" without confirmed HTTP 429
+            isInstagram && msg.contains("Please wait a few minutes", ignoreCase = true) ->
+                Pair(ErrorCategory.EXTRACTOR_FAILURE, "Instagram 備援解析遭平台拒絕；此內容可能使用不同的公開頁面資料格式")
+
+            // Other platforms with "Please wait a few minutes" without confirmed rate-limit/429
+            msg.contains("Please wait a few minutes", ignoreCase = true) ->
+                Pair(ErrorCategory.EXTRACTOR_FAILURE, "平台暫時拒絕存取請求，請稍後再試：$msg")
 
             msg.contains("Unsupported URL", ignoreCase = true) ->
                 Pair(ErrorCategory.UNSUPPORTED_URL, "不支援的網址或尚未支援該網站之解析")

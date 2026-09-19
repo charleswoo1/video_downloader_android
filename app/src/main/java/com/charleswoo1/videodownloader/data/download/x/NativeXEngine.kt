@@ -60,6 +60,28 @@ class NativeXEngine(
         private val BEARER_TOKEN_FALLBACK_RE = Pattern.compile("""AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%_-]{80,}""")
         private val JS_BUNDLE_RE = Pattern.compile("""https://abs\.twimg\.com/responsive-web/client-web/[^"']+\.js""")
         private val INITIAL_STATE_RE = Pattern.compile("""window\.__INITIAL_STATE__\s*=\s*(\{.+?\});""", Pattern.DOTALL)
+        private val OG_VIDEO_URL_PATTERN = Pattern.compile(
+            """<meta\b(?=[^>]*\b(?:property|name)=["'](?:og:video:url|og:video:secure_url|og:video|twitter:player:stream)["'])(?=[^>]*\bcontent=["']([^"']+)["'])[^>]*>""",
+            Pattern.CASE_INSENSITIVE
+        )
+        private val OG_TITLE_PATTERN = Pattern.compile(
+            """<meta\b(?=[^>]*\b(?:property|name)=["'](?:og:title|twitter:title)["'])(?=[^>]*\bcontent=["']([^"']+)["'])[^>]*>""",
+            Pattern.CASE_INSENSITIVE
+        )
+        private val OG_IMAGE_PATTERN = Pattern.compile(
+            """<meta\b(?=[^>]*\b(?:property|name)=["'](?:og:image|twitter:image)["'])(?=[^>]*\bcontent=["']([^"']+)["'])[^>]*>""",
+            Pattern.CASE_INSENSITIVE
+        )
+
+        fun unescapeHtml(text: String): String {
+            return text
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+        }
 
         private val SECURE_RANDOM = SecureRandom()
 
@@ -132,6 +154,15 @@ class NativeXEngine(
     var lastProfileSequence: List<String> = emptyList()
         private set
 
+    var lastAuthFlow: String = "none"
+        private set
+
+    var lastGuestTokenStatus: String = "none"
+        private set
+
+    override var lastDiagnosticFingerprint: String? = null
+        private set
+
     override fun supports(platform: Platform): Boolean = platform == Platform.X
 
     override fun cancelDownload() {
@@ -153,6 +184,7 @@ class NativeXEngine(
         val tokenFromHtml = extractBearerTokenFromHtml(homeHtml)
         if (!tokenFromHtml.isNullOrBlank()) {
             cachedBearerToken = tokenFromHtml
+            lastAuthFlow = "html"
             return@withContext tokenFromHtml
         }
 
@@ -166,6 +198,7 @@ class NativeXEngine(
             val tokenFromJs = extractBearerTokenFromHtml(jsBody)
             if (!tokenFromJs.isNullOrBlank()) {
                 cachedBearerToken = tokenFromJs
+                lastAuthFlow = "bundle"
                 return@withContext tokenFromJs
             }
             count++
@@ -173,6 +206,7 @@ class NativeXEngine(
 
         // 3. Fallback token
         cachedBearerToken = FALLBACK_BEARER_TOKEN
+        lastAuthFlow = "fallback"
         FALLBACK_BEARER_TOKEN
     }
 
@@ -182,12 +216,16 @@ class NativeXEngine(
             httpSession.cookieJar.removeCookie("x.com", "gt")
             httpSession.cookieJar.removeCookie("twitter.com", "gt")
         } else {
-            cachedGuestToken?.let { return@withContext it }
+            cachedGuestToken?.let {
+                lastGuestTokenStatus = "cached"
+                return@withContext it
+            }
 
             // 1. Check cookie jar first
             val cookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
             if (!cookieGt.isNullOrBlank()) {
                 cachedGuestToken = cookieGt
+                lastGuestTokenStatus = "cached"
                 return@withContext cookieGt
             }
         }
@@ -211,6 +249,7 @@ class NativeXEngine(
         val headerGt = hashResp.getOrNull()?.getHeader("x-guest-token")
         if (!headerGt.isNullOrBlank()) {
             cachedGuestToken = headerGt
+            lastGuestTokenStatus = "acquired"
             return@withContext headerGt
         }
 
@@ -218,11 +257,11 @@ class NativeXEngine(
         val postCookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
         if (!postCookieGt.isNullOrBlank()) {
             cachedGuestToken = postCookieGt
+            lastGuestTokenStatus = "acquired"
             return@withContext postCookieGt
         }
 
-        // 3. Final authenticated x.com navigation fallback used by twsave:
-        // Request x.com desktop navigation with Authorization Bearer header, which prompts x.com to set 'gt' in cookies
+        // 3. Final authenticated x.com navigation fallback used by twsave
         val navAuthHeaders = mutableMapOf(
             "Authorization" to "Bearer $bearerToken",
             "x-twitter-active-user" to "yes"
@@ -238,15 +277,18 @@ class NativeXEngine(
         val navCookieGt = httpSession.cookieJar.getCookieValue("x.com", "gt")
         if (!navCookieGt.isNullOrBlank()) {
             cachedGuestToken = navCookieGt
+            lastGuestTokenStatus = "acquired"
             return@withContext navCookieGt
         }
 
         val navHeaderGt = navResp.getOrNull()?.getHeader("x-guest-token")
         if (!navHeaderGt.isNullOrBlank()) {
             cachedGuestToken = navHeaderGt
+            lastGuestTokenStatus = "acquired"
             return@withContext navHeaderGt
         }
 
+        lastGuestTokenStatus = "failed"
         null
     }
 
@@ -340,30 +382,143 @@ class NativeXEngine(
         }
     }
 
+    private fun extractMediaArrayRenditions(mediaArray: JSONArray?): Pair<List<NativeMediaRendition>, Pair<Boolean, String?>> {
+        if (mediaArray == null || mediaArray.length() == 0) return Pair(emptyList(), Pair(false, null))
+        val renditions = mutableListOf<NativeMediaRendition>()
+        var isGif = false
+        var thumb: String? = null
+        for (i in 0 until mediaArray.length()) {
+            val media = mediaArray.optJSONObject(i) ?: continue
+            val type = media.optString("type")
+            if (type == "video" || type == "animated_gif") {
+                isGif = (type == "animated_gif")
+                if (thumb == null) {
+                    thumb = media.optString("media_url_https").ifBlank { media.optString("media_url") }
+                }
+                val videoInfo = media.optJSONObject("video_info")
+                val variants = videoInfo?.optJSONArray("variants")
+                if (variants != null) {
+                    for (vIdx in 0 until variants.length()) {
+                        val variant = variants.optJSONObject(vIdx) ?: continue
+                        val contentType = variant.optString("content_type")
+                        val rawUrl = variant.optString("url")
+                        val bitrate = variant.optInt("bitrate", 0)
+                        if (contentType.startsWith("video/") && rawUrl.isNotBlank()) {
+                            renditions.add(NativeMediaRendition(url = rawUrl, width = bitrate, height = 0))
+                        }
+                    }
+                }
+            }
+        }
+        return Pair(renditions, Pair(isGif, thumb))
+    }
+
+    private fun extractUnifiedCardMedia(cardLegacy: JSONObject?): Pair<List<NativeMediaRendition>, Pair<Boolean, String?>> {
+        if (cardLegacy == null) return Pair(emptyList(), Pair(false, null))
+        val bindingValues = cardLegacy.opt("binding_values") ?: return Pair(emptyList(), Pair(false, null))
+        var unifiedCardString: String? = null
+        if (bindingValues is JSONArray) {
+            for (i in 0 until bindingValues.length()) {
+                val item = bindingValues.optJSONObject(i) ?: continue
+                if (item.optString("key") == "unified_card") {
+                    unifiedCardString = item.optJSONObject("value")?.optString("string_value")
+                    break
+                }
+            }
+        } else if (bindingValues is JSONObject) {
+            unifiedCardString = bindingValues.optJSONObject("unified_card")?.optString("string_value")
+        }
+        if (unifiedCardString.isNullOrBlank()) return Pair(emptyList(), Pair(false, null))
+        return try {
+            val uCardJson = JSONObject(unifiedCardString)
+            val mediaEntities = uCardJson.optJSONObject("media_entities")
+            if (mediaEntities != null) {
+                val mediaArr = JSONArray()
+                val keys = mediaEntities.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val m = mediaEntities.optJSONObject(k)
+                    if (m != null) mediaArr.put(m)
+                }
+                extractMediaArrayRenditions(mediaArr)
+            } else {
+                Pair(emptyList(), Pair(false, null))
+            }
+        } catch (_: Exception) {
+            Pair(emptyList(), Pair(false, null))
+        }
+    }
+
+    private fun hasAnyVideoType(mediaArray: JSONArray?): Boolean {
+        if (mediaArray == null) return false
+        for (i in 0 until mediaArray.length()) {
+            val media = mediaArray.optJSONObject(i) ?: continue
+            val type = media.optString("type")
+            if (type == "video" || type == "animated_gif") return true
+        }
+        return false
+    }
+
     fun parseGraphQLTweet(data: JSONObject, pageUrl: String, statusId: String): Result<ExtractedXMedia> {
         val tweetResult = data.optJSONObject("data")?.optJSONObject("tweetResult")
-            ?: return Result.failure(PlatformExtractionError.ParseError("GraphQL 回應遺漏 tweetResult 物件"))
+            ?: return Result.failure(PlatformExtractionError.ParseError("GraphQL 回應遺漏 tweetResult 物件", internalReason = "GRAPHQL_TARGET_WRAPPER_UNSUPPORTED"))
 
-        val resultObj = tweetResult.optJSONObject("result")
-            ?: return Result.failure(PlatformExtractionError.ParseError("GraphQL 回應遺漏 result 物件"))
+        var resultObj = tweetResult.optJSONObject("result")
+            ?: return Result.failure(PlatformExtractionError.ParseError("GraphQL 回應遺漏 result 物件", internalReason = "GRAPHQL_TARGET_WRAPPER_UNSUPPORTED"))
+
+        if (resultObj.optString("__typename") == "TweetWithVisibilityResults") {
+            resultObj = resultObj.optJSONObject("tweet") ?: resultObj
+        }
 
         // Check if tweet was removed, suspended, or not found
         val typename = resultObj.optString("__typename")
         if (typename == "TweetUnavailable" || typename == "TweetTombstone") {
-            return Result.failure(PlatformExtractionError.ProvisionalUnavailable(typename))
+            return Result.failure(PlatformExtractionError.ProvisionalUnavailable(typename, internalReason = "GRAPHQL_PROVISIONAL_UNAVAILABLE:$typename"))
         }
 
         val legacy = resultObj.optJSONObject("legacy")
             ?: resultObj.optJSONObject("tweet")?.optJSONObject("legacy")
-            ?: return Result.failure(PlatformExtractionError.ParseError("找不到貼文 legacy 資料"))
+            ?: return Result.failure(PlatformExtractionError.ParseError("找不到貼文 legacy 資料", internalReason = "GRAPHQL_MISSING_LEGACY"))
 
         val text = legacy.optString("full_text").ifBlank { legacy.optString("text") }
         val userObj = resultObj.optJSONObject("core")?.optJSONObject("user_results")?.optJSONObject("result")?.optJSONObject("legacy")
             ?: legacy.optJSONObject("user")
         val author = userObj?.optString("screen_name") ?: "Twitter User"
 
-        val extendedEntities = legacy.optJSONObject("extended_entities")
-        val mediaArray = extendedEntities?.optJSONArray("media")
+        var mediaArray = legacy.optJSONObject("extended_entities")?.optJSONArray("media")
+
+        // Quoted tweet media
+        if (mediaArray == null || mediaArray.length() == 0) {
+            val quotedResult = resultObj.optJSONObject("quoted_status_result")?.optJSONObject("result")
+                ?: legacy.optJSONObject("quoted_status_result")?.optJSONObject("result")
+            val unwrappedQuoted = if (quotedResult?.optString("__typename") == "TweetWithVisibilityResults") {
+                quotedResult.optJSONObject("tweet") ?: quotedResult
+            } else quotedResult
+            val quotedMedia = unwrappedQuoted?.optJSONObject("legacy")?.optJSONObject("extended_entities")?.optJSONArray("media")
+            if (quotedMedia != null && quotedMedia.length() > 0) {
+                mediaArray = quotedMedia
+            }
+        }
+
+        // Retweeted tweet media
+        if (mediaArray == null || mediaArray.length() == 0) {
+            val retweetedResult = legacy.optJSONObject("retweeted_status_result")?.optJSONObject("result")
+            val unwrappedRetweeted = if (retweetedResult?.optString("__typename") == "TweetWithVisibilityResults") {
+                retweetedResult.optJSONObject("tweet") ?: retweetedResult
+            } else retweetedResult
+            val retweetedMedia = unwrappedRetweeted?.optJSONObject("legacy")?.optJSONObject("extended_entities")?.optJSONArray("media")
+            if (retweetedMedia != null && retweetedMedia.length() > 0) {
+                mediaArray = retweetedMedia
+            }
+        }
+
+        // Note tweet media
+        if (mediaArray == null || mediaArray.length() == 0) {
+            val noteTweetMedia = resultObj.optJSONObject("note_tweet")?.optJSONObject("note_tweet_results")?.optJSONObject("result")?.optJSONObject("media")?.optJSONArray("inline_media")
+            if (noteTweetMedia != null && noteTweetMedia.length() > 0) {
+                mediaArray = noteTweetMedia
+            }
+        }
 
         val renditions = mutableListOf<NativeMediaRendition>()
         var isGif = false
@@ -371,34 +526,26 @@ class NativeXEngine(
         var hasExplicitVideoMedia = false
 
         if (mediaArray != null && mediaArray.length() > 0) {
-            for (i in 0 until mediaArray.length()) {
-                val media = mediaArray.optJSONObject(i) ?: continue
-                val type = media.optString("type")
-                if (type == "video" || type == "animated_gif") {
+            val (extractedRenditions, extra) = extractMediaArrayRenditions(mediaArray)
+            renditions.addAll(extractedRenditions)
+            isGif = extra.first
+            thumbnailUrl = extra.second
+            if (hasAnyVideoType(mediaArray)) {
+                hasExplicitVideoMedia = true
+            }
+        }
+
+        // Card / unified card media
+        if (renditions.isEmpty()) {
+            val card = resultObj.optJSONObject("card")?.optJSONObject("legacy")
+                ?: legacy.optJSONObject("card")?.optJSONObject("legacy")
+            if (card != null) {
+                val (cardRenditions, extra) = extractUnifiedCardMedia(card)
+                if (cardRenditions.isNotEmpty()) {
+                    renditions.addAll(cardRenditions)
+                    isGif = extra.first
+                    if (thumbnailUrl == null) thumbnailUrl = extra.second
                     hasExplicitVideoMedia = true
-                    isGif = (type == "animated_gif")
-                    thumbnailUrl = media.optString("media_url_https").ifBlank { media.optString("media_url") }
-
-                    val videoInfo = media.optJSONObject("video_info")
-                    val variants = videoInfo?.optJSONArray("variants")
-                    if (variants != null) {
-                        for (vIdx in 0 until variants.length()) {
-                            val variant = variants.optJSONObject(vIdx) ?: continue
-                            val contentType = variant.optString("content_type")
-                            val rawUrl = variant.optString("url")
-                            val bitrate = variant.optInt("bitrate", 0)
-
-                            if (contentType.startsWith("video/") && rawUrl.isNotBlank()) {
-                                renditions.add(
-                                    NativeMediaRendition(
-                                        url = rawUrl,
-                                        width = bitrate, // Store bitrate in width for sorting
-                                        height = 0
-                                    )
-                                )
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -406,12 +553,18 @@ class NativeXEngine(
         if (renditions.isEmpty()) {
             if (hasExplicitVideoMedia) {
                 return Result.failure(
-                    PlatformExtractionError.MediaUrlUnsupported("此 X (Twitter) 貼文包含影片媒體，但未解析出相容的下載串流格式")
+                    PlatformExtractionError.MediaUrlUnsupported(
+                        "此 X (Twitter) 貼文包含影片媒體，但未解析出相容的下載串流格式",
+                        internalReason = "GRAPHQL_MEDIA_VARIANT_UNSUPPORTED"
+                    )
                 )
             }
             // Target tweet has no video (e.g. photo-only or text-only)
             return Result.failure(
-                PlatformExtractionError.NoVideo("此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）")
+                PlatformExtractionError.NoVideo(
+                    "此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）",
+                    internalReason = "GRAPHQL_NO_DIRECT_MEDIA"
+                )
             )
         }
 
@@ -432,6 +585,44 @@ class NativeXEngine(
         )
     }
 
+    fun extractOpenGraphVideo(html: String, pageUrl: String, statusId: String): ExtractedXMedia? {
+        val videoMatcher = OG_VIDEO_URL_PATTERN.matcher(html)
+        var streamUrl: String? = null
+        while (videoMatcher.find()) {
+            val raw = videoMatcher.group(1)?.trim() ?: continue
+            val unescaped = unescapeHtml(raw)
+            if (unescaped.startsWith("http") && (unescaped.contains("video.twimg.com") || unescaped.contains("twimg.com") || unescaped.contains(".mp4"))) {
+                streamUrl = unescaped
+                break
+            }
+        }
+        if (streamUrl == null) return null
+
+        var title = "X 影片 ($statusId)"
+        val titleMatcher = OG_TITLE_PATTERN.matcher(html)
+        if (titleMatcher.find()) {
+            val t = titleMatcher.group(1)?.trim()
+            if (!t.isNullOrBlank()) title = unescapeHtml(t)
+        }
+
+        var thumb: String? = null
+        val imageMatcher = OG_IMAGE_PATTERN.matcher(html)
+        if (imageMatcher.find()) {
+            val img = imageMatcher.group(1)?.trim()
+            if (!img.isNullOrBlank()) thumb = unescapeHtml(img)
+        }
+
+        return ExtractedXMedia(
+            statusId = statusId,
+            pageUrl = pageUrl,
+            title = title,
+            author = "Twitter User",
+            thumbnailUrl = thumb,
+            renditions = listOf(NativeMediaRendition(url = streamUrl, width = 0, height = 0)),
+            isGif = false
+        )
+    }
+
     suspend fun parseHtmlFallback(html: String, pageUrl: String, statusId: String): Result<ExtractedXMedia> = withContext(Dispatchers.IO) {
         // Corroborate explicit deleted/private tombstone in public HTML
         if (html.contains("This Post was deleted by the Post author", ignoreCase = true) ||
@@ -440,88 +631,78 @@ class NativeXEngine(
             html.contains("This Post is from a suspended account", ignoreCase = true) ||
             html.contains("Hmm...this page doesn’t exist", ignoreCase = true)
         ) {
-            return@withContext Result.failure(PlatformExtractionError.DeletedOrNotFound("此 X 貼文已被作者刪除或原始內容已不存在"))
+            return@withContext Result.failure(PlatformExtractionError.DeletedOrNotFound("此 X 貼文已被作者刪除或原始內容已不存在", internalReason = "HTML_TOMBSTONE"))
         }
 
         val matcher = INITIAL_STATE_RE.matcher(html)
-        if (!matcher.find()) {
-            return@withContext Result.failure(PlatformExtractionError.ParseError("HTML 備援頁面未包含 __INITIAL_STATE__"))
-        }
+        if (matcher.find()) {
+            val rawJson = matcher.group(1) ?: ""
+            try {
+                val state = JSONObject(rawJson)
+                val tweetEntities = state.optJSONObject("entities")?.optJSONObject("tweets")?.optJSONObject("entities")
+                val tweetData = tweetEntities?.optJSONObject(statusId)
+                if (tweetData != null) {
+                    val text = tweetData.optString("full_text").ifBlank { tweetData.optString("text") }
+                    val mediaArray = tweetData.optJSONObject("extended_entities")?.optJSONArray("media")
 
-        val rawJson = matcher.group(1) ?: ""
-        try {
-            val state = JSONObject(rawJson)
-            val tweetEntities = state.optJSONObject("entities")?.optJSONObject("tweets")?.optJSONObject("entities")
-            val tweetData = tweetEntities?.optJSONObject(statusId)
-                ?: return@withContext Result.failure(PlatformExtractionError.TargetNotInPageData("HTML 狀態資料中找不到貼文 $statusId"))
+                    val renditions = mutableListOf<NativeMediaRendition>()
+                    var isGif = false
+                    var thumb: String? = null
+                    var hasExplicitVideoMedia = false
 
-            val text = tweetData.optString("full_text").ifBlank { tweetData.optString("text") }
-            val mediaArray = tweetData.optJSONObject("extended_entities")?.optJSONArray("media")
-
-            val renditions = mutableListOf<NativeMediaRendition>()
-            var isGif = false
-            var thumb: String? = null
-            var hasExplicitVideoMedia = false
-
-            if (mediaArray != null) {
-                for (i in 0 until mediaArray.length()) {
-                    val media = mediaArray.optJSONObject(i) ?: continue
-                    val type = media.optString("type")
-                    if (type == "video" || type == "animated_gif") {
-                        hasExplicitVideoMedia = true
-                        isGif = (type == "animated_gif")
-                        thumb = media.optString("media_url_https")
-
-                        val variants = media.optJSONObject("video_info")?.optJSONArray("variants")
-                        if (variants != null) {
-                            for (v in 0 until variants.length()) {
-                                val item = variants.optJSONObject(v) ?: continue
-                                val ct = item.optString("content_type")
-                                val u = item.optString("url")
-                                val br = item.optInt("bitrate", 0)
-                                if (ct.startsWith("video/") && u.isNotBlank()) {
-                                    renditions.add(NativeMediaRendition(url = u, width = br, height = 0))
-                                }
-                            }
-                        }
+                    if (mediaArray != null) {
+                        val (extractedRenditions, extra) = extractMediaArrayRenditions(mediaArray)
+                        renditions.addAll(extractedRenditions)
+                        isGif = extra.first
+                        thumb = extra.second
+                        if (hasAnyVideoType(mediaArray)) hasExplicitVideoMedia = true
                     }
-                }
-            }
 
-            if (renditions.isEmpty()) {
-                if (hasExplicitVideoMedia) {
+                    if (renditions.isNotEmpty()) {
+                        val sorted = renditions.sortedByDescending { it.width }
+                        val title = if (text.isNotBlank()) text.take(100) else "X 影片 ($statusId)"
+                        return@withContext Result.success(
+                            ExtractedXMedia(
+                                statusId = statusId,
+                                pageUrl = pageUrl,
+                                title = title,
+                                author = "Twitter User",
+                                thumbnailUrl = thumb,
+                                renditions = sorted,
+                                isGif = isGif
+                            )
+                        )
+                    }
+
+                    if (hasExplicitVideoMedia) {
+                        return@withContext Result.failure(
+                            PlatformExtractionError.MediaUrlUnsupported("HTML 狀態資料中包含影片媒體，但未解析出相容的下載串流格式", internalReason = "HTML_MEDIA_VARIANT_UNSUPPORTED")
+                        )
+                    }
                     return@withContext Result.failure(
-                        PlatformExtractionError.MediaUrlUnsupported("HTML 狀態資料中包含影片媒體，但未解析出相容的下載串流格式")
+                        PlatformExtractionError.NoVideo("此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）", internalReason = "HTML_NO_DIRECT_MEDIA")
                     )
                 }
-                return@withContext Result.failure(
-                    PlatformExtractionError.NoVideo("此 X (Twitter) 貼文未包含可下載的影片內容（可能為純文字或純圖片）")
-                )
-            }
-
-            val sorted = renditions.sortedByDescending { it.width }
-            val title = if (text.isNotBlank()) text.take(100) else "X 影片 ($statusId)"
-
-            Result.success(
-                ExtractedXMedia(
-                    statusId = statusId,
-                    pageUrl = pageUrl,
-                    title = title,
-                    author = "Twitter User",
-                    thumbnailUrl = thumb,
-                    renditions = sorted,
-                    isGif = isGif
-                )
-            )
-        } catch (e: Exception) {
-            Result.failure(PlatformExtractionError.ParseError("解析 __INITIAL_STATE__ 失敗", cause = e))
+            } catch (_: Exception) {}
         }
+
+        // OpenGraph HTML stream fallback
+        val ogVideo = extractOpenGraphVideo(html, pageUrl, statusId)
+        if (ogVideo != null) {
+            return@withContext Result.success(ogVideo)
+        }
+
+        if (matcher.find()) {
+            return@withContext Result.failure(PlatformExtractionError.TargetNotInPageData("HTML 狀態資料中找不到貼文 $statusId", internalReason = "HTML_TARGET_NOT_FOUND"))
+        }
+
+        Result.failure(PlatformExtractionError.ParseError("HTML 備援頁面未包含 __INITIAL_STATE__", internalReason = "HTML_INITIAL_STATE_MISSING"))
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         val statusId = extractStatusId(url)
             ?: return@withContext Result.failure(
-                PlatformExtractionError.PageVariantUnsupported("無法從網址中識別 X (Twitter) 貼文代碼")
+                PlatformExtractionError.PageVariantUnsupported("無法從網址中識別 X (Twitter) 貼文代碼", internalReason = "PAGE_VARIANT_UNSUPPORTED")
             )
 
         val cleanUrl = "https://x.com/i/status/$statusId"
@@ -529,25 +710,35 @@ class NativeXEngine(
 
         profileSteps.add("GRAPHQL")
         safeLog("[Resolver] platform=X")
-        safeLog("[X] graphql_attempt=1")
 
         val bearer = ensureBearerToken()
         val guest = ensureGuestToken(bearer)
+        val guestTokenPresent = !guest.isNullOrBlank()
 
         var extractedMedia: ExtractedXMedia? = null
         var lastError: PlatformExtractionError? = null
+        var lastTypename: String = "none"
+        var restIdStatus: String = "not_attempted"
+        var htmlFallbackUsed = false
+        var internalReason: String = "none"
 
+        safeLog("[X] graphql_attempt=1")
         val gqlResult = fetchPostViaGraphQL(statusId, bearer, guest)
         if (gqlResult.isSuccess) {
-            val parseResult = parseGraphQLTweet(gqlResult.getOrThrow(), cleanUrl, statusId)
+            val json = gqlResult.getOrThrow()
+            val resultObj = json.optJSONObject("data")?.optJSONObject("tweetResult")?.optJSONObject("result")
+            lastTypename = resultObj?.optString("__typename")?.ifBlank { "none" } ?: "none"
+            val parseResult = parseGraphQLTweet(json, cleanUrl, statusId)
             if (parseResult.isSuccess) {
                 safeLog("[X] graphql_attempt=1 result=SUCCESS")
                 extractedMedia = parseResult.getOrThrow()
+                restIdStatus = "success"
             } else {
+                restIdStatus = "fail"
                 val err = parseResult.exceptionOrNull() as? PlatformExtractionError
+                internalReason = err?.internalReason ?: "none"
                 if (err is PlatformExtractionError.ProvisionalUnavailable) {
                     safeLog("[X] graphql_attempt=1 typename=${err.typename}")
-                    // Refresh guest session and retry GraphQL once
                     safeLog("[X] guest_refresh=true")
                     cachedGuestToken = null
                     httpSession.cookieJar.removeCookie("x.com", "gt")
@@ -557,22 +748,32 @@ class NativeXEngine(
                     safeLog("[X] graphql_attempt=2")
                     val retryGql = fetchPostViaGraphQL(statusId, newBearer, newGuest)
                     if (retryGql.isSuccess) {
-                        val retryParse = parseGraphQLTweet(retryGql.getOrThrow(), cleanUrl, statusId)
+                        val retryJson = retryGql.getOrThrow()
+                        val retryResultObj = retryJson.optJSONObject("data")?.optJSONObject("tweetResult")?.optJSONObject("result")
+                        lastTypename = retryResultObj?.optString("__typename")?.ifBlank { "none" } ?: "none"
+                        val retryParse = parseGraphQLTweet(retryJson, cleanUrl, statusId)
                         if (retryParse.isSuccess) {
                             safeLog("[X] graphql_attempt=2 result=SUCCESS")
                             extractedMedia = retryParse.getOrThrow()
+                            restIdStatus = "success"
+                            internalReason = "none"
                         } else {
                             val retryErr = retryParse.exceptionOrNull() as? PlatformExtractionError
+                            internalReason = retryErr?.internalReason ?: internalReason
                             safeLog("[X] graphql_attempt=2 result=${retryErr?.code?.name ?: "FAILURE"}")
                             lastError = retryErr
                         }
                     } else {
                         val retryErr = retryGql.exceptionOrNull() as? PlatformExtractionError
+                        internalReason = retryErr?.internalReason ?: internalReason
                         safeLog("[X] graphql_attempt=2 result=${retryErr?.code?.name ?: "FAILURE"}")
                         lastError = retryErr
                     }
                 } else if (err != null && !err.canFallback) {
                     lastProfileSequence = profileSteps
+                    val fp = "X: rest_id_present=true typename=$lastTypename guest_token_present=$guestTokenPresent auth_flow=$lastAuthFlow stream_url_present=false internal_reason=$internalReason"
+                    lastDiagnosticFingerprint = fp
+                    safeLog("platform=X status_id_present=true auth_flow=$lastAuthFlow guest_token=$lastGuestTokenStatus rest_id_status=$restIdStatus html_fallback_used=false final=${err.code.name} internal_reason=$internalReason")
                     safeLog("[X] final=${err.code.name}")
                     return@withContext Result.failure(err)
                 } else {
@@ -580,12 +781,15 @@ class NativeXEngine(
                 }
             }
         } else {
+            restIdStatus = "fail"
             val err = gqlResult.exceptionOrNull() as? PlatformExtractionError
+            internalReason = err?.internalReason ?: "GRAPHQL_FETCH_FAILED"
             lastError = err
         }
 
         // HTML fallback if GraphQL did not resolve media
         if (extractedMedia == null) {
+            htmlFallbackUsed = true
             profileSteps.add("HTML_FALLBACK")
             safeLog("[X] html_fallback=true")
             val htmlResp = httpSession.fetch(cleanUrl, RequestProfile.DESKTOP_NAVIGATION)
@@ -594,10 +798,15 @@ class NativeXEngine(
                 val htmlResult = parseHtmlFallback(html, cleanUrl, statusId)
                 if (htmlResult.isSuccess) {
                     extractedMedia = htmlResult.getOrThrow()
+                    internalReason = if (extractedMedia.renditions.firstOrNull()?.width == 0) "OPENGRAPH_FALLBACK_SUCCESS" else "none"
                 } else {
                     val err = htmlResult.exceptionOrNull() as? PlatformExtractionError
+                    internalReason = err?.internalReason ?: internalReason
                     if (err != null && !err.canFallback) {
                         lastProfileSequence = profileSteps
+                        val fp = "X: rest_id_present=${restIdStatus != "not_attempted"} typename=$lastTypename guest_token_present=$guestTokenPresent auth_flow=$lastAuthFlow stream_url_present=false internal_reason=$internalReason"
+                        lastDiagnosticFingerprint = fp
+                        safeLog("platform=X status_id_present=true auth_flow=$lastAuthFlow guest_token=$lastGuestTokenStatus rest_id_status=$restIdStatus html_fallback_used=true final=${err.code.name} internal_reason=$internalReason")
                         safeLog("[X] final=${err.code.name}")
                         return@withContext Result.failure(err)
                     }
@@ -608,12 +817,18 @@ class NativeXEngine(
 
         lastProfileSequence = profileSteps
 
+        val streamUrlPresent = extractedMedia?.renditions?.isNotEmpty() == true
+        val fp = "X: rest_id_present=${restIdStatus != "not_attempted"} typename=$lastTypename guest_token_present=$guestTokenPresent auth_flow=$lastAuthFlow stream_url_present=$streamUrlPresent internal_reason=$internalReason"
+        lastDiagnosticFingerprint = fp
+
         if (extractedMedia == null) {
-            val finalErr = lastError ?: PlatformExtractionError.ParseError("無法解析 X 貼文影片資訊")
+            val finalErr = lastError ?: PlatformExtractionError.ParseError("無法解析 X 貼文影片資訊", internalReason = internalReason)
+            safeLog("platform=X status_id_present=true auth_flow=$lastAuthFlow guest_token=$lastGuestTokenStatus rest_id_status=$restIdStatus html_fallback_used=$htmlFallbackUsed final=${finalErr.code.name} internal_reason=$internalReason")
             safeLog("[X] final=${finalErr.code.name}")
             return@withContext Result.failure(finalErr)
         }
 
+        safeLog("platform=X status_id_present=true auth_flow=$lastAuthFlow guest_token=$lastGuestTokenStatus rest_id_status=$restIdStatus html_fallback_used=$htmlFallbackUsed final=SUCCESS internal_reason=$internalReason")
         safeLog("[X] final=SUCCESS")
         val qualityOptions = buildQualityOptions(extractedMedia)
         val info = MediaInfo(

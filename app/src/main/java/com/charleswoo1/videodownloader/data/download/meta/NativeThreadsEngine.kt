@@ -53,10 +53,37 @@ class NativeThreadsEngine(
             Pattern.CASE_INSENSITIVE or Pattern.DOTALL
         )
 
+        val THREADS_MARKERS = listOf(
+            "video_versions",
+            "video_dash_manifest",
+            "carousel_media",
+            "linked_inline_media",
+            "link_preview_response",
+            "quoted_post",
+            "quoted_attachment_post",
+            "text_post_app_info"
+        )
+
+        fun formatSizeBucket(bytes: Int): String = when {
+            bytes < 10 * 1024 -> "<10KB"
+            bytes <= 100 * 1024 -> "10-100KB"
+            else -> ">100KB"
+        }
+
+        fun cleanHostAndPath(urlStr: String): String {
+            return try {
+                val uri = java.net.URI(urlStr)
+                val host = uri.host ?: ""
+                val path = uri.path ?: ""
+                "$host$path"
+            } catch (_: Exception) {
+                urlStr.substringBefore('?').substringBefore('#')
+            }
+        }
+
         fun isExcludedContainerKey(key: String): Boolean {
             return key in listOf(
                 "relatedPosts", "related_posts", "feed_units", "feedUnits",
-                "replies", "replyThreads", "reply_threads",
                 "parentPost", "parent_post", "suggested_users", "suggestedUsers"
             )
         }
@@ -309,6 +336,9 @@ class NativeThreadsEngine(
     var lastProfileSequence: List<String> = emptyList()
         private set
 
+    override var lastDiagnosticFingerprint: String? = null
+        private set
+
     override fun supports(platform: Platform): Boolean = platform == Platform.THREADS
 
     override fun cancelDownload() {
@@ -371,23 +401,72 @@ class NativeThreadsEngine(
         normalized
     }
 
-    fun parseThreadsPage(html: String, targetShortcode: String, canonicalUrl: String): MetaExtractionResult {
+    data class ThreadsDiagnostics(
+        val resolvedShare: Boolean = false,
+        val scriptCount: Int = 0,
+        val scriptSource: String = "none",
+        val rawCodeInHtml: Boolean = false,
+        val decodedCodeInHtml: Boolean = false,
+        val targetWrapperFound: Boolean = false,
+        val mediaNodeFound: Boolean = false,
+        val matchedContainerKeys: List<String> = emptyList(),
+        val presentMarkers: List<String> = emptyList(),
+        val restrictionPhrase: String = "NONE",
+        val stage: String = "INIT"
+    )
+
+    data class ThreadsParseOutcome(
+        val result: MetaExtractionResult,
+        val diagnostics: ThreadsDiagnostics
+    )
+
+    fun parseThreadsPage(html: String, targetShortcode: String, canonicalUrl: String, resolvedShare: Boolean = false): MetaExtractionResult {
+        return parseThreadsPageWithDiagnostics(html, targetShortcode, canonicalUrl, resolvedShare).result
+    }
+
+    fun parseThreadsPageWithDiagnostics(
+        html: String,
+        targetShortcode: String,
+        canonicalUrl: String,
+        resolvedShare: Boolean = false
+    ): ThreadsParseOutcome {
+        val rawCodeInHtml = html.contains(targetShortcode)
+        val presentMarkers = THREADS_MARKERS.filter { html.contains(it) }
+
+        fun countMatches(p: Pattern): Int {
+            val m = p.matcher(html)
+            var c = 0
+            while (m.find()) c++
+            return c
+        }
+        val totalScriptCount = countMatches(GENERIC_SCRIPT_PATTERN)
+
+        val baseDiag = ThreadsDiagnostics(
+            resolvedShare = resolvedShare,
+            scriptCount = totalScriptCount,
+            rawCodeInHtml = rawCodeInHtml,
+            presentMarkers = presentMarkers
+        )
+
         // 1. Check for deleted or private post
         if (html.contains("Post \"$targetShortcode\" was not found in the page data", ignoreCase = true) ||
             html.contains("deleted, private, login-gated", ignoreCase = true) ||
             html.contains("Sorry, this page isn't available.", ignoreCase = true)
         ) {
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Restricted(
-                    RestrictionReason.DELETED_OR_PRIVATE,
-                    "Threads 貼文不存在、設為私人內容或需要登入帳號驗證"
-                )
+            return ThreadsParseOutcome(
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Restricted(
+                        RestrictionReason.DELETED_OR_PRIVATE,
+                        "Threads 貼文不存在、設為私人內容或需要登入帳號驗證"
+                    )
+                ),
+                baseDiag.copy(restrictionPhrase = "DELETED_OR_PRIVATE", stage = "DELETED_CHECK")
             )
         }
 
         // 2. Scan script tags for JSON payload (application/json, data-sjs, generic containing shortcode)
         val candidates = mutableListOf<JSONObject>()
-        var detectedScriptSource = "application_json"
+        var detectedScriptSource = "none"
 
         fun scanScriptPatterns(pattern: Pattern, targetMarker: String? = null, sourceName: String) {
             val matcher = pattern.matcher(html)
@@ -395,7 +474,7 @@ class NativeThreadsEngine(
                 val raw = matcher.group(1)?.trim() ?: continue
                 val beforeCount = candidates.size
                 collectJsonFromScript(raw, candidates, maxDepth = 3, targetMarker = targetMarker)
-                if (candidates.size > beforeCount && detectedScriptSource == "application_json" && sourceName != "application_json") {
+                if (candidates.size > beforeCount && detectedScriptSource == "none") {
                     detectedScriptSource = sourceName
                 }
             }
@@ -405,55 +484,116 @@ class NativeThreadsEngine(
         scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode, sourceName = "data_sjs")
         scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode, sourceName = "nested_json")
 
+        val decodedCodeInHtml = candidates.any { it.toString().contains(targetShortcode) }
+        val diagWithDecode = baseDiag.copy(
+            scriptSource = if (detectedScriptSource == "none" && candidates.isNotEmpty()) "application_json" else detectedScriptSource,
+            decodedCodeInHtml = decodedCodeInHtml
+        )
+
         // 3. Find target post strictly matching code == targetShortcode
-        val searchResult = searchTargetPost(candidates, targetShortcode, detectedScriptSource)
+        val searchResult = searchTargetPost(candidates, targetShortcode, diagWithDecode.scriptSource)
         val targetPost = searchResult.postNode
 
         // Target post isolation: If target post was not found, STRICTLY REFUSE to use unrelated feed posts
         if (targetPost == null) {
-            if (searchResult.wrapperSeen) {
-                return MetaExtractionResult.Failure(
+            val failure = if (searchResult.wrapperSeen) {
+                MetaExtractionResult.Failure(
                     MetaExtractionError.Technical(
                         "Threads 貼文代碼符合，但目前頁面資料未解析出有效媒體節點。"
                     )
                 )
+            } else {
+                MetaExtractionResult.Failure(
+                    MetaExtractionError.Technical(
+                        "Threads 已找到貼文連結，但目前頁面未提供可解析的目標媒體資料。"
+                    )
+                )
             }
-            return MetaExtractionResult.Failure(
-                MetaExtractionError.Technical(
-                    "Threads 已找到貼文連結，但目前頁面未提供可解析的目標媒體資料。"
+            return ThreadsParseOutcome(
+                failure,
+                diagWithDecode.copy(
+                    targetWrapperFound = searchResult.wrapperSeen,
+                    mediaNodeFound = false,
+                    matchedContainerKeys = searchResult.matchedKeys,
+                    stage = if (searchResult.wrapperSeen) "WRAPPER_SEEN_NO_POST" else "NO_TARGET_FOUND"
                 )
             )
         }
 
-        return extractMediaFromPost(targetPost, targetShortcode, canonicalUrl)
+        val outcome = extractMediaFromPost(targetPost, targetShortcode, canonicalUrl)
+        val isSuccess = outcome is MetaExtractionResult.Success
+        val matchedKeys = if (searchResult.matchedKeys.isNotEmpty()) {
+            searchResult.matchedKeys
+        } else {
+            targetPost.keys().asSequence().toList().sorted()
+        }
+
+        return ThreadsParseOutcome(
+            outcome,
+            diagWithDecode.copy(
+                targetWrapperFound = true,
+                mediaNodeFound = isSuccess,
+                matchedContainerKeys = matchedKeys,
+                stage = if (isSuccess) "SUCCESS" else "NO_MEDIA"
+            )
+        )
     }
 
     data class ThreadsPostSearchResult(
         val postNode: JSONObject? = null,
         val wrapperSeen: Boolean = false,
-        val scriptSource: String = "application_json"
+        val scriptSource: String = "application_json",
+        val matchedKeys: List<String> = emptyList()
     )
 
-    private fun hasThreadsMediaStructure(obj: JSONObject): Boolean {
+    private fun checkObjectHasMedia(obj: JSONObject?): Boolean {
+        if (obj == null) return false
         val versions = obj.optJSONArray("video_versions")
         if (versions != null && versions.length() > 0) return true
         if (obj.optString("video_dash_manifest").isNotBlank()) return true
-        val carousel = obj.optJSONArray("carousel_media")
-        if (carousel != null && carousel.length() > 0) return true
+        return false
+    }
+
+    private fun hasThreadsMediaStructure(obj: JSONObject): Boolean {
+        if (checkObjectHasMedia(obj)) return true
+        if (checkObjectHasMedia(obj.optJSONObject("media"))) return true
+
+        val textPostAppInfo = obj.optJSONObject("text_post_app_info")
+        if (textPostAppInfo != null) {
+            if (checkObjectHasMedia(textPostAppInfo.optJSONObject("media"))) return true
+            val shareInfo = textPostAppInfo.optJSONObject("share_info")
+            if (shareInfo != null) {
+                if (checkObjectHasMedia(shareInfo.optJSONObject("media"))) return true
+                if (checkObjectHasMedia(shareInfo.optJSONObject("quoted_post"))) return true
+                if (checkObjectHasMedia(shareInfo.optJSONObject("quoted_attachment_post"))) return true
+            }
+            if (checkObjectHasMedia(textPostAppInfo.optJSONObject("quoted_post"))) return true
+            if (checkObjectHasMedia(textPostAppInfo.optJSONObject("quoted_attachment_post"))) return true
+            val linkedMedia = textPostAppInfo.optJSONObject("linked_inline_media")?.optJSONObject("media")
+                ?: textPostAppInfo.optJSONObject("link_preview_response")?.optJSONObject("video")
+                ?: textPostAppInfo.optJSONObject("linked_inline_media")
+            if (checkObjectHasMedia(linkedMedia)) return true
+        }
+
+        val repost = obj.optJSONObject("repost_post")
+        if (repost != null && hasThreadsMediaStructure(repost)) return true
+
         val quoted = obj.optJSONObject("quoted_post")
             ?: obj.optJSONObject("quoted_attachment_post")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("quoted_attachment_post")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("quoted_post")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("quoted_attachment_post")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("quoted_post")
-        if (quoted != null && (quoted.optJSONArray("video_versions")?.let { it.length() > 0 } == true || quoted.optString("video_dash_manifest").isNotBlank())) {
-            return true
-        }
-        val linkedMedia = obj.optJSONObject("text_post_app_info")?.optJSONObject("linked_inline_media")?.optJSONObject("media")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("link_preview_response")?.optJSONObject("video")
-            ?: obj.optJSONObject("text_post_app_info")?.optJSONObject("linked_inline_media")
-        if (linkedMedia != null && (linkedMedia.optJSONArray("video_versions")?.let { it.length() > 0 } == true || linkedMedia.optString("video_dash_manifest").isNotBlank())) {
-            return true
+            ?: textPostAppInfo?.optJSONObject("share_info")?.optJSONObject("quoted_attachment_post")
+            ?: textPostAppInfo?.optJSONObject("share_info")?.optJSONObject("quoted_post")
+            ?: textPostAppInfo?.optJSONObject("quoted_attachment_post")
+            ?: textPostAppInfo?.optJSONObject("quoted_post")
+        if (quoted != null && hasThreadsMediaStructure(quoted)) return true
+
+        val carousel = obj.optJSONArray("carousel_media")
+            ?: obj.optJSONObject("media")?.optJSONArray("carousel_media")
+            ?: repost?.optJSONArray("carousel_media")
+        if (carousel != null && carousel.length() > 0) {
+            for (i in 0 until carousel.length()) {
+                val item = carousel.optJSONObject(i) ?: continue
+                if (checkObjectHasMedia(item)) return true
+            }
         }
         return false
     }
@@ -487,18 +627,28 @@ class NativeThreadsEngine(
     private fun searchTargetPost(candidates: List<JSONObject>, targetCode: String, scriptSource: String): ThreadsPostSearchResult {
         var wrapperSeen = false
         var fallbackPostNode: JSONObject? = null
+        var matchedKeys = emptyList<String>()
         for (candidate in candidates) {
             val res = findPostByCode(candidate, targetCode)
-            if (res.wrapperSeen) wrapperSeen = true
+            if (res.wrapperSeen) {
+                wrapperSeen = true
+                if (res.matchedKeys.isNotEmpty()) matchedKeys = res.matchedKeys
+            }
             if (res.postNode != null) {
                 if (hasThreadsMediaStructure(res.postNode)) {
                     return res.copy(scriptSource = scriptSource)
                 } else if (fallbackPostNode == null) {
                     fallbackPostNode = res.postNode
+                    matchedKeys = res.matchedKeys
                 }
             }
         }
-        return ThreadsPostSearchResult(postNode = fallbackPostNode, wrapperSeen = wrapperSeen, scriptSource = scriptSource)
+        return ThreadsPostSearchResult(
+            postNode = fallbackPostNode,
+            wrapperSeen = wrapperSeen,
+            scriptSource = scriptSource,
+            matchedKeys = matchedKeys
+        )
     }
 
     private fun findPostByCode(root: Any?, targetCode: String): ThreadsPostSearchResult {
@@ -508,15 +658,16 @@ class NativeThreadsEngine(
             val code = root.optString("code")
             if (code == targetCode) {
                 wrapperSeen = true
+                val keys = root.keys().asSequence().toList().sorted()
                 if (hasThreadsMediaStructure(root)) {
-                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true)
+                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true, matchedKeys = keys)
                 }
 
                 // Descend into children
-                val keys = root.keys()
+                val childKeys = root.keys()
                 var fallbackChildResult: ThreadsPostSearchResult? = null
-                while (keys.hasNext()) {
-                    val key = keys.next()
+                while (childKeys.hasNext()) {
+                    val key = childKeys.next()
                     if (isExcludedContainerKey(key)) continue
                     val child = root.opt(key)
                     val childRes = findPostByCode(child, targetCode)
@@ -529,10 +680,10 @@ class NativeThreadsEngine(
                 if (fallbackChildResult != null) return fallbackChildResult
 
                 if (isThreadsImageOrTextPost(root)) {
-                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true)
+                    return ThreadsPostSearchResult(postNode = root, wrapperSeen = true, matchedKeys = keys)
                 }
 
-                return ThreadsPostSearchResult(postNode = null, wrapperSeen = true)
+                return ThreadsPostSearchResult(postNode = null, wrapperSeen = true, matchedKeys = keys)
             }
 
             val keys = root.keys()
@@ -713,6 +864,73 @@ class NativeThreadsEngine(
             }
         }
 
+        // Check direct post.optJSONObject("media")
+        if (renditions.isEmpty() && dashVideoUrl == null) {
+            val postMedia = post.optJSONObject("media")
+            if (postMedia != null) {
+                renditions = extractRenditions(postMedia.optJSONArray("video_versions"))
+                if (renditions.isEmpty()) {
+                    val dashManifest = postMedia.optString("video_dash_manifest")
+                    if (dashManifest.isNotBlank()) {
+                        val (v, a) = parseDashManifest(dashManifest)
+                        dashVideoUrl = v
+                        dashAudioUrl = a
+                    }
+                }
+            }
+        }
+
+        // Check text_post_app_info.media and text_post_app_info.share_info.media
+        if (renditions.isEmpty() && dashVideoUrl == null) {
+            val textPostAppInfo = post.optJSONObject("text_post_app_info")
+            if (textPostAppInfo != null) {
+                val mediaObj = textPostAppInfo.optJSONObject("media")
+                    ?: textPostAppInfo.optJSONObject("share_info")?.optJSONObject("media")
+                if (mediaObj != null) {
+                    renditions = extractRenditions(mediaObj.optJSONArray("video_versions"))
+                    if (renditions.isEmpty()) {
+                        val dashManifest = mediaObj.optString("video_dash_manifest")
+                        if (dashManifest.isNotBlank()) {
+                            val (v, a) = parseDashManifest(dashManifest)
+                            dashVideoUrl = v
+                            dashAudioUrl = a
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check repost_post
+        if (renditions.isEmpty() && dashVideoUrl == null) {
+            val repost = post.optJSONObject("repost_post")
+            if (repost != null) {
+                renditions = extractRenditions(repost.optJSONArray("video_versions"))
+                if (renditions.isEmpty()) {
+                    val repostMedia = repost.optJSONObject("media")
+                        ?: repost.optJSONObject("text_post_app_info")?.optJSONObject("media")
+                    if (repostMedia != null) {
+                        renditions = extractRenditions(repostMedia.optJSONArray("video_versions"))
+                        if (renditions.isEmpty()) {
+                            val dashManifest = repostMedia.optString("video_dash_manifest")
+                            if (dashManifest.isNotBlank()) {
+                                val (v, a) = parseDashManifest(dashManifest)
+                                dashVideoUrl = v
+                                dashAudioUrl = a
+                            }
+                        }
+                    }
+                }
+                if (renditions.isEmpty() && dashVideoUrl == null) {
+                    val dashManifest = repost.optString("video_dash_manifest")
+                    if (dashManifest.isNotBlank()) {
+                        val (v, a) = parseDashManifest(dashManifest)
+                        dashVideoUrl = v
+                        dashAudioUrl = a
+                    }
+                }
+            }
+        }
+
         // Quoted attachment post
         if (renditions.isEmpty() && dashVideoUrl == null) {
             val quoted = post.optJSONObject("quoted_post")
@@ -723,6 +941,12 @@ class NativeThreadsEngine(
                 ?: post.optJSONObject("text_post_app_info")?.optJSONObject("quoted_post")
             if (quoted != null) {
                 renditions = extractRenditions(quoted.optJSONArray("video_versions"))
+                if (renditions.isEmpty()) {
+                    val quotedMedia = quoted.optJSONObject("media")
+                    if (quotedMedia != null) {
+                        renditions = extractRenditions(quotedMedia.optJSONArray("video_versions"))
+                    }
+                }
                 if (renditions.isEmpty()) {
                     val dashManifest = quoted.optString("video_dash_manifest")
                     if (dashManifest.isNotBlank()) {
@@ -737,6 +961,8 @@ class NativeThreadsEngine(
         // Carousel media
         if (renditions.isEmpty() && dashVideoUrl == null) {
             val carousel = post.optJSONArray("carousel_media")
+                ?: post.optJSONObject("media")?.optJSONArray("carousel_media")
+                ?: post.optJSONObject("repost_post")?.optJSONArray("carousel_media")
             if (carousel != null && carousel.length() > 0) {
                 for (i in 0 until carousel.length()) {
                     val item = carousel.optJSONObject(i) ?: continue
@@ -814,6 +1040,9 @@ class NativeThreadsEngine(
 
     private fun extractThumbnail(post: JSONObject): String? {
         val candidates = post.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("media")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("text_post_app_info")?.optJSONObject("media")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("repost_post")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
         if (candidates != null && candidates.length() > 0) {
             val bestCandidate = candidates.optJSONObject(0)?.optString("url")
             if (!bestCandidate.isNullOrBlank()) return normalizeCdnUrl(bestCandidate)
@@ -822,6 +1051,7 @@ class NativeThreadsEngine(
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
+        val isShareUrl = url.contains("/share/")
         val resolvedUrl = resolveShareUrl(url)
         val shortcode = extractPostId(resolvedUrl)
             ?: return@withContext Result.failure(
@@ -832,7 +1062,7 @@ class NativeThreadsEngine(
         val profileSteps = mutableListOf<String>()
 
         safeLog("[Resolver] platform=THREADS")
-        safeLog("[Threads] share_resolved=true")
+        safeLog("[Threads] share_resolved=$isShareUrl")
         safeLog("[Threads] target_code=$shortcode")
 
         // Step 1: DESKTOP_NAVIGATION
@@ -840,43 +1070,41 @@ class NativeThreadsEngine(
         val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
         val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
-        var parseResult = parseThreadsPage(desktopHtml, shortcode, canonicalUrl)
+        var parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
 
         // Step 2: Escalation to MOBILE_NAVIGATION on technical failure
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
+        if (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical) {
             profileSteps.add("MOBILE")
             val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
             val mobileHtml = mobileResp.getOrNull()?.body ?: ""
             if (mobileHtml.isNotBlank()) {
-                parseResult = parseThreadsPage(mobileHtml, shortcode, canonicalUrl)
+                parseOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
             }
         }
 
         // Step 3: Escalation to CRAWLER_NAVIGATION if still technical failure
-        if (parseResult is MetaExtractionResult.Failure && parseResult.error is MetaExtractionError.Technical) {
+        if (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical) {
             profileSteps.add("CRAWLER")
             val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
             val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
-                parseResult = parseThreadsPage(crawlerHtml, shortcode, canonicalUrl)
+                parseOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
             }
         }
 
         lastProfileSequence = profileSteps
 
-        val targetWrapper = if (parseResult is MetaExtractionResult.Failure) {
-            val detail = (parseResult.error as? MetaExtractionError.Technical)?.detail ?: parseResult.error.message ?: ""
-            detail.contains("貼文代碼符合")
-        } else true
-        val actualMedia = parseResult is MetaExtractionResult.Success
+        val diag = parseOutcome.diagnostics
+        val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
+        val fp = "THREADS: resolved_share=${diag.resolvedShare} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper_found=${diag.targetWrapperFound} media_node_found=${diag.mediaNodeFound} matched_container_keys=$matchedKeysStr"
+        lastDiagnosticFingerprint = fp
 
-        safeLog("[Threads] script_source=application_json")
-        safeLog("[Threads] target_wrapper=$targetWrapper actual_media=$actualMedia")
+        safeLog("platform=THREADS share_resolved=${diag.resolvedShare} script_source=${diag.scriptSource} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper=${diag.targetWrapperFound} actual_media=${diag.mediaNodeFound} matched_keys=$matchedKeysStr")
 
-        when (parseResult) {
+        when (val res = parseOutcome.result) {
             is MetaExtractionResult.Success -> {
                 safeLog("[Threads] final=SUCCESS")
-                val media = parseResult.media
+                val media = res.media
                 val options = buildQualityOptions(media)
                 val info = MediaInfo(
                     sourceUrl = canonicalUrl,
@@ -890,9 +1118,9 @@ class NativeThreadsEngine(
                 Result.success(info)
             }
             is MetaExtractionResult.Failure -> {
-                val finalStatus = if (parseResult.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
+                val finalStatus = if (res.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
                 safeLog("[Threads] final=$finalStatus")
-                Result.failure(parseResult.error)
+                Result.failure(res.error)
             }
         }
     }

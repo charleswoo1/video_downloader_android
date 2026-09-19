@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
@@ -757,6 +758,20 @@ class NativeInstagramEngine(
                 }
             }
 
+            val polarisMedia = root.optJSONObject("xig_polaris_media")
+                ?: root.optJSONObject("data")?.optJSONObject("xig_polaris_media")
+                ?: root.optJSONObject("result")?.optJSONObject("data")?.optJSONObject("xig_polaris_media")
+            if (polarisMedia != null) {
+                val gated = polarisMedia.optJSONObject("if_not_gated_logged_out") ?: polarisMedia
+                val code = gated.optString("code").ifBlank { gated.optString("shortcode") }
+                val id = gated.optString("id").ifBlank { gated.optString("pk") }
+                val isCodeMatch = code.isBlank() || code == shortcode
+                val isIdMatch = targetId <= 0 || id.isBlank() || id == targetId.toString() || id.startsWith(targetId.toString())
+                if (isCodeMatch || isIdMatch) {
+                    return gated
+                }
+            }
+
             val keys = root.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
@@ -973,6 +988,178 @@ class NativeInstagramEngine(
         )
     }
 
+    suspend fun fetchMediaInfoAuthenticated(shortcode: String, mediaId: Long, canonicalUrl: String): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
+        val cookies = httpSession.sessionProvider.cookiesFor(Platform.INSTAGRAM)
+        val sessionid = cookies.firstOrNull { it.name.equals("sessionid", ignoreCase = true) }?.value
+        if (sessionid.isNullOrBlank()) {
+            return@withContext Result.failure(PlatformExtractionError.LoginRequired("Instagram Session 缺少 sessionid"))
+        }
+
+        httpSession.syncSessionCookies(Platform.INSTAGRAM)
+
+        val cookieHeader = buildString {
+            append("sessionid=").append(sessionid)
+            for (c in cookies) {
+                if (!c.name.equals("sessionid", ignoreCase = true)) {
+                    append("; ").append(c.name).append("=").append(c.value)
+                }
+            }
+        }
+
+        val apiUrl = "https://i.instagram.com/api/v1/media/$mediaId/info/"
+        val headers = mutableMapOf(
+            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+            "X-IG-App-ID" to "936619743392459",
+            "X-ASBD-ID" to "198387",
+            "Accept" to "*/*",
+            "Origin" to "https://www.instagram.com",
+            "Referer" to "https://www.instagram.com/p/$shortcode/",
+            "Cookie" to cookieHeader
+        )
+
+        val respResult = httpSession.fetch(
+            url = apiUrl,
+            profile = RequestProfile.API,
+            origin = "https://www.instagram.com",
+            referer = "https://www.instagram.com/p/$shortcode/",
+            customHeaders = headers
+        )
+
+        val resp = respResult.getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        if (resp.code == 401 || resp.code == 403) {
+            httpSession.sessionProvider.markExpired(Platform.INSTAGRAM, "HTTP ${resp.code}")
+            return@withContext Result.failure(
+                PlatformExtractionError.SessionExpired(
+                    "Instagram 登入狀態已失效（HTTP ${resp.code}），請至設定重新匯入 Session",
+                    internalReason = "API_AUTH_EXPIRED:${resp.code}"
+                )
+            )
+        }
+
+        if (resp.code !in 200..299) {
+            return@withContext Result.failure(
+                PlatformExtractionError.ApiError(resp.code, "Instagram API 回傳錯誤碼 ${resp.code}", internalReason = "API_ERROR:${resp.code}")
+            )
+        }
+
+        try {
+            val json = JSONObject(resp.body)
+            val items = json.optJSONArray("items")
+            if (items == null || items.length() == 0) {
+                val msg = json.optString("message")
+                if (msg.contains("checkpoint_required", ignoreCase = true) || msg.contains("login_required", ignoreCase = true)) {
+                    httpSession.sessionProvider.markExpired(Platform.INSTAGRAM, msg)
+                    return@withContext Result.failure(
+                        PlatformExtractionError.SessionExpired(
+                            "Instagram 登入驗證過期或需要安全檢查 ($msg)",
+                            internalReason = "API_CHECKPOINT_REQUIRED"
+                        )
+                    )
+                }
+                return@withContext Result.failure(
+                    PlatformExtractionError.TargetNotInPageData("Instagram API 回應中未找到貼文項目", internalReason = "API_EMPTY_ITEMS")
+                )
+            }
+
+            val item = items.optJSONObject(0)
+                ?: return@withContext Result.failure(
+                    PlatformExtractionError.ParseError("無法解析 Instagram 媒體資訊物件", internalReason = "API_NULL_ITEM")
+                )
+
+            val parseRes = extractFromMediaObject(item, shortcode, canonicalUrl)
+            if (parseRes is MetaExtractionResult.Success) {
+                Result.success(parseRes.media)
+            } else if (isValidImageOnlyNode(item)) {
+                Result.failure(PlatformExtractionError.NoVideo("此 Instagram 貼文未包含可下載的影片內容（可能為純圖片）", internalReason = "API_IMAGE_ONLY"))
+            } else {
+                Result.failure(PlatformExtractionError.MediaUrlUnsupported("未找到相容的影片串流格式", internalReason = "API_NO_COMPATIBLE_VIDEO"))
+            }
+        } catch (e: Exception) {
+            Result.failure(PlatformExtractionError.ParseError("解析 Instagram API 回應失敗", cause = e))
+        }
+    }
+
+    suspend fun fetchPolarisLoggedOutGraphQL(shortcode: String, canonicalUrl: String): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
+        val endpoint = "https://www.instagram.com/api/graphql"
+        val docId = "27130156389949648"
+        val variables = JSONObject().apply {
+            put("shortcode", shortcode)
+        }.toString()
+
+        val postData = "doc_id=$docId&variables=${URLEncoder.encode(variables, "UTF-8")}"
+
+        val headers = mutableMapOf(
+            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+            "Content-Type" to "application/x-www-form-urlencoded",
+            "X-IG-App-ID" to "936619743392459",
+            "X-ASBD-ID" to "129477",
+            "X-FB-Friendly-Name" to "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+            "Origin" to "https://www.instagram.com",
+            "Referer" to "https://www.instagram.com/p/$shortcode/",
+            "Accept" to "*/*"
+        )
+
+        val respResult = httpSession.fetch(
+            url = endpoint,
+            profile = RequestProfile.API,
+            origin = "https://www.instagram.com",
+            referer = "https://www.instagram.com/p/$shortcode/",
+            customHeaders = headers,
+            body = postData.toByteArray(Charsets.UTF_8),
+            contentType = "application/x-www-form-urlencoded",
+            method = "POST"
+        )
+
+        val resp = respResult.getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        if (resp.code == 429) {
+            return@withContext Result.failure(
+                PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
+            )
+        }
+
+        if (resp.code !in 200..299) {
+            return@withContext Result.failure(
+                PlatformExtractionError.ApiError(resp.code, "Polaris GraphQL 回傳錯誤碼 ${resp.code}", internalReason = "POLARIS_HTTP_${resp.code}")
+            )
+        }
+
+        try {
+            val json = JSONObject(resp.body)
+            val data = json.optJSONObject("data")
+            val polarisMedia = data?.optJSONObject("xig_polaris_media")
+                ?: return@withContext Result.failure(
+                    PlatformExtractionError.TargetNotInPageData("Polaris GraphQL 回應遺漏 xig_polaris_media", internalReason = "POLARIS_MISSING_MEDIA")
+                )
+
+            val gated = polarisMedia.optJSONObject("if_not_gated_logged_out")
+            if (gated == null) {
+                return@withContext Result.failure(
+                    PlatformExtractionError.LoginRequired(
+                        "此 Instagram 內容在未登入狀態下受限，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",
+                        internalReason = "POLARIS_GATED_LOGGED_OUT"
+                    )
+                )
+            }
+
+            val parseRes = extractFromMediaObject(gated, shortcode, canonicalUrl)
+            if (parseRes is MetaExtractionResult.Success) {
+                Result.success(parseRes.media)
+            } else if (isValidImageOnlyNode(gated)) {
+                Result.failure(PlatformExtractionError.NoVideo("此 Instagram 貼文未包含可下載的影片內容（可能為純圖片）", internalReason = "POLARIS_IMAGE_ONLY"))
+            } else {
+                Result.failure(PlatformExtractionError.MediaUrlUnsupported("未找到相容的影片串流格式", internalReason = "POLARIS_NO_COMPATIBLE_VIDEO"))
+            }
+        } catch (e: Exception) {
+            Result.failure(PlatformExtractionError.ParseError("無法解析 Polaris GraphQL 回應", cause = e))
+        }
+    }
+
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         lastDiagnosticFingerprint = null
         lastProfileSequence = emptyList()
@@ -983,23 +1170,79 @@ class NativeInstagramEngine(
             )
 
         val canonicalUrl = normalizeUrl(url)
+        val targetId = shortcodeToId(shortcode)
         val fetchUrl = buildFetchUrl(url)
         val profileSteps = mutableListOf<String>()
-        val profileErrors = mutableListOf<MetaExtractionError>()
+        val profileErrors = mutableListOf<PlatformExtractionError>()
         val diagnosticHistory = mutableListOf<String>()
-        val profiles = listOf(
-            "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
-            "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
-            "CRAWLER" to RequestProfile.CRAWLER_NAVIGATION
-        )
 
         var successfulMedia: ExtractedMetaMedia? = null
 
         safeLog("[Resolver] platform=INSTAGRAM")
 
-        for ((name, profile) in profiles) {
-            profileSteps.add(name)
-            val requestUrl = if (profile == RequestProfile.CRAWLER_NAVIGATION) {
+        // 1. Authenticated API if active session exists
+        if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
+            profileSteps.add("API_AUTHENTICATED")
+            safeLog("[Instagram] authenticated session available, attempting /api/v1/media/$targetId/info/")
+            val authResult = fetchMediaInfoAuthenticated(shortcode, targetId, canonicalUrl)
+            if (authResult.isSuccess) {
+                safeLog("[Instagram] authenticated API success")
+                successfulMedia = authResult.getOrThrow()
+                diagnosticHistory.add("[profile=API_AUTHENTICATED http_status=200 stage=SUCCESS error=NONE]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+            } else {
+                val authErr = authResult.exceptionOrNull() as? PlatformExtractionError
+                safeLog("[Instagram] authenticated API failed: ${authErr?.message}")
+                diagnosticHistory.add("[profile=API_AUTHENTICATED stage=FAILURE error=${authErr?.javaClass?.simpleName}]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+                if (authErr is PlatformExtractionError.SessionExpired || authErr is PlatformExtractionError.NoVideo) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(authErr)
+                }
+            }
+        }
+
+        // 2. Primary anonymous path: Polaris Logged-Out GraphQL
+        if (successfulMedia == null) {
+            profileSteps.add("POLARIS_GRAPHQL")
+            safeLog("[Instagram] attempting Polaris logged-out GraphQL query")
+            val polarisResult = fetchPolarisLoggedOutGraphQL(shortcode, canonicalUrl)
+            if (polarisResult.isSuccess) {
+                safeLog("[Instagram] Polaris GraphQL success")
+                successfulMedia = polarisResult.getOrThrow()
+                diagnosticHistory.add("[profile=POLARIS_GRAPHQL http_status=200 stage=SUCCESS error=NONE]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+            } else {
+                val polarisErr = polarisResult.exceptionOrNull() as? PlatformExtractionError
+                safeLog("[Instagram] Polaris GraphQL failed: ${polarisErr?.message}")
+                diagnosticHistory.add("[profile=POLARIS_GRAPHQL stage=FAILURE error=${polarisErr?.javaClass?.simpleName}]")
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+                if (polarisErr is PlatformExtractionError.RateLimited) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(polarisErr)
+                } else if (polarisErr is PlatformExtractionError.LoginRequired) {
+                    if (!httpSession.sessionProvider.hasAuthenticatedSession(Platform.INSTAGRAM)) {
+                        lastProfileSequence = profileSteps
+                        return@withContext Result.failure(polarisErr)
+                    }
+                } else if (polarisErr is PlatformExtractionError.NoVideo) {
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(polarisErr)
+                }
+            }
+        }
+
+        // 3. Fallback: Desktop / Mobile / Crawler HTML navigation profiles
+        if (successfulMedia == null) {
+            val profiles = listOf(
+                "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
+                "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
+                "CRAWLER" to RequestProfile.CRAWLER_NAVIGATION
+            )
+
+            for ((name, profile) in profiles) {
+                profileSteps.add(name)
+                val requestUrl = if (profile == RequestProfile.CRAWLER_NAVIGATION) {
                 val query = url.substringAfter('?', missingDelimiterValue = "").substringBefore('#').trim()
                 val crawlerBase = "https://www.instagram.com/p/$shortcode/"
                 val crawlerUrl = if (query.isNotBlank()) "$crawlerBase?$query" else crawlerBase
@@ -1013,6 +1256,12 @@ class NativeInstagramEngine(
             val respObj = resp.getOrNull()
             val html = respObj?.body ?: ""
             val httpCode = respObj?.code ?: 0
+            if (httpCode == 429) {
+                lastProfileSequence = profileSteps
+                return@withContext Result.failure(
+                    PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
+                )
+            }
             val contentType = respObj?.getHeader("content-type") ?: (if (resp.isFailure) "none" else "text/html")
             val bodyBytes = html.toByteArray().size
             val sizeBucket = formatSizeBucket(bodyBytes)
@@ -1105,6 +1354,7 @@ class NativeInstagramEngine(
                 }
             }
         }
+    }
 
         lastProfileSequence = profileSteps
 
@@ -1132,7 +1382,7 @@ class NativeInstagramEngine(
             return@withContext Result.failure(
                 MetaExtractionError.Restricted(
                     RestrictionReason.LOGIN_REQUIRED,
-                    "來源網站需要登入帳號驗證，目前版本不支援登入下載"
+                    "此 Instagram 貼文需要登入帳號驗證，請至設定匯入 Instagram Session"
                 )
             )
         }

@@ -199,6 +199,7 @@ class NativeInstagramEngineTest {
         private val browserHtml: String = "",
         private val mobileHtml: String = "",
         private val crawlerHtml: String = "",
+        private val polarisJson: String? = null,
         private val downloadSuccess: Boolean = true
     ) : PlatformHttpSession() {
         var desktopFetchCount = 0
@@ -230,6 +231,13 @@ class NativeInstagramEngineTest {
                 RequestProfile.CRAWLER_NAVIGATION -> {
                     crawlerFetchCount++
                     Result.success(HttpResponse(200, url, crawlerHtml, emptyMap()))
+                }
+                RequestProfile.API -> {
+                    if (polarisJson != null) {
+                        Result.success(HttpResponse(200, url, polarisJson, emptyMap()))
+                    } else {
+                        Result.failure(java.io.IOException("Polaris not mocked"))
+                    }
                 }
                 else -> Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
             }
@@ -268,7 +276,7 @@ class NativeInstagramEngineTest {
         assertEquals(1, fakeSession.desktopFetchCount)
         assertEquals(1, fakeSession.mobileFetchCount)
         assertEquals(1, fakeSession.crawlerFetchCount)
-        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), customEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE", "CRAWLER"), customEngine.lastProfileSequence)
     }
 
     @Test
@@ -285,7 +293,7 @@ class NativeInstagramEngineTest {
         assertEquals(1, fakeSession.desktopFetchCount)
         assertEquals(0, fakeSession.mobileFetchCount)
         assertEquals(0, fakeSession.crawlerFetchCount)
-        assertEquals(listOf("DESKTOP"), customEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP"), customEngine.lastProfileSequence)
     }
 
     @Test
@@ -465,7 +473,7 @@ class NativeInstagramEngineTest {
         val mediaInfo = result.getOrNull()
         assertNotNull(mediaInfo)
         assertEquals("https://www.instagram.com/reel/DdS5sMrxkBq/", mediaInfo?.sourceUrl)
-        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -498,7 +506,7 @@ class NativeInstagramEngineTest {
         val restricted = error as MetaExtractionError.Restricted
         assertEquals(RestrictionReason.LOGIN_REQUIRED, restricted.reason)
         assertFalse("Terminal login-required must not fallback", restricted.canFallback)
-        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -540,8 +548,11 @@ class NativeInstagramEngineTest {
                 contentType: String?,
                 method: String
             ): Result<HttpResponse> {
-                requestedUrls.add(url)
-                return Result.success(HttpResponse(200, url, publicFixtureHtml, emptyMap()))
+                if (profile != RequestProfile.API) {
+                    requestedUrls.add(url)
+                    return Result.success(HttpResponse(200, url, publicFixtureHtml, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Polaris not mocked"))
             }
         }
 
@@ -838,7 +849,7 @@ class NativeInstagramEngineTest {
         assertEquals("https://www.instagram.com/reel/DdXescalate/", mediaInfo?.sourceUrl)
         assertEquals(1, fakeSession.desktopCount)
         assertEquals(1, fakeSession.mobileCount)
-        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -956,7 +967,7 @@ class NativeInstagramEngineTest {
         assertTrue("Expected extraction to succeed after escalating to MOBILE", result.isSuccess)
         assertEquals(1, fakeSession.desktopCalled)
         assertEquals(1, fakeSession.mobileCalled)
-        assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
 
     @Test
@@ -1103,7 +1114,7 @@ class NativeInstagramEngineTest {
         assertNotNull(media)
         assertEquals("https://cdninstagram.com/escalate.mp4", media?.qualityOptions?.first()?.formatSelector)
 
-        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
 
         val fp = testEngine.lastDiagnosticFingerprint
         assertNotNull(fp)
@@ -1156,7 +1167,7 @@ class NativeInstagramEngineTest {
         assertTrue("Technical error MUST be fallback-eligible", (err as MetaExtractionError.Technical).canFallback)
         assertFalse("Must not report target-not-in-page when no parse ran", err.message?.contains("not found in page data") == true)
 
-        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
+        assertEquals(listOf("POLARIS_GRAPHQL", "DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
 
         val fp = testEngine.lastDiagnosticFingerprint
         assertNotNull(fp)
@@ -1164,5 +1175,190 @@ class NativeInstagramEngineTest {
         assertTrue("Fingerprint must contain MOBILE EMPTY_BODY", fp.contains("profile=MOBILE") && fp.contains("stage=EMPTY_BODY"))
         assertTrue("Fingerprint must contain CRAWLER EMPTY_BODY", fp.contains("profile=CRAWLER") && fp.contains("stage=EMPTY_BODY"))
         assertFalse("Fingerprint must NOT contain TARGET_NOT_IN_PAGE", fp.contains("TARGET_NOT_IN_PAGE"))
+    }
+
+    @Test
+    fun extractMediaInfo_polarisGraphQL_success_extractsMediaImmediately() = runBlocking {
+        val polarisJson = """
+            {
+              "data": {
+                "xig_polaris_media": {
+                  "if_not_gated_logged_out": {
+                    "shortcode": "DdS5sMrxkBq",
+                    "id": "123456789",
+                    "is_video": true,
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/polaris_1080.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "owner": {"username": "polaris_user"},
+                    "display_url": "https://instagram.com/cdn/thumb.jpg"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = FakePlatformHttpSession(polarisJson = polarisJson)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+
+        val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+        assertTrue("Expected extraction to succeed via Polaris GraphQL", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertTrue("Expected non-blank title", media?.title?.isNotBlank() == true)
+        assertEquals("https://instagram.com/cdn/polaris_1080.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(listOf("POLARIS_GRAPHQL"), customEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_polarisGraphQL_gatedLoggedOut_returnsTerminalLoginRequired() = runBlocking {
+        val polarisJson = """
+            {
+              "data": {
+                "xig_polaris_media": {
+                  "if_not_gated_logged_out": null
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = FakePlatformHttpSession(polarisJson = polarisJson)
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+
+        val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+        assertTrue("Expected failure when post is gated logged out", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be LoginRequired, found $error", error is PlatformExtractionError.LoginRequired)
+        assertEquals(listOf("POLARIS_GRAPHQL"), customEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_polarisGraphQL_explicit429_returnsRateLimitedImmediately() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(429, url, "Too Many Requests", emptyMap()))
+            }
+        }
+
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+        assertTrue("Expected failure on HTTP 429", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be RateLimited, found $error", error is PlatformExtractionError.RateLimited)
+        assertEquals(listOf("POLARIS_GRAPHQL"), customEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_authenticatedSession_callsMediaInfoApi_success() = runBlocking {
+        val store = com.charleswoo1.videodownloader.data.download.http.InMemoryPlatformCredentialStore()
+        val sessionProvider = com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(
+            com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM,
+            "sessionid=test_session_id_123456789; csrftoken=abc; ds_user_id=12345"
+        )
+
+        val apiJson = """
+            {
+              "items": [
+                {
+                  "code": "DdS5sMrxkBq",
+                  "id": "123456789",
+                  "video_versions": [
+                    {"url": "https://instagram.com/cdn/auth_video.mp4", "width": 1080, "height": 1920}
+                  ],
+                  "user": {"username": "auth_creator"},
+                  "image_versions2": {
+                    "candidates": [
+                      {"url": "https://instagram.com/cdn/auth_thumb.jpg", "width": 1080, "height": 1920}
+                    ]
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/v1/media/")) {
+                    return Result.success(HttpResponse(200, url, apiJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not expected"))
+            }
+        }
+
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+
+        assertTrue("Expected success via Authenticated API", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertTrue("Expected non-blank title", media?.title?.isNotBlank() == true)
+        assertEquals("https://instagram.com/cdn/auth_video.mp4", media?.qualityOptions?.first()?.formatSelector)
+        assertEquals(listOf("API_AUTHENTICATED"), customEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_authenticatedSession_sessionExpired401_marksExpiredAndReturnsSessionExpired() = runBlocking {
+        val store = com.charleswoo1.videodownloader.data.download.http.InMemoryPlatformCredentialStore()
+        val sessionProvider = com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(
+            com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM,
+            "sessionid=expired_session; csrftoken=abc; ds_user_id=12345"
+        )
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/v1/media/")) {
+                    return Result.success(HttpResponse(401, url, """{"message": "login_required"}""", emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Not expected"))
+            }
+        }
+
+        val customEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = customEngine.extractMediaInfo("https://www.instagram.com/reel/DdS5sMrxkBq/")
+
+        assertTrue("Expected failure on 401 expired session", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be SessionExpired, found $error", error is PlatformExtractionError.SessionExpired)
+        assertFalse("Session must be marked expired", sessionProvider.hasAuthenticatedSession(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM))
+        assertEquals(
+            com.charleswoo1.videodownloader.data.download.http.SessionState.EXPIRED,
+            sessionProvider.sessionStatus(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM).state
+        )
+        assertEquals(listOf("API_AUTHENTICATED"), customEngine.lastProfileSequence)
     }
 }

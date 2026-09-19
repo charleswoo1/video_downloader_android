@@ -795,11 +795,7 @@ class NativeXEngine(
         } else {
             rawResultObj
         }
-        val effectiveTypename = if (outerTypename == "TweetWithVisibilityResults") {
-            rawResultObj?.optJSONObject("tweet")?.optString("__typename")?.ifBlank { "none" } ?: "none"
-        } else {
-            outerTypename
-        }
+        val effectiveTypename = unwrappedTweet?.optString("__typename")?.ifBlank { "none" } ?: "none"
 
         val wrapperChain = when (outerTypename) {
             "TweetWithVisibilityResults" -> "tweetResult->TweetWithVisibilityResults->tweet"

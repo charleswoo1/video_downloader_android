@@ -1095,4 +1095,34 @@ class NativeXEngineTest {
         val fp = diag.toFingerprint()
         assertTrue("Fingerprint must contain transport_error=IOException", fp.contains("transport_error=IOException"))
     }
+
+    @Test
+    fun computeGraphQLDiagnostics_visibilityWrapperWithoutTweetChild_outerAndEffectiveAreBothTweetWithVisibilityResults() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetWithVisibilityResults"
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "555666", retryAttempted = false)
+        assertEquals("TweetWithVisibilityResults", diag.outerTypename)
+        assertEquals("TweetWithVisibilityResults", diag.effectiveTypename)
+        assertEquals("tweetResult->TweetWithVisibilityResults->tweet", diag.wrapperChain)
+        assertEquals("none", diag.provisionalTypename)
+
+        val fp = diag.toFingerprint(1)
+        assertTrue("Fingerprint must contain outer_typename=TweetWithVisibilityResults", fp.contains("outer_typename=TweetWithVisibilityResults"))
+        assertTrue("Fingerprint must contain effective_typename=TweetWithVisibilityResults", fp.contains("effective_typename=TweetWithVisibilityResults"))
+
+        val parseResult = engine.parseGraphQLTweet(json, "https://x.com/user/status/555666", "555666")
+        assertTrue("Parser must fail when legacy data is missing from unwrapped TweetWithVisibilityResults", parseResult.isFailure)
+        val err = parseResult.exceptionOrNull()
+        assertEquals("GRAPHQL_MISSING_LEGACY", (err as? PlatformExtractionError)?.internalReason)
+    }
 }

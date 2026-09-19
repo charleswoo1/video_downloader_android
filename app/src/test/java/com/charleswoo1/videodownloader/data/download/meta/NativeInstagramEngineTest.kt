@@ -1058,4 +1058,111 @@ class NativeInstagramEngineTest {
         assertFalse(outcome.diagnostics.targetWrapperSeen)
         assertFalse(outcome.diagnostics.validatedMediaNodeFound)
     }
+
+    @Test
+    fun extractMediaInfo_failedDesktopAndEmptyMobile_escalatesToCrawlerAndSucceeds() = runBlocking {
+        val crawlerHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {"data":{"xdt_shortcode_media":{"code":"TestEscalatePost","id":"999111","video_versions":[{"url":"https://cdninstagram.com/escalate.mp4","width":1080,"height":1920}]}}}
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<PlatformHttpSession.HttpResponse> {
+                return when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> Result.failure(java.io.IOException("Network connection reset"))
+                    RequestProfile.MOBILE_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(403, url, "", mapOf("content-type" to "text/html"))
+                    )
+                    RequestProfile.CRAWLER_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(200, url, crawlerHtml, mapOf("content-type" to "text/html"))
+                    )
+                    else -> Result.failure(java.io.IOException("Unsupported profile"))
+                }
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/TestEscalatePost/")
+
+        assertTrue("Extraction should succeed via CRAWLER escalation", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("https://cdninstagram.com/escalate.mp4", media?.qualityOptions?.first()?.formatSelector)
+
+        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
+
+        val fp = testEngine.lastDiagnosticFingerprint
+        assertNotNull(fp)
+        assertTrue("Fingerprint must contain DESKTOP with FETCH_FAILED", fp!!.contains("profile=DESKTOP") && fp.contains("stage=FETCH_FAILED") && fp.contains("error=IOException"))
+        assertTrue("Fingerprint must contain MOBILE with EMPTY_BODY", fp.contains("profile=MOBILE") && fp.contains("http_status=403") && fp.contains("stage=EMPTY_BODY"))
+        assertTrue("Fingerprint must contain CRAWLER with error=NONE", fp.contains("profile=CRAWLER") && fp.contains("http_status=200") && fp.contains("error=NONE"))
+
+        val desktopIdx = fp.indexOf("profile=DESKTOP")
+        val mobileIdx = fp.indexOf("profile=MOBILE")
+        val crawlerIdx = fp.indexOf("profile=CRAWLER")
+
+        assertTrue("DESKTOP must precede MOBILE", desktopIdx < mobileIdx)
+        assertTrue("MOBILE must precede CRAWLER", mobileIdx < crawlerIdx)
+    }
+
+    @Test
+    fun extractMediaInfo_allProfilesFailBeforeParsing_returnsFallbackEligibleTechnicalError() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<PlatformHttpSession.HttpResponse> {
+                return when (profile) {
+                    RequestProfile.DESKTOP_NAVIGATION -> Result.failure(java.io.IOException("Desktop fetch timeout"))
+                    RequestProfile.MOBILE_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(403, url, "", mapOf("content-type" to "text/html"))
+                    )
+                    RequestProfile.CRAWLER_NAVIGATION -> Result.success(
+                        PlatformHttpSession.HttpResponse(500, url, "   ", mapOf("content-type" to "text/html"))
+                    )
+                    else -> Result.failure(java.io.IOException("Unsupported profile"))
+                }
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/AllFailedPost/")
+
+        assertTrue("Extraction must fail when all profiles fail", result.isFailure)
+        val err = result.exceptionOrNull()
+        assertTrue("Error must be MetaExtractionError.Technical", err is MetaExtractionError.Technical)
+        assertTrue("Technical error MUST be fallback-eligible", (err as MetaExtractionError.Technical).canFallback)
+        assertFalse("Must not report target-not-in-page when no parse ran", err.message?.contains("not found in page data") == true)
+
+        assertEquals(listOf("DESKTOP", "MOBILE", "CRAWLER"), testEngine.lastProfileSequence)
+
+        val fp = testEngine.lastDiagnosticFingerprint
+        assertNotNull(fp)
+        assertTrue("Fingerprint must contain DESKTOP FETCH_FAILED", fp!!.contains("profile=DESKTOP") && fp.contains("stage=FETCH_FAILED"))
+        assertTrue("Fingerprint must contain MOBILE EMPTY_BODY", fp.contains("profile=MOBILE") && fp.contains("stage=EMPTY_BODY"))
+        assertTrue("Fingerprint must contain CRAWLER EMPTY_BODY", fp.contains("profile=CRAWLER") && fp.contains("stage=EMPTY_BODY"))
+        assertFalse("Fingerprint must NOT contain TARGET_NOT_IN_PAGE", fp.contains("TARGET_NOT_IN_PAGE"))
+    }
 }

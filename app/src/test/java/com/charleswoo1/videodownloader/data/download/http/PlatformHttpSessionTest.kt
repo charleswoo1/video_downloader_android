@@ -154,6 +154,37 @@ class PlatformHttpSessionTest {
     }
 
     @Test
+    fun sanitizeLogText_redactsInstagramStknQueryParameter() {
+        val raw = "Fetched https://www.instagram.com/reel/C12345/?stkn=SECRET_STKN_VAL&utm_source=ig_web_copy_link -> HTTP 200"
+        val sanitized = PlatformHttpSession.sanitizeLogText(raw)
+
+        assertFalse("Secret stkn must not be visible", sanitized.contains("SECRET_STKN_VAL"))
+        assertTrue("stkn parameter must be redacted", sanitized.contains("stkn=[REDACTED]"))
+        assertTrue("Other parameters should be preserved", sanitized.contains("utm_source=ig_web_copy_link"))
+    }
+
+    @Test
+    fun sanitizeLogText_reducesSignedMediaUrlToHostPathAndRedactedQuery() {
+        val raw = "Stream download failed for https://video.twimg.com/ext_tw_video/123/pu/vid/720x1280/video.mp4?tag=12&signature=SECRET_SIG_789"
+        val sanitized = PlatformHttpSession.sanitizeLogText(raw)
+
+        assertFalse("Secret signature must not be visible", sanitized.contains("SECRET_SIG_789"))
+        assertTrue("Signed media URL query must be reduced to [REDACTED_QUERY]",
+            sanitized.contains("https://video.twimg.com/ext_tw_video/123/pu/vid/720x1280/video.mp4?[REDACTED_QUERY]"))
+    }
+
+    @Test
+    fun sanitizeLogText_redactsSignatureAndSigParams() {
+        val raw = "GET https://api.example.com/stream?sig=secret_sig_value&signature=secret_signature_value"
+        val sanitized = PlatformHttpSession.sanitizeLogText(raw)
+
+        assertFalse("sig value must not be visible", sanitized.contains("secret_sig_value"))
+        assertFalse("signature value must not be visible", sanitized.contains("secret_signature_value"))
+        assertTrue(sanitized.contains("sig=[REDACTED]"))
+        assertTrue(sanitized.contains("signature=[REDACTED]"))
+    }
+
+    @Test
     fun downloadMediaStream_passesOriginAndRefererHeaders() {
         var capturedOrigin: String? = null
         var capturedReferer: String? = null

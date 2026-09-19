@@ -884,4 +884,112 @@ class NativeXEngineTest {
         assertTrue("targetRestIdPresent must be true", diag.targetRestIdPresent)
         assertEquals("TweetWithVisibilityResults", diag.resultTypename)
     }
+
+    @Test
+    fun computeGraphQLDiagnostics_legacyCardUnifiedCard_assertsHasCardAndHasUnifiedCardTrue() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "rest_id": "888777",
+                    "legacy": {
+                      "card": {
+                        "legacy": {
+                          "name": "unified_card",
+                          "binding_values": [
+                            {
+                              "key": "unified_card",
+                              "value": {
+                                "string_value": "{\"media_entities\":{}}"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "888777", retryAttempted = false)
+        assertTrue("hasCard must be true for legacy.card", diag.hasCard)
+        assertTrue("hasUnifiedCard must be true when legacy.card.legacy contains unified_card", diag.hasUnifiedCard)
+    }
+
+    @Test
+    fun computeGraphQLDiagnostics_legacyCardNonUnifiedCard_assertsHasCardTrueAndHasUnifiedCardFalse() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "rest_id": "888778",
+                    "legacy": {
+                      "card": {
+                        "legacy": {
+                          "name": "summary_large_image",
+                          "binding_values": [
+                            {
+                              "key": "photo_image_full_size",
+                              "value": {
+                                "string_value": "https://pbs.twimg.com/media/sample.jpg"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val diag = engine.computeGraphQLDiagnostics(json, 200, "888778", retryAttempted = false)
+        assertTrue("hasCard must be true for legacy.card", diag.hasCard)
+        assertFalse("hasUnifiedCard must be false when legacy.card is not a unified_card", diag.hasUnifiedCard)
+    }
+
+    @Test
+    fun parseGraphQLTweet_readsCardFromLegacyCardLegacy_succeeds() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "Tweet",
+                    "rest_id": "888779",
+                    "legacy": {
+                      "full_text": "Tweet with legacy unified card",
+                      "card": {
+                        "legacy": {
+                          "name": "unified_card",
+                          "binding_values": [
+                            {
+                              "key": "unified_card",
+                              "value": {
+                                "string_value": "{\"media_entities\":{\"m1\":{\"type\":\"video\",\"video_info\":{\"variants\":[{\"content_type\":\"video/mp4\",\"url\":\"https://video.twimg.com/card_vid.mp4\",\"bitrate\":1200}]}}}}"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/user/status/888779", "888779")
+        assertTrue("parseGraphQLTweet must succeed for legacy.card.legacy media", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("https://video.twimg.com/card_vid.mp4", media?.renditions?.first()?.url)
+    }
 }

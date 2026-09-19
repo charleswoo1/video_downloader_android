@@ -1010,20 +1010,50 @@ class NativeInstagramEngine(
             }
 
             val resp = httpSession.fetch(requestUrl, profile)
-            val html = resp.getOrNull()?.body ?: ""
-
-            val parseOutcome = parseInstagramPageWithDiagnostics(html, shortcode, canonicalUrl)
-            val parseResult = parseOutcome.result
-            val diag = parseOutcome.diagnostics
-
             val respObj = resp.getOrNull()
+            val html = respObj?.body ?: ""
             val httpCode = respObj?.code ?: 0
-            val contentType = respObj?.getHeader("content-type") ?: "text/html"
+            val contentType = respObj?.getHeader("content-type") ?: (if (resp.isFailure) "none" else "text/html")
             val bodyBytes = html.toByteArray().size
             val sizeBucket = formatSizeBucket(bodyBytes)
             val finalUrl = respObj?.finalUrl ?: requestUrl
             val cleanPath = cleanHostAndPath(finalUrl)
             val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != requestUrl) "yes" else "no"
+
+            if (resp.isFailure || html.isBlank()) {
+                val stage = if (resp.isFailure) "FETCH_FAILED" else "EMPTY_BODY"
+                val errorClassName = if (resp.isFailure) {
+                    resp.exceptionOrNull()?.javaClass?.simpleName ?: "IOException"
+                } else {
+                    "EMPTY_BODY"
+                }
+                val failureMessage = if (resp.isFailure) {
+                    "HTTP fetch failed for profile $name: ${resp.exceptionOrNull()?.message}"
+                } else {
+                    "Empty response body for profile $name (HTTP $httpCode)"
+                }
+                val stepError = MetaExtractionError.Technical(failureMessage, internalReason = stage)
+                profileErrors.add(stepError)
+
+                val profileFp = """
+                    [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=$stage error=$errorClassName]
+                    scripts: app_json=0 data_sjs=0 generic=0
+                    target: raw=false decoded=false wrapper=false media_node=false
+                    keys: none
+                    markers: none
+                    restriction: NONE
+                """.trimIndent()
+                diagnosticHistory.add(profileFp)
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+
+                safeLog("[Instagram] profile=$name fetch_failed=${resp.isFailure} empty_body=${html.isBlank()} stage=$stage")
+                continue
+            }
+
+            val parseOutcome = parseInstagramPageWithDiagnostics(html, shortcode, canonicalUrl)
+            val parseResult = parseOutcome.result
+            val diag = parseOutcome.diagnostics
+
             val errorClassName = when (parseResult) {
                 is MetaExtractionResult.Success -> "NONE"
                 is MetaExtractionResult.Failure -> parseResult.error.javaClass.simpleName

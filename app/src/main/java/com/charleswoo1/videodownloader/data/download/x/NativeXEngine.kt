@@ -837,7 +837,15 @@ class NativeXEngine(
         val cardLegacy = unwrappedTweet?.optJSONObject("card")?.optJSONObject("legacy")
             ?: rawResultObj?.optJSONObject("card")?.optJSONObject("legacy")
             ?: legacy?.optJSONObject("card")?.optJSONObject("legacy")
-        val hasUnifiedCard = (cardLegacy?.opt("binding_values") != null)
+        val bindingValues = cardLegacy?.opt("binding_values")
+        val hasUnifiedCard = when (bindingValues) {
+            is org.json.JSONArray -> (0 until bindingValues.length()).any { i ->
+                val item = bindingValues.optJSONObject(i)
+                item?.optString("key") == "unified_card" || item?.has("unified_card") == true
+            } || cardLegacy?.optString("name") == "unified_card"
+            is JSONObject -> bindingValues.has("unified_card") || cardLegacy?.optString("name") == "unified_card"
+            else -> cardLegacy?.optString("name") == "unified_card"
+        }
 
         val hasQuotedStatus = (
             unwrappedTweet?.optJSONObject("quoted_status_result") != null ||

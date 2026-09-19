@@ -10,13 +10,13 @@ Reviewed CI: Android CI Run #39 — SUCCESS
 
 Artifact: `SocialVideoDownloader-Android-CI-v0.1.0-run-39`
 
-Status: **review correction contract / NOT merge, tag, or release authorization**
+Status: **review correction contract / local-validation + review gate / NOT merge, tag, or release authorization**
 
 Governing contract remains:
 
 `docs/handoffs/HANDOFF_ANDROID_AUTH_REFERENCE_V3.md`
 
-This file is a narrow follow-up. It does not authorize a new architecture. Fix the blockers below, rerun tests/CI, and return a new APK for owner-device testing.
+This file is a narrow follow-up. It does not authorize a new architecture. Fix the blockers below, run the required local Gradle gates, push for ChatGPT review, and **do not trigger GitHub Actions CI until review reports no blocking findings**. Only then manually trigger Android CI to produce the next APK for owner-device testing.
 
 ---
 
@@ -379,7 +379,7 @@ Before merge/release, ensure the final code-level adaptations and required MIT n
 
 # Required verification after fixes
 
-Run:
+Run locally:
 
 ```bash
 ./gradlew test
@@ -387,12 +387,67 @@ Run:
 ./gradlew assembleDebug
 ```
 
-Then push to the same PR #2 branch and wait for Android CI.
+Then:
 
-Return:
+1. push to the same PR #2 branch;
+2. report local test/lint/assemble results;
+3. request ChatGPT review;
+4. if any blocker remains, continue fixing and repeat local validation — **do not run GitHub CI**;
+5. only after ChatGPT review reports **no blocking findings**, manually trigger:
+   `GitHub → Actions → Android CI → Run workflow → feat/android-v0.1.0-initial`;
+6. use that review-approved CI run to generate the next owner-device APK.
+
+Current workflow policy is intentionally:
+
+```yaml
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+```
+
+Feature/PR branch pushes must not automatically consume CI runs.
+
+Return before CI review gate:
 
 ```text
 Head commit:
+Local unit tests:
+Local lint:
+Local assembleDebug:
+Review gate: BLOCKERS REMAIN / READY FOR CI
+
+Blocker 1 Instagram Polaris:
+- reference rechecked:
+- request contract:
+- tests:
+
+Blocker 2 Threads Barcelona:
+- reference rechecked:
+- bootstrap/LSD contract:
+- tests:
+
+Blocker 3 HttpOnly Netscape:
+- implementation:
+- tests:
+
+Blocker 4 session validation:
+- state semantics:
+- IG validation:
+- Threads validation:
+- X validation:
+- tests:
+
+Known limitations:
+Merged: NO
+Release created: NO
+```
+
+Only after review says READY FOR CI, return:
+
+```text
+Head commit:
+CI trigger: manual workflow_dispatch
 CI run:
 Artifact:
 Artifact digest:

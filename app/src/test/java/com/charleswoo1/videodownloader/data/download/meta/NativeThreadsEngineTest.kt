@@ -833,9 +833,45 @@ class NativeThreadsEngineTest {
         assertTrue("Expected success for signed URL nested JSON", result is MetaExtractionResult.Success)
         val media = (result as MetaExtractionResult.Success).media
         val extractedUrl = media.progressiveVideoUrls.first()
-        // Verify literal '+' in query tokens is preserved and not replaced or corrupted
-        assertTrue("Literal '+' in sig must be preserved", extractedUrl.contains("sig=abc+123"))
-        assertTrue("Literal '+' in stkn must be preserved", extractedUrl.contains("stkn=tok+456+xyz"))
-        assertTrue("Query param after unicode escape must be preserved", extractedUrl.contains("hash=def"))
+        // Verify full normalized URL preserves literal '+' and normalizes escapes
+        assertEquals("https://threads.net/cdn/video_1080.mp4?sig=abc+123&stkn=tok+456+xyz&hash=def", extractedUrl)
+    }
+
+    @Test
+    fun parseThreadsPage_targetWithMediaType19AndUnknownMediaContainer_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "MediaType19Post",
+                        "user": {"username": "creator_19"},
+                        "caption": {"text": "Media type 19 post without explicit text/image markers"},
+                        "media_type": 19,
+                        "unrecognized_media_payload": {
+                          "stream": "https://threads.net/cdn/unknown_video.mp4"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, "MediaType19Post", "https://www.threads.com/@creator_19/post/MediaType19Post")
+        assertTrue("Expected failure for media_type=19 with unknown media container", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Expected Technical error allowing fallback, found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Must be fallback-eligible", error.canFallback)
     }
 }

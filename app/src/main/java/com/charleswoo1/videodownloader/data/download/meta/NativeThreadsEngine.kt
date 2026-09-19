@@ -465,7 +465,7 @@ class NativeThreadsEngine(
         }
 
         val mediaType = obj.optInt("media_type", 0)
-        if (mediaType == 1 || mediaType == 19) {
+        if (mediaType == 1) {
             return true
         }
 

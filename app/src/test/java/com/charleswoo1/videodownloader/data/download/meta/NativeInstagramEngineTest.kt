@@ -839,4 +839,40 @@ class NativeInstagramEngineTest {
         assertEquals(1, fakeSession.mobileCount)
         assertEquals(listOf("DESKTOP", "MOBILE"), testEngine.lastProfileSequence)
     }
+
+    @Test
+    fun parseInstagramPage_targetWithImageVersions2AndUnknownMediaContainer_returnsTechnicalAllowingFallback() {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <body>
+            <script type="application/json">
+            {
+              "data": {
+                "xdt_shortcode_media": {
+                  "shortcode": "DdXunknownContainer",
+                  "id": "999888777",
+                  "owner": {"username": "creator_reel"},
+                  "image_versions2": {
+                    "candidates": [
+                      {"url": "https://instagram.com/thumbnail_candidate.jpg", "width": 1080, "height": 1920}
+                    ]
+                  },
+                  "unrecognized_video_stream": {
+                    "url": "https://instagram.com/stream.mp4"
+                  }
+                }
+              }
+            }
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseInstagramPage(html, "DdXunknownContainer", "https://www.instagram.com/reel/DdXunknownContainer/")
+        assertTrue("Expected failure for target with image_versions2 and unknown media container", result is MetaExtractionResult.Failure)
+        val error = (result as MetaExtractionResult.Failure).error
+        assertTrue("Expected Technical error, found: $error", error is MetaExtractionError.Technical)
+        assertTrue("Must allow fallback / profile escalation", error.canFallback)
+    }
 }

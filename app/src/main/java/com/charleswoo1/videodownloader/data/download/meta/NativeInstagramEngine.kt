@@ -419,6 +419,12 @@ class NativeInstagramEngine(
                     MetaExtractionError.NoVideo("此 Instagram 貼文未包含任何影片 (可能為純圖片貼文)")
                 )
             }
+
+            return MetaExtractionResult.Failure(
+                MetaExtractionError.Technical(
+                    "Target shortcode $targetShortcode media node found but lacks recognized video structure or explicit photo type"
+                )
+            )
         }
 
         // If target wrapper was found but no validated media node resolved, do NOT return NoVideo
@@ -520,9 +526,6 @@ class NativeInstagramEngine(
 
         val typename = obj.optString("__typename")
         if (typename == "GraphImage" || typename == "XDTGraphImage") return true
-
-        val images = obj.optJSONObject("image_versions2")?.optJSONArray("candidates")
-        if (images != null && images.length() > 0) return true
 
         val mediaType = obj.optInt("media_type", 0)
         if (mediaType == 1) return true

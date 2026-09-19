@@ -79,10 +79,34 @@ class PlatformEngineRouter(
         }
     }
 
-    private fun getFallbackCategory(fallbackResult: Result<MediaInfo>, platform: Platform): String {
-        if (fallbackResult.isSuccess) return "SUCCESS"
-        val msg = fallbackResult.exceptionOrNull()?.message
-        return YtDlpErrorParser.parse(msg, platform).category.name
+    private data class FallbackDiagnostics(
+        val category: String,
+        val primaryError: String?
+    )
+
+    private fun getFallbackDiagnostics(fallbackResult: Result<*>, platform: Platform): FallbackDiagnostics {
+        if (fallbackResult.isSuccess) return FallbackDiagnostics("SUCCESS", null)
+        val ex = fallbackResult.exceptionOrNull()
+        if (ex is YtDlpExtractionException) {
+            return FallbackDiagnostics(ex.category.name, ex.primaryError)
+        }
+        val parsed = YtDlpErrorParser.parse(ex?.message, platform)
+        return FallbackDiagnostics(parsed.category.name, parsed.primaryError)
+    }
+
+    private fun buildRouterFingerprint(
+        baseFingerprint: String?,
+        fallbackAttempted: Boolean,
+        fallbackDiag: FallbackDiagnostics? = null
+    ): String {
+        val snippet = if (fallbackAttempted) {
+            val cat = fallbackDiag?.category ?: "UNKNOWN"
+            val errPart = fallbackDiag?.primaryError?.let { " primary_error=\"$it\"" } ?: ""
+            "router_fallback: attempted=yes engine=YtDlpDownloadEngine category=$cat$errPart"
+        } else {
+            "router_fallback: attempted=no"
+        }
+        return if (!baseFingerprint.isNullOrBlank()) "$baseFingerprint\n---\n$snippet" else snippet
     }
 
     private suspend fun routeInstagram(url: String, opId: String): Result<MediaInfo> {
@@ -102,7 +126,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
                     finalResult = "SUCCESS",
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return result
@@ -122,7 +146,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
                     finalResult = primaryCategory,
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return Result.failure(error)
@@ -131,7 +155,8 @@ class PlatformEngineRouter(
         // Technical failure: attempt yt-dlp fallback
         safeLog("Instagram native extraction failed ($primaryCategory); falling back to yt-dlp")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
-        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.INSTAGRAM)
+        val fallbackDiag = getFallbackDiagnostics(fallbackResult, Platform.INSTAGRAM)
+        val fallbackCategory = fallbackDiag.category
         val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
         recordTrace(
@@ -146,7 +171,8 @@ class PlatformEngineRouter(
                 fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
                 finalResult = finalResultStatus,
-                diagnosticFingerprint = diagFingerprint
+                diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, true, fallbackDiag),
+                fallbackSanitizedError = fallbackDiag.primaryError
             )
         )
         return fallbackResult
@@ -169,7 +195,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
                     finalResult = "SUCCESS",
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return result
@@ -189,7 +215,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
                     finalResult = primaryCategory,
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return Result.failure(error)
@@ -198,7 +224,8 @@ class PlatformEngineRouter(
         // Technical failure: attempt yt-dlp fallback
         safeLog("Threads native extraction failed ($primaryCategory); falling back to yt-dlp + plugin")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
-        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.THREADS)
+        val fallbackDiag = getFallbackDiagnostics(fallbackResult, Platform.THREADS)
+        val fallbackCategory = fallbackDiag.category
         val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
         recordTrace(
@@ -213,7 +240,8 @@ class PlatformEngineRouter(
                 fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
                 finalResult = finalResultStatus,
-                diagnosticFingerprint = diagFingerprint
+                diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, true, fallbackDiag),
+                fallbackSanitizedError = fallbackDiag.primaryError
             )
         )
 
@@ -254,7 +282,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = primaryEngineName,
                     finalResult = "SUCCESS",
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return result
@@ -274,7 +302,7 @@ class PlatformEngineRouter(
                     fallbackAttempted = false,
                     finalEngine = "$primaryEngineName (TERMINATED)",
                     finalResult = primaryCategory,
-                    diagnosticFingerprint = diagFingerprint
+                    diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, false)
                 )
             )
             return Result.failure(error)
@@ -283,7 +311,8 @@ class PlatformEngineRouter(
         // Technical failure: attempt yt-dlp fallback
         safeLog("X native extraction failed ($primaryCategory); falling back to yt-dlp")
         val fallbackResult = ytDlpEngine.extractMediaInfo(url)
-        val fallbackCategory = getFallbackCategory(fallbackResult, Platform.X)
+        val fallbackDiag = getFallbackDiagnostics(fallbackResult, Platform.X)
+        val fallbackCategory = fallbackDiag.category
         val finalResultStatus = if (fallbackResult.isSuccess) "SUCCESS" else fallbackCategory
 
         recordTrace(
@@ -298,7 +327,8 @@ class PlatformEngineRouter(
                 fallbackResultCategory = fallbackCategory,
                 finalEngine = "YtDlpDownloadEngine",
                 finalResult = finalResultStatus,
-                diagnosticFingerprint = diagFingerprint
+                diagnosticFingerprint = buildRouterFingerprint(diagFingerprint, true, fallbackDiag),
+                fallbackSanitizedError = fallbackDiag.primaryError
             )
         )
         return fallbackResult

@@ -6,6 +6,7 @@ import com.charleswoo1.videodownloader.data.download.PlatformExtractionError
 import com.charleswoo1.videodownloader.data.download.PlatformMediaEngine
 import com.charleswoo1.videodownloader.data.download.http.BrowserIdentity
 import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession
+import com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession.HttpResponse
 import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import com.charleswoo1.videodownloader.domain.model.DownloadRequest
 import com.charleswoo1.videodownloader.domain.model.MediaInfo
@@ -1051,8 +1052,12 @@ class NativeThreadsEngine(
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
-        val isShareUrl = url.contains("/share/")
+        lastDiagnosticFingerprint = null
+        lastProfileSequence = emptyList()
+
+        val isShareInput = url.contains("/share/")
         val resolvedUrl = resolveShareUrl(url)
+        val shareResolved = isShareInput && resolvedUrl != url && !resolvedUrl.contains("/share/")
         val shortcode = extractPostId(resolvedUrl)
             ?: return@withContext Result.failure(
                 PlatformExtractionError.PageVariantUnsupported("無法從網址中解析 Threads 貼文代碼，請確認網址格式")
@@ -1060,17 +1065,51 @@ class NativeThreadsEngine(
 
         val canonicalUrl = normalizeUrl(resolvedUrl)
         val profileSteps = mutableListOf<String>()
+        val diagnosticHistory = mutableListOf<String>()
 
         safeLog("[Resolver] platform=THREADS")
-        safeLog("[Threads] share_resolved=$isShareUrl")
+        safeLog("[Threads] is_share_input=$isShareInput share_resolved=$shareResolved")
         safeLog("[Threads] target_code=$shortcode")
+
+        fun recordStepDiagnostics(
+            stepName: String,
+            resp: Result<HttpResponse>,
+            html: String,
+            outcome: ThreadsParseOutcome
+        ) {
+            val respObj = resp.getOrNull()
+            val httpCode = respObj?.code ?: 0
+            val contentType = respObj?.getHeader("content-type") ?: "text/html"
+            val bodyBytes = html.toByteArray().size
+            val sizeBucket = formatSizeBucket(bodyBytes)
+            val finalUrl = respObj?.finalUrl ?: canonicalUrl
+            val cleanPath = cleanHostAndPath(finalUrl)
+            val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != canonicalUrl) "yes" else "no"
+            val errorClassName = when (outcome.result) {
+                is MetaExtractionResult.Success -> "NONE"
+                is MetaExtractionResult.Failure -> outcome.result.error.javaClass.simpleName
+            }
+            val diag = outcome.diagnostics
+            val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
+
+            val stepFp = """
+                [profile=$stepName http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName]
+                share: input=$isShareInput resolved=$shareResolved
+                scripts: source=${diag.scriptSource} count=${diag.scriptCount}
+                target: raw_code=${diag.rawCodeInHtml} decoded_code=${diag.decodedCodeInHtml} wrapper=${diag.targetWrapperFound} media_node=${diag.mediaNodeFound}
+                matched_keys: $matchedKeysStr
+            """.trimIndent()
+            diagnosticHistory.add(stepFp)
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+        }
 
         // Step 1: DESKTOP_NAVIGATION
         profileSteps.add("DESKTOP")
         val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
         val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
-        var parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
+        var parseOutcome = parseThreadsPageWithDiagnostics(desktopHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+        recordStepDiagnostics("DESKTOP", desktopResp, desktopHtml, parseOutcome)
 
         // Step 2: Escalation to MOBILE_NAVIGATION on technical failure
         if (parseOutcome.result is MetaExtractionResult.Failure && parseOutcome.result.error is MetaExtractionError.Technical) {
@@ -1078,7 +1117,8 @@ class NativeThreadsEngine(
             val mobileResp = httpSession.fetch(canonicalUrl, RequestProfile.MOBILE_NAVIGATION)
             val mobileHtml = mobileResp.getOrNull()?.body ?: ""
             if (mobileHtml.isNotBlank()) {
-                parseOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
+                parseOutcome = parseThreadsPageWithDiagnostics(mobileHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                recordStepDiagnostics("MOBILE", mobileResp, mobileHtml, parseOutcome)
             }
         }
 
@@ -1088,7 +1128,8 @@ class NativeThreadsEngine(
             val crawlerResp = httpSession.fetch(canonicalUrl, RequestProfile.CRAWLER_NAVIGATION)
             val crawlerHtml = crawlerResp.getOrNull()?.body ?: ""
             if (crawlerHtml.isNotBlank()) {
-                parseOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = isShareUrl)
+                parseOutcome = parseThreadsPageWithDiagnostics(crawlerHtml, shortcode, canonicalUrl, resolvedShare = shareResolved)
+                recordStepDiagnostics("CRAWLER", crawlerResp, crawlerHtml, parseOutcome)
             }
         }
 
@@ -1096,10 +1137,8 @@ class NativeThreadsEngine(
 
         val diag = parseOutcome.diagnostics
         val matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
-        val fp = "THREADS: resolved_share=${diag.resolvedShare} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper_found=${diag.targetWrapperFound} media_node_found=${diag.mediaNodeFound} matched_container_keys=$matchedKeysStr"
-        lastDiagnosticFingerprint = fp
 
-        safeLog("platform=THREADS share_resolved=${diag.resolvedShare} script_source=${diag.scriptSource} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper=${diag.targetWrapperFound} actual_media=${diag.mediaNodeFound} matched_keys=$matchedKeysStr")
+        safeLog("platform=THREADS is_share_input=$isShareInput share_resolved=$shareResolved script_source=${diag.scriptSource} script_count=${diag.scriptCount} raw_code_in_html=${diag.rawCodeInHtml} decoded_code_in_html=${diag.decodedCodeInHtml} target_wrapper=${diag.targetWrapperFound} actual_media=${diag.mediaNodeFound} matched_keys=$matchedKeysStr")
 
         when (val res = parseOutcome.result) {
             is MetaExtractionResult.Success -> {

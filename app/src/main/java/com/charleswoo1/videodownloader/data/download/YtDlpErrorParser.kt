@@ -189,3 +189,30 @@ object YtDlpErrorParser {
         }
     }
 }
+
+/**
+ * Structured fallback exception carrying parsed yt-dlp error metadata for engine router and trace.
+ */
+class YtDlpExtractionException(
+    val parsed: YtDlpErrorParser.ParsedError,
+    cause: Throwable? = null
+) : PlatformExtractionError(
+    code = when (parsed.category) {
+        YtDlpErrorParser.ErrorCategory.PRIVATE_CONTENT -> PlatformErrorCode.PRIVATE_CONTENT
+        YtDlpErrorParser.ErrorCategory.CHECKPOINT_REQUIRED,
+        YtDlpErrorParser.ErrorCategory.LOGIN_REQUIRED -> PlatformErrorCode.LOGIN_REQUIRED
+        YtDlpErrorParser.ErrorCategory.NOT_FOUND -> PlatformErrorCode.DELETED_OR_NOT_FOUND
+        YtDlpErrorParser.ErrorCategory.DRM_PROTECTED -> PlatformErrorCode.AUDIENCE_RESTRICTED
+        YtDlpErrorParser.ErrorCategory.NETWORK_ERROR -> PlatformErrorCode.NETWORK
+        YtDlpErrorParser.ErrorCategory.UNSUPPORTED_URL -> PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED
+        else -> PlatformErrorCode.PARSE_ERROR
+    },
+    userMessage = parsed.userMessage,
+    canFallback = false,
+    internalReason = "YTDLP_${parsed.category.name}",
+    cause = cause
+) {
+    val category: YtDlpErrorParser.ErrorCategory get() = parsed.category
+    val primaryError: String? get() = parsed.primaryError
+}
+

@@ -9,6 +9,7 @@ import com.charleswoo1.videodownloader.domain.model.QualityOption
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -415,5 +416,39 @@ class PlatformEngineRouterTest {
         assertEquals(PlatformErrorCode.PARSE_ERROR, err?.code)
         assertEquals("NO_TARGET_FOUND", err?.internalReason)
         assertTrue(err?.userMessage?.contains("Threads 已找到貼文連結") == true)
+    }
+
+    @Test
+    fun extractMediaInfo_instagramFallbackPleaseWait_preservesExtractorFailureCategoryInTrace() = runBlocking {
+        fakeInstagramEngine.extractResult = Result.failure(
+            MetaExtractionError.Technical("Technical error", internalReason = "PARSE_ERROR")
+        )
+        val parsed = YtDlpErrorParser.parse("ERROR: [Instagram] DdcwYWzxZI7: Please wait a few minutes before you try again.", Platform.INSTAGRAM)
+        fakeYtDlpEngine.extractResult = Result.failure(YtDlpExtractionException(parsed))
+
+        val result = router.extractMediaInfo("https://www.instagram.com/reel/DdcwYWzxZI7/")
+        assertTrue("Extraction must fail", result.isFailure)
+        val trace = router.lastTrace
+        assertNotNull(trace)
+        assertEquals("EXTRACTOR_FAILURE", trace?.fallbackResultCategory)
+        assertEquals("[Instagram] DdcwYWzxZI7: Please wait a few minutes before you try again.", trace?.fallbackSanitizedError)
+        assertTrue(trace?.diagnosticFingerprint?.contains("category=EXTRACTOR_FAILURE") == true)
+        assertTrue(trace?.diagnosticFingerprint?.contains("attempted=yes") == true)
+    }
+
+    @Test
+    fun extractMediaInfo_instagramFallbackHttp429_preservesRateLimitedCategoryInTrace() = runBlocking {
+        fakeInstagramEngine.extractResult = Result.failure(
+            MetaExtractionError.Technical("Technical error", internalReason = "PARSE_ERROR")
+        )
+        val parsed = YtDlpErrorParser.parse("ERROR: HTTP Error 429: Too Many Requests", Platform.INSTAGRAM)
+        fakeYtDlpEngine.extractResult = Result.failure(YtDlpExtractionException(parsed))
+
+        val result = router.extractMediaInfo("https://www.instagram.com/reel/DdcwYWzxZI7/")
+        assertTrue("Extraction must fail", result.isFailure)
+        val trace = router.lastTrace
+        assertNotNull(trace)
+        assertEquals("RATE_LIMITED", trace?.fallbackResultCategory)
+        assertTrue(trace?.diagnosticFingerprint?.contains("category=RATE_LIMITED") == true)
     }
 }

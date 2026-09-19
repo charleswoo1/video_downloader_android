@@ -686,4 +686,93 @@ class NativeXEngineTest {
         assertEquals("OpenGraph Video Title", media.title)
         assertEquals("https://video.twimg.com/ext_tw_video/og_stream.mp4", media.renditions.first().url)
     }
+
+    @Test
+    fun parseHtmlFallback_validInitialStateWithoutTargetTweet_returnsTargetNotFoundNotMissing() = runBlocking {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <script>window.__INITIAL_STATE__={"entities":{"tweets":{"entities":{"other_id_123":{"full_text":"Other tweet"}}}}};</script>
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseHtmlFallback(html, "https://x.com/i/status/999999", "999999")
+        assertTrue("Expected failure when statusId not in __INITIAL_STATE__", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.TARGET_NOT_IN_PAGE_DATA, err?.code)
+        assertEquals("HTML_TARGET_NOT_FOUND", err?.internalReason)
+    }
+
+    @Test
+    fun parseHtmlFallback_malformedInitialState_returnsParseError() = runBlocking {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <script>window.__INITIAL_STATE__={unclosed json;</script>
+            </head>
+            <body></body>
+            </html>
+        """.trimIndent()
+
+        val result = engine.parseHtmlFallback(html, "https://x.com/i/status/999999", "999999")
+        assertTrue("Expected failure on malformed __INITIAL_STATE__", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.PARSE_ERROR, err?.code)
+        assertEquals("HTML_INITIAL_STATE_PARSE_ERROR", err?.internalReason)
+    }
+
+    @Test
+    fun fetchPostViaGraphQL_403Response_clearsStaleGtCookieAndForceRefreshes() = runBlocking {
+        val fakeSession = object : com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession() {
+            var graphqlCallCount = 0
+            var guestTokenCallCount = 0
+
+            override fun fetch(
+                url: String,
+                profile: com.charleswoo1.videodownloader.data.download.http.RequestProfile,
+                identity: com.charleswoo1.videodownloader.data.download.http.BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession.HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    guestTokenCallCount++
+                    return Result.success(com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession.HttpResponse(200, url, "{}", mapOf("x-guest-token" to "new_gt_token_$guestTokenCallCount")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    graphqlCallCount++
+                    if (graphqlCallCount == 1) {
+                        assertEquals("stale_gt_cookie", customHeaders["x-guest-token"])
+                        return Result.success(com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession.HttpResponse(403, url, "{\"errors\":[{\"message\":\"Forbidden\"}]}", emptyMap()))
+                    } else {
+                        assertEquals("new_gt_token_1", customHeaders["x-guest-token"])
+                        return Result.success(com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession.HttpResponse(200, url, "{\"data\":{\"tweetResult\":{\"result\":{\"__typename\":\"Tweet\"}}}}", emptyMap()))
+                    }
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val cookie = okhttp3.Cookie.Builder()
+            .name("gt")
+            .value("stale_gt_cookie")
+            .domain("x.com")
+            .build()
+        fakeSession.cookieJar.putCookie("https://x.com/".toHttpUrl(), cookie)
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.fetchPostViaGraphQL("123", "dummy_bearer", "stale_gt_cookie")
+
+        assertTrue("Expected second attempt to succeed after token refresh", res.isSuccess)
+    }
 }

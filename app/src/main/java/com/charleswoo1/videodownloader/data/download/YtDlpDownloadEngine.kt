@@ -350,6 +350,6 @@ class YtDlpDownloadEngine(private val context: Context) : DownloadEngine {
         if (parsed.warnings.isNotEmpty()) {
             Log.d(TAG, "[Diagnostics] yt-dlp warnings during execution: ${parsed.warnings}")
         }
-        return Exception(parsed.userMessage)
+        return YtDlpExtractionException(parsed, cause = e)
     }
 }

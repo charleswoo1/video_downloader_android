@@ -974,6 +974,9 @@ class NativeInstagramEngine(
     }
 
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
+        lastDiagnosticFingerprint = null
+        lastProfileSequence = emptyList()
+
         val shortcode = extractShortcode(url)
             ?: return@withContext Result.failure(
                 PlatformExtractionError.PageVariantUnsupported("無法從網址中解析 Instagram 貼文代碼，請確認網址格式")
@@ -983,6 +986,7 @@ class NativeInstagramEngine(
         val fetchUrl = buildFetchUrl(url)
         val profileSteps = mutableListOf<String>()
         val profileErrors = mutableListOf<MetaExtractionError>()
+        val diagnosticHistory = mutableListOf<String>()
         val profiles = listOf(
             "DESKTOP" to RequestProfile.DESKTOP_NAVIGATION,
             "MOBILE" to RequestProfile.MOBILE_NAVIGATION,
@@ -1012,25 +1016,29 @@ class NativeInstagramEngine(
             val parseResult = parseOutcome.result
             val diag = parseOutcome.diagnostics
 
-            val httpCode = resp.getOrNull()?.code ?: 0
-            val contentType = resp.getOrNull()?.getHeader("content-type") ?: "text/html"
+            val respObj = resp.getOrNull()
+            val httpCode = respObj?.code ?: 0
+            val contentType = respObj?.getHeader("content-type") ?: "text/html"
             val bodyBytes = html.toByteArray().size
             val sizeBucket = formatSizeBucket(bodyBytes)
-            val cleanPath = cleanHostAndPath(requestUrl)
-            val redirect = if (resp.getOrNull()?.finalUrl != null && resp.getOrNull()?.finalUrl != requestUrl) "yes" else "no"
+            val finalUrl = respObj?.finalUrl ?: requestUrl
+            val cleanPath = cleanHostAndPath(finalUrl)
+            val redirect = if (respObj?.finalUrl != null && respObj.finalUrl != requestUrl) "yes" else "no"
             val errorClassName = when (parseResult) {
                 is MetaExtractionResult.Success -> "NONE"
                 is MetaExtractionResult.Failure -> parseResult.error.javaClass.simpleName
             }
 
-            lastDiagnosticFingerprint = """
-                platform=INSTAGRAM shortcode=$shortcode profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName fallback_attempted=no
+            val profileFp = """
+                [profile=$name http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=${diag.stage} error=$errorClassName]
                 scripts: app_json=${diag.appJsonCount} data_sjs=${diag.dataSjsCount} generic=${diag.genericScriptCount}
                 target: raw=${diag.rawShortcodeSeen} decoded=${diag.decodedShortcodeSeen} wrapper=${diag.targetWrapperSeen} media_node=${diag.validatedMediaNodeFound}
                 keys: ${if (diag.matchedKeys.isNotEmpty()) diag.matchedKeys.joinToString(",") else "none"}
                 markers: ${if (diag.presentMarkers.isNotEmpty()) diag.presentMarkers.joinToString(",") else "none"}
                 restriction: ${diag.restrictionPhrase}
             """.trimIndent()
+            diagnosticHistory.add(profileFp)
+            lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
 
             when (parseResult) {
                 is MetaExtractionResult.Success -> {

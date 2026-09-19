@@ -10,6 +10,7 @@ import okhttp3.Cookie
 interface PlatformSessionProvider {
     fun cookiesFor(platform: Platform): List<Cookie>
     fun hasAuthenticatedSession(platform: Platform): Boolean
+    fun markExpired(platform: Platform, reason: String? = null) {}
 }
 
 /**

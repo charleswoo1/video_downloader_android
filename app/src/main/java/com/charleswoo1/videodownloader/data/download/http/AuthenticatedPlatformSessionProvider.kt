@@ -109,7 +109,7 @@ class AuthenticatedPlatformSessionProvider(
     /**
      * Marks the session as expired when platform responds with 401/403 or login redirect.
      */
-    fun markExpired(platform: Platform, reason: String? = null) {
+    override fun markExpired(platform: Platform, reason: String?) {
         credentialStore.updateStatus(platform, SessionState.EXPIRED, reason)
         val info = credentialStore.getStatus(platform)
         _statusFlows[platform]?.value = info

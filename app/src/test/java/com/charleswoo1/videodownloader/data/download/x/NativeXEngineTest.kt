@@ -8,9 +8,14 @@ import com.charleswoo1.videodownloader.data.download.http.RequestProfile
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
+import com.charleswoo1.videodownloader.data.download.http.AuthenticatedPlatformSessionProvider
+import com.charleswoo1.videodownloader.data.download.http.InMemoryPlatformCredentialStore
+import com.charleswoo1.videodownloader.data.download.http.SessionState
+import com.charleswoo1.videodownloader.domain.model.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -1125,4 +1130,289 @@ class NativeXEngineTest {
         val err = parseResult.exceptionOrNull()
         assertEquals("GRAPHQL_MISSING_LEGACY", (err as? PlatformExtractionError)?.internalReason)
     }
+
+    @Test
+    fun parseGraphQLTweet_nsfwLoggedOut_failsWithAgeRestricted() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "NsfwLoggedOut"
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/123", "123")
+        assertTrue("NsfwLoggedOut must fail parsing", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.AGE_RESTRICTED, err?.code)
+        assertFalse("AGE_RESTRICTED must not allow fallback", err?.canFallback ?: true)
+        assertTrue("Must have GRAPHQL_AGE_RESTRICTED internalReason", err?.internalReason?.contains("GRAPHQL_AGE_RESTRICTED") ?: false)
+    }
+
+    @Test
+    fun parseGraphQLTweet_nsfwViewerHasNoStatedAge_failsWithAgeRestricted() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "NsfwViewerHasNoStatedAge"
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/123", "123")
+        assertTrue("NsfwViewerHasNoStatedAge must fail parsing", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.AGE_RESTRICTED, err?.code)
+        assertFalse(err?.canFallback ?: true)
+    }
+
+    @Test
+    fun parseGraphQLTweet_tombstoneAgeRestricted_failsWithAgeRestricted() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetTombstone",
+                    "tombstone": {
+                      "text": {
+                        "text": "Age-restricted adult content. This content might not be appropriate for people under 18 years old. To view this media, you’ll need to log in to X."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/123", "123")
+        assertTrue("Age-restricted tombstone must fail parsing", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.AGE_RESTRICTED, err?.code)
+        assertFalse(err?.canFallback ?: true)
+    }
+
+    @Test
+    fun parseGraphQLTweet_protected_failsWithPrivateContent() {
+        val json = JSONObject("""
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "Protected"
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = engine.parseGraphQLTweet(json, "https://x.com/i/status/123", "123")
+        assertTrue("Protected tweet must fail parsing", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.PRIVATE_CONTENT, err?.code)
+        assertFalse(err?.canFallback ?: true)
+    }
+
+    @Test
+    fun extractMediaInfo_nsfwWithoutSession_returnsTerminalAgeRestrictedWithoutHtmlFallback() = runBlocking {
+        val nsfwJson = """
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "NsfwLoggedOut"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        var htmlFetched = false
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    return Result.success(HttpResponse(200, url, nsfwJson, emptyMap()))
+                }
+                if (url.contains("12345")) {
+                    htmlFetched = true
+                    return Result.success(HttpResponse(200, url, "<html></html>", emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/user/status/12345")
+
+        assertTrue("Expected failure for NSFW content without session", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.AGE_RESTRICTED, err?.code)
+        assertFalse("HTML fallback must NOT be attempted for terminal adult content", htmlFetched)
+        assertEquals(listOf("GRAPHQL"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_nsfwWithSession_authenticatedFallbackSucceeds() = runBlocking {
+        val nsfwJson = """
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "NsfwLoggedOut"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+        val videoJson = loadFixture("video_tweet_graphql.json")
+
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.X, "auth_token=valid_x_token; ct0=valid_x_csrf")
+
+        var capturedAuthType: String? = null
+        var capturedCsrfToken: String? = null
+        var capturedGuestTokenOnAuth: String? = null
+        var capturedCookieHeader: String? = null
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    if (customHeaders["x-twitter-auth-type"] == "OAuth2Session") {
+                        capturedAuthType = customHeaders["x-twitter-auth-type"]
+                        capturedCsrfToken = customHeaders["x-csrf-token"]
+                        capturedGuestTokenOnAuth = customHeaders["x-guest-token"]
+                        capturedCookieHeader = customHeaders["Cookie"]
+                        return Result.success(HttpResponse(200, url, videoJson, emptyMap()))
+                    }
+                    return Result.success(HttpResponse(200, url, nsfwJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/TwitterVideoCreator/status/1234567890")
+
+        assertTrue("Expected extraction to succeed via authenticated fallback", result.isSuccess)
+        val mediaInfo = result.getOrNull()
+        assertNotNull(mediaInfo)
+        assertEquals("OAuth2Session", capturedAuthType)
+        assertEquals("valid_x_csrf", capturedCsrfToken)
+        assertNull("Authenticated request must NOT send x-guest-token", capturedGuestTokenOnAuth)
+        assertTrue("Cookie header must contain auth_token", capturedCookieHeader?.contains("auth_token=valid_x_token") ?: false)
+        assertEquals(listOf("GRAPHQL", "GRAPHQL_AUTHENTICATED"), testEngine.lastProfileSequence)
+    }
+
+    @Test
+    fun extractMediaInfo_nsfwWithSession_authenticatedFails401_marksExpiredAndReturnsSessionExpired() = runBlocking {
+        val nsfwJson = """
+            {
+              "data": {
+                "tweetResult": {
+                  "result": {
+                    "__typename": "TweetUnavailable",
+                    "reason": "NsfwLoggedOut"
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.X, "auth_token=expired_x_token; ct0=csrf_123")
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url == NativeXEngine.HASHFLAGS_ENDPOINT) {
+                    return Result.success(HttpResponse(200, url, "{}", emptyMap()))
+                }
+                if (url == NativeXEngine.TWITTER_HOME_URL) {
+                    return Result.success(HttpResponse(200, url, "<html></html>", mapOf("x-guest-token" to "gt_test")))
+                }
+                if (url.startsWith(NativeXEngine.GRAPHQL_ENDPOINT)) {
+                    if (customHeaders["x-twitter-auth-type"] == "OAuth2Session") {
+                        return Result.success(HttpResponse(401, url, "{\"errors\":[{\"message\":\"Could not authenticate you\"}]}", emptyMap()))
+                    }
+                    return Result.success(HttpResponse(200, url, nsfwJson, emptyMap()))
+                }
+                return Result.failure(java.io.IOException("Unknown url $url"))
+            }
+        }
+
+        val testEngine = NativeXEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://x.com/TwitterVideoCreator/status/1234567890")
+
+        assertTrue("Expected failure when authenticated session expired", result.isFailure)
+        val err = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull(err)
+        assertEquals(PlatformErrorCode.SESSION_EXPIRED, err?.code)
+        assertEquals(SessionState.EXPIRED, sessionProvider.sessionStatus(Platform.X).state)
+        assertEquals(listOf("GRAPHQL", "GRAPHQL_AUTHENTICATED"), testEngine.lastProfileSequence)
+    }
 }
+

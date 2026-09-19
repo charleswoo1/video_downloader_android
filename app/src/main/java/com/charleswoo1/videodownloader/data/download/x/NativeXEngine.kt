@@ -511,6 +511,118 @@ class NativeXEngine(
         parseJsonResult(resp.body)
     }
 
+    suspend fun fetchPostViaAuthenticatedGraphQL(tweetId: String, bearerToken: String): Result<JSONObject> = withContext(Dispatchers.IO) {
+        val cookies = httpSession.sessionProvider.cookiesFor(Platform.X)
+        val authToken = cookies.firstOrNull { it.name.equals("auth_token", ignoreCase = true) }?.value
+        if (authToken.isNullOrBlank()) {
+            return@withContext Result.failure(
+                PlatformExtractionError.LoginRequired("X Session 缺少 auth_token", internalReason = "GRAPHQL_AUTH_MISSING_AUTH_TOKEN")
+            )
+        }
+
+        var ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value
+        if (ct0.isNullOrBlank()) {
+            ct0 = httpSession.cookieJar.getCookieValue("x.com", "ct0")
+        }
+        if (ct0.isNullOrBlank()) {
+            val randomBytes = ByteArray(16).apply { SECURE_RANDOM.nextBytes(this) }
+            ct0 = randomBytes.joinToString("") { "%02x".format(it) }
+        }
+
+        httpSession.syncSessionCookies(Platform.X)
+
+        val variables = JSONObject().apply {
+            put("tweetId", tweetId)
+            put("includePromotedContent", true)
+            put("withBirdwatchNotes", true)
+            put("withVoice", true)
+            put("withCommunity", true)
+        }.toString()
+
+        val fieldToggles = JSONObject().apply {
+            put("withArticleRichContentState", true)
+            put("withArticlePlainText", false)
+        }.toString()
+
+        val queryParams = "variables=${URLEncoder.encode(variables, "UTF-8")}" +
+                "&features=${URLEncoder.encode(getGraphqlFeatures(), "UTF-8")}" +
+                "&fieldToggles=${URLEncoder.encode(fieldToggles, "UTF-8")}"
+
+        val url = "$GRAPHQL_ENDPOINT?$queryParams"
+
+        val cookieHeader = buildString {
+            append("auth_token=").append(authToken)
+            append("; ct0=").append(ct0)
+            for (c in cookies) {
+                if (!c.name.equals("auth_token", ignoreCase = true) && !c.name.equals("ct0", ignoreCase = true)) {
+                    append("; ").append(c.name).append("=").append(c.value)
+                }
+            }
+        }
+
+        val headers = mutableMapOf(
+            "Authorization" to "Bearer $bearerToken",
+            "x-csrf-token" to ct0,
+            "x-twitter-auth-type" to "OAuth2Session",
+            "x-client-transaction-id" to generateTransactionId(),
+            "x-twitter-active-user" to "yes",
+            "x-twitter-client-language" to "zh-tw",
+            "Cookie" to cookieHeader
+        )
+
+        val respResult = httpSession.fetch(
+            url = url,
+            profile = RequestProfile.API,
+            origin = "https://x.com",
+            referer = "https://x.com/",
+            customHeaders = headers
+        )
+
+        val resp = respResult.getOrElse {
+            lastGraphQLHttpStatus = 0
+            lastGraphQLTransport = GraphQLTransportDiagnostics(
+                httpStatusSeq = "0",
+                authRefreshAttempted = true,
+                contentType = "none",
+                bodySizeBytes = 0,
+                finalUrl = url,
+                redirect = "no"
+            )
+            return@withContext Result.failure(it)
+        }
+        lastGraphQLHttpStatus = resp.code
+        lastGraphQLTransport = GraphQLTransportDiagnostics(
+            httpStatusSeq = "${resp.code}",
+            authRefreshAttempted = true,
+            contentType = resp.getHeader("content-type") ?: "application/json",
+            bodySizeBytes = resp.body.toByteArray().size,
+            finalUrl = resp.finalUrl,
+            redirect = if (resp.finalUrl != url) "yes" else "no"
+        )
+
+        if (resp.code == 401 || resp.code == 403) {
+            httpSession.sessionProvider.markExpired(Platform.X, "HTTP ${resp.code}")
+            return@withContext Result.failure(
+                PlatformExtractionError.SessionExpired(
+                    "X 登入狀態已失效（HTTP ${resp.code}），請至設定重新匯入 X Session",
+                    internalReason = "GRAPHQL_AUTH_EXPIRED:${resp.code}"
+                )
+            )
+        }
+
+        if (resp.code !in 200..299) {
+            return@withContext Result.failure(
+                PlatformExtractionError.ApiError(
+                    resp.code,
+                    "X 認證 GraphQL API 回傳錯誤碼 ${resp.code}",
+                    internalReason = "GRAPHQL_AUTH_API_ERROR:${resp.code}"
+                )
+            )
+        }
+
+        parseJsonResult(resp.body)
+    }
+
     private fun parseJsonResult(body: String): Result<JSONObject> {
         return try {
             val json = JSONObject(body)
@@ -608,10 +720,59 @@ class NativeXEngine(
             resultObj = resultObj.optJSONObject("tweet") ?: resultObj
         }
 
-        // Check if tweet was removed, suspended, or not found
+        // Check if tweet was removed, suspended, age-restricted, protected, or not found
         val typename = resultObj.optString("__typename")
         if (typename == "TweetUnavailable" || typename == "TweetTombstone") {
-            return Result.failure(PlatformExtractionError.ProvisionalUnavailable(typename, internalReason = "GRAPHQL_PROVISIONAL_UNAVAILABLE:$typename"))
+            val reason = resultObj.optString("reason")
+            val tombstone = resultObj.optJSONObject("tombstone")
+            val tombstoneText = tombstone?.optJSONObject("text")?.optString("text") ?: ""
+
+            val isNsfwOrAge = reason.equals("NsfwLoggedOut", ignoreCase = true) ||
+                    reason.equals("NsfwViewerHasNoStatedAge", ignoreCase = true) ||
+                    tombstoneText.contains("Age-restricted", ignoreCase = true) ||
+                    tombstoneText.contains("adult content", ignoreCase = true) ||
+                    (tombstoneText.contains("adult", ignoreCase = true) && tombstoneText.contains("log in", ignoreCase = true)) ||
+                    tombstoneText.contains("To view this media, you’ll need to log in", ignoreCase = true)
+
+            val isProtected = reason.equals("Protected", ignoreCase = true) ||
+                    tombstoneText.contains("protected", ignoreCase = true)
+
+            val isDeleted = tombstoneText.contains("deleted", ignoreCase = true) ||
+                    tombstoneText.contains("page doesn’t exist", ignoreCase = true) ||
+                    tombstoneText.contains("page doesn't exist", ignoreCase = true) ||
+                    reason.equals("Deleted", ignoreCase = true)
+
+            if (isDeleted) {
+                return Result.failure(
+                    PlatformExtractionError.DeletedOrNotFound(
+                        userMessage = "此 X 貼文已被作者刪除或原始內容已不存在",
+                        internalReason = "GRAPHQL_DELETED"
+                    )
+                )
+            }
+            if (isNsfwOrAge) {
+                return Result.failure(
+                    PlatformExtractionError.AgeRestricted(
+                        userMessage = "此 X 貼文為年齡限制或成人內容，需要登入帳號後方可存取。請至設定匯入 X Session。",
+                        internalReason = "GRAPHQL_AGE_RESTRICTED:$reason"
+                    )
+                )
+            }
+            if (isProtected) {
+                return Result.failure(
+                    PlatformExtractionError.PrivateContent(
+                        userMessage = "此 X 貼文作者帳號設為不公開（Protected），無法公開存取",
+                        internalReason = "GRAPHQL_PROTECTED"
+                    )
+                )
+            }
+
+            return Result.failure(
+                PlatformExtractionError.ProvisionalUnavailable(
+                    typename = typename,
+                    internalReason = "GRAPHQL_PROVISIONAL_UNAVAILABLE:$typename"
+                )
+            )
         }
 
         val legacy = resultObj.optJSONObject("legacy")
@@ -971,10 +1132,25 @@ class NativeXEngine(
     }
 
     suspend fun parseHtmlFallback(html: String, pageUrl: String, statusId: String): Result<ExtractedXMedia> = withContext(Dispatchers.IO) {
-        // Corroborate explicit deleted/private tombstone in public HTML
+        // Corroborate explicit deleted/private/age-restricted tombstone in public HTML
+        if (html.contains("This account’s posts are protected", ignoreCase = true) ||
+            html.contains("This account's posts are protected", ignoreCase = true)
+        ) {
+            return@withContext Result.failure(PlatformExtractionError.PrivateContent("此 X 貼文作者帳號設為不公開（Protected），無法公開存取", internalReason = "HTML_PROTECTED"))
+        }
+
+        if (html.contains("Age-restricted adult content", ignoreCase = true) ||
+            (html.contains("adult content", ignoreCase = true) && html.contains("log in", ignoreCase = true))
+        ) {
+            return@withContext Result.failure(
+                PlatformExtractionError.AgeRestricted(
+                    "此 X 貼文為年齡限制或成人內容，需要登入帳號後方可存取。請至設定匯入 X Session。",
+                    internalReason = "HTML_AGE_RESTRICTED"
+                )
+            )
+        }
+
         if (html.contains("This Post was deleted by the Post author", ignoreCase = true) ||
-            html.contains("This account’s posts are protected", ignoreCase = true) ||
-            html.contains("This account's posts are protected", ignoreCase = true) ||
             html.contains("This Post is from a suspended account", ignoreCase = true) ||
             html.contains("Hmm...this page doesn’t exist", ignoreCase = true)
         ) {
@@ -1115,7 +1291,44 @@ class NativeXEngine(
             } else {
                 val err = parseResult.exceptionOrNull() as? PlatformExtractionError
                 internalReason = err?.internalReason ?: "none"
-                if (err is PlatformExtractionError.ProvisionalUnavailable) {
+                if (err is PlatformExtractionError.AgeRestricted || err is PlatformExtractionError.PrivateContent || err is PlatformExtractionError.LoginRequired) {
+                    safeLog("[X] auth_gated=true code=${err.code.name} reason=$internalReason")
+                    if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.X)) {
+                        safeLog("[X] authenticated session available, attempting authenticated GraphQL fallback")
+                        profileSteps.add("GRAPHQL_AUTHENTICATED")
+                        val authGqlResult = fetchPostViaAuthenticatedGraphQL(statusId, bearer)
+                        val authDiag = computeGraphQLDiagnostics(authGqlResult.getOrNull(), lastGraphQLTransport, statusId, retryAttempted = false)
+                        diagnosticHistory.add(authDiag.toFingerprint(2))
+                        lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+
+                        if (authGqlResult.isSuccess) {
+                            val authJson = authGqlResult.getOrThrow()
+                            val authParse = parseGraphQLTweet(authJson, cleanUrl, statusId)
+                            if (authParse.isSuccess) {
+                                safeLog("[X] authenticated GraphQL fallback SUCCESS")
+                                extractedMedia = authParse.getOrThrow()
+                                internalReason = "none"
+                            } else {
+                                val authErr = authParse.exceptionOrNull() as? PlatformExtractionError
+                                internalReason = authErr?.internalReason ?: internalReason
+                                safeLog("[X] authenticated GraphQL parse failed: ${authErr?.code?.name ?: "FAILURE"}")
+                                lastProfileSequence = profileSteps
+                                return@withContext Result.failure(authErr ?: PlatformExtractionError.ParseError("無法解析認證 X 貼文資訊", internalReason = internalReason))
+                            }
+                        } else {
+                            val authErr = authGqlResult.exceptionOrNull() as? PlatformExtractionError
+                            internalReason = authErr?.internalReason ?: internalReason
+                            safeLog("[X] authenticated GraphQL fetch failed: ${authErr?.code?.name ?: "FAILURE"}")
+                            lastProfileSequence = profileSteps
+                            return@withContext Result.failure(authErr ?: PlatformExtractionError.ApiError(500, "X 認證 GraphQL 請求失敗", internalReason = internalReason))
+                        }
+                    } else {
+                        // No authenticated session configured - terminal error, do not fallback to HTML
+                        safeLog("[X] no authenticated session for X, returning terminal ${err.code.name}")
+                        lastProfileSequence = profileSteps
+                        return@withContext Result.failure(err)
+                    }
+                } else if (err is PlatformExtractionError.ProvisionalUnavailable) {
                     safeLog("[X] graphql_attempt=1 typename=${err.typename}")
                     safeLog("[X] guest_refresh=true")
                     cachedGuestToken = null
@@ -1140,7 +1353,35 @@ class NativeXEngine(
                             val retryErr = retryParse.exceptionOrNull() as? PlatformExtractionError
                             internalReason = retryErr?.internalReason ?: internalReason
                             safeLog("[X] graphql_attempt=2 result=${retryErr?.code?.name ?: "FAILURE"}")
-                            lastError = retryErr
+                            if (retryErr is PlatformExtractionError.AgeRestricted || retryErr is PlatformExtractionError.PrivateContent || retryErr is PlatformExtractionError.LoginRequired) {
+                                if (httpSession.sessionProvider.hasAuthenticatedSession(Platform.X)) {
+                                    profileSteps.add("GRAPHQL_AUTHENTICATED")
+                                    val authGqlResult = fetchPostViaAuthenticatedGraphQL(statusId, newBearer)
+                                    val authDiag = computeGraphQLDiagnostics(authGqlResult.getOrNull(), lastGraphQLTransport, statusId, retryAttempted = true)
+                                    diagnosticHistory.add(authDiag.toFingerprint(3))
+                                    lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+
+                                    if (authGqlResult.isSuccess) {
+                                        val authJson = authGqlResult.getOrThrow()
+                                        val authParse = parseGraphQLTweet(authJson, cleanUrl, statusId)
+                                        if (authParse.isSuccess) {
+                                            extractedMedia = authParse.getOrThrow()
+                                            internalReason = "none"
+                                        } else {
+                                            lastProfileSequence = profileSteps
+                                            return@withContext Result.failure(authParse.exceptionOrNull() as? PlatformExtractionError ?: retryErr)
+                                        }
+                                    } else {
+                                        lastProfileSequence = profileSteps
+                                        return@withContext Result.failure(authGqlResult.exceptionOrNull() as? PlatformExtractionError ?: retryErr)
+                                    }
+                                } else {
+                                    lastProfileSequence = profileSteps
+                                    return@withContext Result.failure(retryErr)
+                                }
+                            } else {
+                                lastError = retryErr
+                            }
                         }
                     } else {
                         val retryErr = retryGql.exceptionOrNull() as? PlatformExtractionError

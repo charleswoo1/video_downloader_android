@@ -688,19 +688,23 @@ fun PlatformSessionsDialog(
                 )
 
                 SessionPlatformCard(
-                    title = "Instagram / Threads (Meta)",
+                    title = "Instagram",
                     status = igSession?.state ?: SessionState.NOT_CONFIGURED,
                     cookieCount = igSession?.cookieCount ?: 0,
                     details = igSession?.details,
                     onImport = { onOpenImport(Platform.INSTAGRAM) },
-                    onValidate = {
-                        viewModel.validateSession(Platform.INSTAGRAM)
-                        viewModel.validateSession(Platform.THREADS)
-                    },
-                    onClear = {
-                        viewModel.clearSession(Platform.INSTAGRAM)
-                        viewModel.clearSession(Platform.THREADS)
-                    }
+                    onValidate = { viewModel.validateSession(Platform.INSTAGRAM) },
+                    onClear = { viewModel.clearSession(Platform.INSTAGRAM) }
+                )
+
+                SessionPlatformCard(
+                    title = "Threads",
+                    status = thSession?.state ?: SessionState.NOT_CONFIGURED,
+                    cookieCount = thSession?.cookieCount ?: 0,
+                    details = thSession?.details,
+                    onImport = { onOpenImport(Platform.THREADS) },
+                    onValidate = { viewModel.validateSession(Platform.THREADS) },
+                    onClear = { viewModel.clearSession(Platform.THREADS) }
                 )
 
                 SessionPlatformCard(
@@ -745,6 +749,7 @@ fun SessionPlatformCard(
                 Text(title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
                 val (badgeText, badgeColor) = when (status) {
                     SessionState.ACTIVE -> "已連線" to MaterialTheme.colorScheme.primary
+                    SessionState.CONFIGURED -> "待驗證" to MaterialTheme.colorScheme.tertiary
                     SessionState.EXPIRED -> "已過期" to MaterialTheme.colorScheme.error
                     SessionState.NOT_CONFIGURED -> "未設定" to MaterialTheme.colorScheme.outline
                 }

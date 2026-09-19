@@ -135,9 +135,18 @@ object PlatformCookieParser {
 
         for (line in input.lines()) {
             val trimmedLine = line.trim()
-            if (trimmedLine.isBlank() || trimmedLine.startsWith("#")) continue
+            if (trimmedLine.isBlank()) continue
 
-            val parts = trimmedLine.split("\t").map { it.trim() }
+            val isHttpOnly = trimmedLine.startsWith("#HttpOnly_", ignoreCase = true)
+            val effectiveLine = if (isHttpOnly) {
+                trimmedLine.substring("#HttpOnly_".length).trim()
+            } else {
+                trimmedLine
+            }
+
+            if (!isHttpOnly && effectiveLine.startsWith("#")) continue
+
+            val parts = effectiveLine.split("\t").map { it.trim() }
             if (parts.size >= 7) {
                 val rawDomain = parts[0]
                 val path = parts[2].ifBlank { "/" }
@@ -162,15 +171,16 @@ object PlatformCookieParser {
                         .value(value)
 
                     if (secure) builder.secure()
+                    if (isHttpOnly) builder.httpOnly()
                     if (expiresAtSeconds > 0) {
                         builder.expiresAt(expiresAtSeconds * 1000L)
                     }
 
                     result.add(builder.build())
                 } catch (_: Exception) {}
-            } else if (parts.size == 1 && trimmedLine.contains("=")) {
+            } else if (parts.size == 1 && effectiveLine.contains("=")) {
                 // Fallback for single line without tabs
-                result.addAll(parseHeaderOrLines(trimmedLine, platform))
+                result.addAll(parseHeaderOrLines(effectiveLine, platform))
             }
         }
         return result

@@ -1118,7 +1118,7 @@ class NativeThreadsEngineTest {
                 if (url.contains("/api/graphql")) {
                     return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
                 }
-                return Result.failure(java.io.IOException("Not called"))
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"mock_lsd"}]""", emptyMap()))
             }
         }
 
@@ -1179,7 +1179,7 @@ class NativeThreadsEngineTest {
                 if (url.contains("/api/graphql")) {
                     return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
                 }
-                return Result.failure(java.io.IOException("Not called"))
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"mock_lsd"}]""", emptyMap()))
             }
         }
 
@@ -1241,7 +1241,7 @@ class NativeThreadsEngineTest {
                 if (url.contains("/api/graphql")) {
                     return Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
                 }
-                return Result.success(HttpResponse(200, url, "<html><body>no data</body></html>", emptyMap()))
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"mock_lsd"}]""", emptyMap()))
             }
         }
 
@@ -1273,7 +1273,7 @@ class NativeThreadsEngineTest {
                 if (url.contains("/api/graphql")) {
                     return Result.success(HttpResponse(429, url, "Too Many Requests", emptyMap()))
                 }
-                return Result.failure(java.io.IOException("Not called"))
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"mock_lsd"}]""", emptyMap()))
             }
         }
 
@@ -1364,4 +1364,148 @@ class NativeThreadsEngineTest {
         assertEquals(SessionState.EXPIRED, sessionProvider.sessionStatus(Platform.THREADS).state)
         assertEquals(listOf("AUTHENTICATED_RELAY"), testEngine.lastProfileSequence)
     }
+
+    @Test
+    fun fetchBarcelonaGraphQL_requestCapture_verifiesBootstrapAndLsdPropagation() = runBlocking {
+        val shortcode = "DdZtargetPost"
+        val expectedPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val graphqlJson = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "code": "$shortcode",
+                              "pk": "$expectedPk",
+                              "user": {"username": "graphql_user"},
+                              "caption": {"text": "Captured post caption"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/gql_vid.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        data class CapturedRequest(
+            val url: String,
+            val method: String,
+            val headers: Map<String, String>,
+            val body: String?
+        )
+
+        val capturedRequests = mutableListOf<CapturedRequest>()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val bodyStr = body?.let { String(it, Charsets.UTF_8) }
+                capturedRequests.add(CapturedRequest(url, method, customHeaders, bodyStr))
+
+                return when {
+                    url.contains("/api/graphql") -> {
+                        Result.success(HttpResponse(200, url, graphqlJson, emptyMap()))
+                    }
+                    else -> {
+                        // Bootstrap page
+                        Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"captured_threads_lsd_123"}]</script></html>""", mapOf("Set-Cookie" to "csrftoken=captured_threads_csrf_456; Path=/")))
+                    }
+                }
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Expected extraction to succeed", result.isSuccess)
+
+        // 1. Verify page bootstrap GET happens before GraphQL POST
+        assertEquals(2, capturedRequests.size)
+        val bootstrapReq = capturedRequests[0]
+        val gqlReq = capturedRequests[1]
+
+        assertEquals("GET", bootstrapReq.method)
+        assertTrue("Bootstrap request must target post URL", bootstrapReq.url.contains(shortcode))
+
+        assertEquals("POST", gqlReq.method)
+        assertTrue("GraphQL request must target /api/graphql", gqlReq.url.contains("/api/graphql"))
+
+        // 2. Verify headers contract
+        assertEquals("captured_threads_lsd_123", gqlReq.headers["X-FB-LSD"])
+        assertEquals("captured_threads_csrf_456", gqlReq.headers["X-CSRFToken"])
+        assertEquals("BarcelonaPostPageContentQuery", gqlReq.headers["X-FB-Friendly-Name"])
+        assertEquals(NativeThreadsEngine.THREADS_APP_ID, gqlReq.headers["X-IG-App-ID"])
+        assertEquals("https://www.threads.net", gqlReq.headers["Origin"])
+        assertEquals("same-origin", gqlReq.headers["Sec-Fetch-Site"])
+        assertEquals("cors", gqlReq.headers["Sec-Fetch-Mode"])
+
+        // 3. Verify form body contract
+        val bodyStr = gqlReq.body
+        assertNotNull(bodyStr)
+        assertTrue("Form body must contain lsd token", bodyStr!!.contains("lsd=captured_threads_lsd_123"))
+        assertTrue("Form body must contain doc_id", bodyStr.contains("doc_id=${NativeThreadsEngine.BARCELONA_DOC_ID}"))
+        assertTrue("Form body must contain fb_api_req_friendly_name", bodyStr.contains("fb_api_req_friendly_name=BarcelonaPostPageContentQuery"))
+        assertTrue("Form body must contain RelayModern", bodyStr.contains("fb_api_caller_class=RelayModern"))
+
+        // Verify postID in variables
+        val decodedBody = java.net.URLDecoder.decode(bodyStr, "UTF-8")
+        assertTrue("Variables must contain postID: $expectedPk", decodedBody.contains(""""postID":"$expectedPk""""))
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_missingLsd_failsAndDoesNotSendEmptyLsd() = runBlocking {
+        val shortcode = "DdZmissingLsd"
+        val capturedGqlRequests = mutableListOf<String>()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    capturedGqlRequests.add(url)
+                    return Result.failure(java.io.IOException("Should not be called"))
+                }
+                // HTML without LSD token
+                return Result.success(HttpResponse(200, url, "<html><body>No LSD token here</body></html>", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.fetchBarcelonaGraphQL(shortcode, NativeThreadsEngine.shortcodeToPk(shortcode), "https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Expected failure when LSD token is missing", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error should be TargetNotInPageData indicating LSD missing; found: $error", error is PlatformExtractionError.TargetNotInPageData)
+        assertTrue("GraphQL request MUST NOT be sent with empty LSD", capturedGqlRequests.isEmpty())
+    }
 }
+

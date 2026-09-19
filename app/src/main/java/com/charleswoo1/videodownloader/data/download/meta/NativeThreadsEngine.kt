@@ -408,6 +408,8 @@ class NativeThreadsEngine(
     override var lastDiagnosticFingerprint: String? = null
         private set
 
+    private var lastBootstrapResp: PlatformHttpSession.HttpResponse? = null
+
     override fun supports(platform: Platform): Boolean = platform == Platform.THREADS
 
     override fun cancelDownload() {
@@ -1124,23 +1126,67 @@ class NativeThreadsEngine(
         pk: String,
         canonicalUrl: String
     ): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
+        // 1. Page bootstrap: GET canonical target page to extract real LSD token and cookies
+        val bootstrapResp = httpSession.fetch(
+            url = canonicalUrl,
+            profile = RequestProfile.DESKTOP_NAVIGATION,
+            origin = "https://www.threads.net",
+            referer = "https://www.threads.net/"
+        )
+
+        val bootstrapObj = bootstrapResp.getOrNull()
+        lastBootstrapResp = bootstrapObj
+        val bootstrapHtml = bootstrapObj?.body ?: ""
+
+        val lsdRegex = Regex("""\["LSD",\[\],\{"token":"([^"]+)"""")
+        val lsdMatch = lsdRegex.find(bootstrapHtml) ?: Regex(""""LSD",\[\],\{"token":"([^"]+)"""").find(bootstrapHtml)
+        val lsdToken = lsdMatch?.groupValues?.get(1)
+
+        if (lsdToken.isNullOrBlank()) {
+            return@withContext Result.failure(
+                PlatformExtractionError.TargetNotInPageData(
+                    "無法從 Threads 頁面取得必要之 LSD 憑證",
+                    internalReason = "THREADS_LSD_NOT_FOUND"
+                )
+            )
+        }
+
+        // Check for csrf token in cookie jar or bootstrap response
+        var csrfToken: String? = null
+        val setCookieHeader = bootstrapObj?.headers?.entries?.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
+        if (setCookieHeader != null) {
+            val csrfMatch = Regex("""csrftoken=([a-zA-Z0-9_-]+)""").find(setCookieHeader)
+            if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
+        }
+        if (csrfToken.isNullOrBlank()) {
+            csrfToken = httpSession.cookieJar.getCookieValue("threads.net", "csrftoken")
+        }
+
+        // 2. POST BarcelonaPostPageContentQuery GraphQL
         val endpoint = "https://www.threads.net/api/graphql"
         val variables = JSONObject().apply {
             put("postID", pk)
         }.toString()
 
-        val postData = "av=0&__user=0&__a=1&__req=1&dpr=1&lsd=&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=BarcelonaPostPageContentQuery&variables=${URLEncoder.encode(variables, "UTF-8")}&server_timestamps=true&doc_id=$BARCELONA_DOC_ID"
+        val postData = "av=0&__user=0&__a=1&__req=1&dpr=1&lsd=${URLEncoder.encode(lsdToken, "UTF-8")}&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=BarcelonaPostPageContentQuery&variables=${URLEncoder.encode(variables, "UTF-8")}&server_timestamps=true&doc_id=$BARCELONA_DOC_ID"
 
         val headers = mutableMapOf(
             "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
             "Content-Type" to "application/x-www-form-urlencoded",
             "X-IG-App-ID" to THREADS_APP_ID,
             "X-ASBD-ID" to "129477",
+            "X-FB-LSD" to lsdToken,
             "X-FB-Friendly-Name" to "BarcelonaPostPageContentQuery",
             "Origin" to "https://www.threads.net",
             "Referer" to canonicalUrl,
-            "Accept" to "*/*"
+            "Accept" to "*/*",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Dest" to "empty"
         )
+        if (!csrfToken.isNullOrBlank()) {
+            headers["X-CSRFToken"] = csrfToken
+        }
 
         val respResult = httpSession.fetch(
             url = endpoint,
@@ -1192,6 +1238,7 @@ class NativeThreadsEngine(
     override suspend fun extractMediaInfo(url: String): Result<MediaInfo> = withContext(Dispatchers.IO) {
         lastDiagnosticFingerprint = null
         lastProfileSequence = emptyList()
+        lastBootstrapResp = null
 
         val isShareInput = url.contains("/share/")
         val resolvedUrl = resolveShareUrl(url)
@@ -1344,7 +1391,13 @@ class NativeThreadsEngine(
         if (successfulMedia == null) {
             // Step 1: DESKTOP_NAVIGATION
             profileSteps.add("DESKTOP")
-            val desktopResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+            val cachedResp = lastBootstrapResp
+            lastBootstrapResp = null
+            val desktopResp = if (cachedResp != null) {
+                Result.success(cachedResp)
+            } else {
+                httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
+            }
             val desktopHtml = desktopResp.getOrNull()?.body ?: ""
 
             var parseOutcome: ThreadsParseOutcome? = null

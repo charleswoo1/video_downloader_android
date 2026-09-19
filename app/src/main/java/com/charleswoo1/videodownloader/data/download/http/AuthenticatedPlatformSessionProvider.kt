@@ -27,7 +27,7 @@ class AuthenticatedPlatformSessionProvider(
 
     override fun cookiesFor(platform: Platform): List<Cookie> {
         val status = credentialStore.getStatus(platform)
-        if (status.state != SessionState.ACTIVE) {
+        if (status.state != SessionState.ACTIVE && status.state != SessionState.CONFIGURED) {
             return emptyList()
         }
         return credentialStore.getCookies(platform)
@@ -35,7 +35,7 @@ class AuthenticatedPlatformSessionProvider(
 
     override fun hasAuthenticatedSession(platform: Platform): Boolean {
         val status = credentialStore.getStatus(platform)
-        return status.state == SessionState.ACTIVE && credentialStore.getCookies(platform).isNotEmpty()
+        return (status.state == SessionState.ACTIVE || status.state == SessionState.CONFIGURED) && credentialStore.getCookies(platform).isNotEmpty()
     }
 
     fun sessionStatus(platform: Platform): PlatformSessionInfo {
@@ -48,7 +48,7 @@ class AuthenticatedPlatformSessionProvider(
 
     /**
      * Imports session cookies from user-supplied raw text (header, Netscape, or JSON).
-     * Enforces strict domain isolation and saves encrypted credentials.
+     * Enforces strict domain isolation and saves encrypted credentials with initial CONFIGURED state.
      */
     fun importSession(platform: Platform, rawInput: String): Result<PlatformSessionInfo> {
         return try {
@@ -85,7 +85,7 @@ class AuthenticatedPlatformSessionProvider(
 
     /**
      * Imports Meta session cookies simultaneously for both Instagram and Threads,
-     * maintaining strict per-platform domain isolation for each.
+     * maintaining strict per-platform domain isolation for each and setting both to CONFIGURED.
      */
     fun importMetaSession(rawInput: String): Result<Pair<PlatformSessionInfo, PlatformSessionInfo>> {
         val igResult = importSession(Platform.INSTAGRAM, rawInput)
@@ -116,7 +116,7 @@ class AuthenticatedPlatformSessionProvider(
     }
 
     /**
-     * Marks the session as active.
+     * Marks the session as active when verified.
      */
     fun markActive(platform: Platform, details: String? = null) {
         credentialStore.updateStatus(platform, SessionState.ACTIVE, details)
@@ -126,6 +126,8 @@ class AuthenticatedPlatformSessionProvider(
 
     /**
      * Validates stored platform session against the live platform API or structure.
+     * Transitions state to ACTIVE on success, EXPIRED on auth rejection,
+     * or retains existing state with error details on transient/network failure.
      */
     suspend fun validateSession(platform: Platform, httpSession: PlatformHttpSession): Result<PlatformSessionInfo> = withContext(Dispatchers.IO) {
         val cookies = credentialStore.getCookies(platform)
@@ -136,40 +138,52 @@ class AuthenticatedPlatformSessionProvider(
         try {
             when (platform) {
                 Platform.INSTAGRAM -> {
-                    // Test https://i.instagram.com/api/v1/users/web_profile_info/?username=instagram or get_ruling
-                    val sessionid = cookies.firstOrNull { it.name == "sessionid" }?.value
+                    val sessionid = cookies.firstOrNull { it.name.equals("sessionid", ignoreCase = true) }?.value
                     if (sessionid.isNullOrBlank()) {
                         markExpired(platform, "缺少 sessionid")
                         return@withContext Result.failure(IllegalStateException("缺少 sessionid"))
                     }
-                    val resp = httpSession.fetch(
-                        url = "https://www.instagram.com/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=1",
+
+                    val cookieHeader = cookies.joinToString("; ") { "${it.name}=${it.value}" }
+                    val respResult = httpSession.fetch(
+                        url = "https://i.instagram.com/api/v1/accounts/current_user/?edit=true",
                         profile = RequestProfile.API,
                         customHeaders = mapOf(
                             "X-IG-App-ID" to "936619743392459",
-                            "Cookie" to "sessionid=$sessionid"
+                            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+                            "Cookie" to cookieHeader
                         )
                     )
-                    if (resp.isSuccess && resp.getOrThrow().code in listOf(200, 400, 404)) {
-                        markActive(platform, "驗證成功")
-                        Result.success(sessionStatus(platform))
-                    } else if (resp.isSuccess && resp.getOrThrow().code in listOf(401, 403)) {
-                        markExpired(platform, "認證過期 (HTTP ${resp.getOrThrow().code})")
-                        Result.success(sessionStatus(platform))
+
+                    val resp = respResult.getOrNull()
+                    if (resp != null) {
+                        val body = resp.body
+                        val isLoginRedirect = resp.code == 302 || resp.finalUrl.contains("/accounts/login") || body.contains("checkpoint_required") || body.contains("login_required")
+                        if (resp.code == 200 && (body.contains("\"status\": \"ok\"") || body.contains("\"status\":\"ok\"") || body.contains("\"user\""))) {
+                            markActive(platform, "驗證成功 (已連線)")
+                        } else if (resp.code in listOf(401, 403) || isLoginRedirect) {
+                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
+                        } else {
+                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                        }
                     } else {
-                        // Network or transient
-                        Result.success(sessionStatus(platform))
+                        val err = respResult.exceptionOrNull()
+                        val msg = err?.message ?: "連線逾時"
+                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
+                        _statusFlows[platform]?.value = sessionStatus(platform)
                     }
+                    Result.success(sessionStatus(platform))
                 }
                 Platform.X -> {
-                    val authToken = cookies.firstOrNull { it.name == "auth_token" }?.value
-                    val ct0 = cookies.firstOrNull { it.name == "ct0" }?.value ?: "00000000000000000000000000000000"
+                    val authToken = cookies.firstOrNull { it.name.equals("auth_token", ignoreCase = true) }?.value
+                    val ct0 = cookies.firstOrNull { it.name.equals("ct0", ignoreCase = true) }?.value ?: "00000000000000000000000000000000"
                     if (authToken.isNullOrBlank()) {
                         markExpired(platform, "缺少 auth_token")
                         return@withContext Result.failure(IllegalStateException("缺少 auth_token"))
                     }
 
-                    val resp = httpSession.fetch(
+                    val respResult = httpSession.fetch(
                         url = "https://api.x.com/1.1/account/settings.json",
                         profile = RequestProfile.API,
                         customHeaders = mapOf(
@@ -179,23 +193,63 @@ class AuthenticatedPlatformSessionProvider(
                             "Cookie" to "auth_token=$authToken; ct0=$ct0"
                         )
                     )
-                    if (resp.isSuccess && resp.getOrThrow().code == 200) {
-                        markActive(platform, "驗證成功")
-                        Result.success(sessionStatus(platform))
-                    } else if (resp.isSuccess && resp.getOrThrow().code in listOf(401, 403)) {
-                        markExpired(platform, "登入狀態已失效 (HTTP ${resp.getOrThrow().code})")
-                        Result.success(sessionStatus(platform))
+
+                    val resp = respResult.getOrNull()
+                    if (resp != null) {
+                        if (resp.code == 200) {
+                            markActive(platform, "驗證成功 (已連線)")
+                        } else if (resp.code in listOf(401, 403)) {
+                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
+                        } else {
+                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                        }
                     } else {
-                        Result.success(sessionStatus(platform))
+                        val err = respResult.exceptionOrNull()
+                        val msg = err?.message ?: "連線逾時"
+                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
+                        _statusFlows[platform]?.value = sessionStatus(platform)
                     }
+                    Result.success(sessionStatus(platform))
                 }
                 Platform.THREADS -> {
-                    val sessionid = cookies.firstOrNull { it.name == "sessionid" }?.value
+                    val sessionid = cookies.firstOrNull { it.name.equals("sessionid", ignoreCase = true) }?.value
                     if (sessionid.isNullOrBlank()) {
                         markExpired(platform, "缺少 sessionid")
                         return@withContext Result.failure(IllegalStateException("缺少 sessionid"))
                     }
-                    markActive(platform, "已設定 Session")
+
+                    val cookieHeader = cookies.joinToString("; ") { "${it.name}=${it.value}" }
+                    val respResult = httpSession.fetch(
+                        url = "https://www.threads.net/",
+                        profile = RequestProfile.DESKTOP_NAVIGATION,
+                        customHeaders = mapOf(
+                            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+                            "Cookie" to cookieHeader
+                        )
+                    )
+
+                    val resp = respResult.getOrNull()
+                    if (resp != null) {
+                        val isRejected = resp.code in listOf(401, 403) ||
+                                resp.code == 302 ||
+                                resp.finalUrl.contains("/login") ||
+                                resp.headers.entries.any { it.key.equals("Set-Cookie", ignoreCase = true) && it.value.contains("sessionid=deleted") }
+
+                        if (isRejected) {
+                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
+                        } else if (resp.code == 200) {
+                            markActive(platform, "驗證成功 (已連線)")
+                        } else {
+                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                        }
+                    } else {
+                        val err = respResult.exceptionOrNull()
+                        val msg = err?.message ?: "連線逾時"
+                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
+                        _statusFlows[platform]?.value = sessionStatus(platform)
+                    }
                     Result.success(sessionStatus(platform))
                 }
                 else -> Result.failure(UnsupportedOperationException("${platform.displayName} 不支援 Session 驗證"))

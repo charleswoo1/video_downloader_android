@@ -36,9 +36,10 @@ class InMemoryPlatformCredentialStore : PlatformCredentialStore {
         cookieStore[platform] = cookies.toList()
         statusStore[platform] = PlatformSessionInfo(
             platform = platform,
-            state = if (cookies.isNotEmpty()) SessionState.ACTIVE else SessionState.NOT_CONFIGURED,
+            state = if (cookies.isNotEmpty()) SessionState.CONFIGURED else SessionState.NOT_CONFIGURED,
             cookieCount = cookies.size,
-            lastUpdatedMs = System.currentTimeMillis()
+            lastUpdatedMs = System.currentTimeMillis(),
+            details = if (cookies.isNotEmpty()) "已匯入，待驗證" else null
         )
     }
 
@@ -152,10 +153,10 @@ class EncryptedPlatformCredentialStore(
             prefs.edit()
                 .putString("${PREF_KEY_PREFIX_CIPHER}${platform.name}", cipherBase64)
                 .putString("${PREF_KEY_PREFIX_IV}${platform.name}", ivBase64)
-                .putString("${PREF_KEY_PREFIX_STATE}${platform.name}", SessionState.ACTIVE.name)
+                .putString("${PREF_KEY_PREFIX_STATE}${platform.name}", SessionState.CONFIGURED.name)
                 .putInt("${PREF_KEY_PREFIX_COUNT}${platform.name}", cookies.size)
                 .putLong("${PREF_KEY_PREFIX_UPDATED}${platform.name}", System.currentTimeMillis())
-                .remove("${PREF_KEY_PREFIX_DETAILS}${platform.name}")
+                .putString("${PREF_KEY_PREFIX_DETAILS}${platform.name}", "已匯入，待驗證")
                 .apply()
         } catch (e: Throwable) {
             memoryFallback.saveCookies(platform, cookies)

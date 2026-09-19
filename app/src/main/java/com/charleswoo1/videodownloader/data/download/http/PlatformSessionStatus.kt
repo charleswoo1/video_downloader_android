@@ -12,6 +12,11 @@ enum class SessionState {
     NOT_CONFIGURED,
 
     /**
+     * Session credentials configured/imported on device, but not yet verified with live platform.
+     */
+    CONFIGURED,
+
+    /**
      * Active authenticated session present and validated.
      */
     ACTIVE,

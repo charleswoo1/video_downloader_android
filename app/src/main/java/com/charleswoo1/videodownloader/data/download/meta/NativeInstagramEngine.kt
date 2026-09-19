@@ -237,9 +237,25 @@ class NativeInstagramEngine(
 
         private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
+        const val POLARIS_DOC_ID = "27130156389949648" // Upstream yt-dlp PolarisLoggedOutDesktopWWWPostRootContentQuery doc_id
+        const val INSTAGRAM_APP_ID = "936619743392459"
+
+        fun shortcodeToMediaId(shortcode: String): String {
+            val clean = if (shortcode.length > 28) shortcode.dropLast(28) else shortcode
+            var pk = java.math.BigInteger.ZERO
+            val base = java.math.BigInteger.valueOf(64)
+            for (char in clean) {
+                val index = ALPHABET.indexOf(char)
+                if (index == -1) continue
+                pk = pk.multiply(base).add(java.math.BigInteger.valueOf(index.toLong()))
+            }
+            return pk.toString()
+        }
+
         fun shortcodeToId(shortcode: String): Long {
+            val clean = if (shortcode.length > 28) shortcode.dropLast(28) else shortcode
             var id = 0L
-            for (char in shortcode) {
+            for (char in clean) {
                 val index = ALPHABET.indexOf(char)
                 if (index == -1) continue
                 id = (id shl 6) or index.toLong()
@@ -348,6 +364,8 @@ class NativeInstagramEngine(
 
     override var lastDiagnosticFingerprint: String? = null
         private set
+
+    var cachedLsdToken: String? = null
 
     override fun supports(platform: Platform): Boolean = platform == Platform.INSTAGRAM
 
@@ -1083,30 +1101,131 @@ class NativeInstagramEngine(
     }
 
     suspend fun fetchPolarisLoggedOutGraphQL(shortcode: String, canonicalUrl: String): Result<ExtractedMetaMedia> = withContext(Dispatchers.IO) {
+        val mediaId = shortcodeToMediaId(shortcode)
+        val targetPageUrl = "https://www.instagram.com/p/$shortcode/"
+
+        // 1. Content-ruling preflight check (yt-dlp alignment)
+        val rulingUrl = "https://www.instagram.com/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=$mediaId"
+        val rulingHeaders = mutableMapOf(
+            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+            "X-IG-App-ID" to INSTAGRAM_APP_ID,
+            "X-ASBD-ID" to "129477",
+            "X-IG-WWW-Claim" to "0",
+            "Origin" to "https://www.instagram.com",
+            "Referer" to targetPageUrl,
+            "Accept" to "*/*"
+        )
+
+        val rulingResp = httpSession.fetch(
+            url = rulingUrl,
+            profile = RequestProfile.API,
+            origin = "https://www.instagram.com",
+            referer = targetPageUrl,
+            customHeaders = rulingHeaders
+        )
+
+        val rulingObj = rulingResp.getOrElse {
+            return@withContext Result.failure(it)
+        }
+
+        if (rulingObj.code == 429) {
+            return@withContext Result.failure(
+                PlatformExtractionError.RateLimited("Instagram 存取頻率受限 (HTTP 429)，請稍候再試")
+            )
+        }
+        if (rulingObj.code !in 200..299) {
+            return@withContext Result.failure(
+                PlatformExtractionError.ApiError(rulingObj.code, "Ruling preflight error HTTP ${rulingObj.code}", internalReason = "RULING_HTTP_${rulingObj.code}")
+            )
+        }
+
+        val rulingBody = rulingObj.body
+        try {
+            val rulingJson = JSONObject(rulingBody)
+            val title = rulingJson.optString("title")
+            val description = rulingJson.optString("description")
+            val isRestricted = title.contains("Restricted Video", ignoreCase = true) ||
+                    description.contains("Restricted Video", ignoreCase = true) ||
+                    rulingBody.contains("login_required", ignoreCase = true)
+
+            if (isRestricted) {
+                return@withContext Result.failure(
+                    PlatformExtractionError.LoginRequired(
+                        "此 Instagram 內容為受限影片，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",
+                        internalReason = "RULING_RESTRICTED_VIDEO"
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+
+        // Extract CSRF token from ruling response headers / cookies
+        var csrfToken: String? = null
+        val setCookieHeader = rulingObj.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
+        if (setCookieHeader != null) {
+            val csrfMatch = Regex("""csrftoken=([a-zA-Z0-9_-]+)""").find(setCookieHeader)
+            if (csrfMatch != null) csrfToken = csrfMatch.groupValues[1]
+        }
+
+        if (csrfToken.isNullOrBlank()) {
+            csrfToken = httpSession.cookieJar.getCookieValue("instagram.com", "csrftoken")
+        }
+
+        // 2. Obtain LSD token context (yt-dlp alignment: from page or default)
+        var lsdToken = cachedLsdToken ?: httpSession.cookieJar.getCookieValue("instagram.com", "lsd")
+        if (lsdToken.isNullOrBlank()) {
+            val pageResp = httpSession.fetch(
+                url = targetPageUrl,
+                profile = RequestProfile.API,
+                origin = "https://www.instagram.com",
+                referer = "https://www.instagram.com/"
+            )
+            val pageHtml = pageResp.getOrNull()?.body ?: ""
+            if (pageHtml.isNotBlank()) {
+                val lsdRegex = Regex("""\["LSD",\[\],\{"token":"([^"]+)"""")
+                val lsdMatch = lsdRegex.find(pageHtml) ?: Regex(""""LSD",\[\],\{"token":"([^"]+)"""").find(pageHtml)
+                if (lsdMatch != null) {
+                    lsdToken = lsdMatch.groupValues[1]
+                    cachedLsdToken = lsdToken
+                }
+                if (csrfToken.isNullOrBlank()) {
+                    val csrfPageMatch = Regex("""\["CSRF",\[\],\{"token":"([^"]+)"""").find(pageHtml)
+                    if (csrfPageMatch != null) csrfToken = csrfPageMatch.groupValues[1]
+                }
+            }
+        }
+
+        val effectiveLsd = lsdToken ?: "AVq_dummy_lsd"
+
+        // 3. Polaris GraphQL Request
         val endpoint = "https://www.instagram.com/api/graphql"
-        val docId = "27130156389949648"
         val variables = JSONObject().apply {
-            put("shortcode", shortcode)
+            put("media_id", mediaId)
         }.toString()
 
-        val postData = "doc_id=$docId&variables=${URLEncoder.encode(variables, "UTF-8")}"
+        val postData = "lsd=${URLEncoder.encode(effectiveLsd, "UTF-8")}&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=PolarisLoggedOutDesktopWWWPostRootContentQuery&server_timestamps=true&variables=${URLEncoder.encode(variables, "UTF-8")}&doc_id=$POLARIS_DOC_ID"
 
         val headers = mutableMapOf(
             "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
             "Content-Type" to "application/x-www-form-urlencoded",
-            "X-IG-App-ID" to "936619743392459",
+            "X-IG-App-ID" to INSTAGRAM_APP_ID,
             "X-ASBD-ID" to "129477",
+            "X-IG-WWW-Claim" to "0",
             "X-FB-Friendly-Name" to "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+            "X-FB-LSD" to effectiveLsd,
+            "X-Requested-With" to "XMLHttpRequest",
             "Origin" to "https://www.instagram.com",
-            "Referer" to "https://www.instagram.com/p/$shortcode/",
+            "Referer" to targetPageUrl,
             "Accept" to "*/*"
         )
+        if (!csrfToken.isNullOrBlank()) {
+            headers["X-CSRFToken"] = csrfToken
+        }
 
         val respResult = httpSession.fetch(
             url = endpoint,
             profile = RequestProfile.API,
             origin = "https://www.instagram.com",
-            referer = "https://www.instagram.com/p/$shortcode/",
+            referer = targetPageUrl,
             customHeaders = headers,
             body = postData.toByteArray(Charsets.UTF_8),
             contentType = "application/x-www-form-urlencoded",
@@ -1139,6 +1258,14 @@ class NativeInstagramEngine(
 
             val gated = polarisMedia.optJSONObject("if_not_gated_logged_out")
             if (gated == null) {
+                if (shortcode.length > 28) {
+                    return@withContext Result.failure(
+                        PlatformExtractionError.LoginRequired(
+                            "此內容僅限追蹤該帳號的已註冊用戶存取",
+                            internalReason = "POLARIS_PRIVATE_LONG_SHORTCODE"
+                        )
+                    )
+                }
                 return@withContext Result.failure(
                     PlatformExtractionError.LoginRequired(
                         "此 Instagram 內容在未登入狀態下受限，需要登入帳號後方可存取。請至設定匯入 Instagram Session。",

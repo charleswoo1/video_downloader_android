@@ -222,7 +222,7 @@ class NativeInstagramEngineTest {
             return when (profile) {
                 RequestProfile.DESKTOP_NAVIGATION -> {
                     desktopFetchCount++
-                    Result.success(HttpResponse(200, url, browserHtml, emptyMap()))
+                    Result.success(HttpResponse(200, url, if (browserHtml.isNotBlank()) browserHtml else """<html><script>["LSD",[],{"token":"mock_lsd"}]</script></html>""", emptyMap()))
                 }
                 RequestProfile.MOBILE_NAVIGATION -> {
                     mobileFetchCount++
@@ -233,8 +233,16 @@ class NativeInstagramEngineTest {
                     Result.success(HttpResponse(200, url, crawlerHtml, emptyMap()))
                 }
                 RequestProfile.API -> {
-                    if (polarisJson != null) {
-                        Result.success(HttpResponse(200, url, polarisJson, emptyMap()))
+                    if (url.contains("/api/v1/web/get_ruling_for_content/")) {
+                        Result.success(HttpResponse(200, url, """{"status":"ok"}""", emptyMap()))
+                    } else if (url.contains("/api/graphql")) {
+                        if (polarisJson != null) {
+                            Result.success(HttpResponse(200, url, polarisJson, emptyMap()))
+                        } else {
+                            Result.failure(java.io.IOException("Polaris not mocked"))
+                        }
+                    } else if (polarisJson != null) {
+                        Result.success(HttpResponse(200, url, """["LSD",[],{"token":"mock_lsd"}]""", emptyMap()))
                     } else {
                         Result.failure(java.io.IOException("Polaris not mocked"))
                     }
@@ -1360,5 +1368,110 @@ class NativeInstagramEngineTest {
             sessionProvider.sessionStatus(com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM).state
         )
         assertEquals(listOf("API_AUTHENTICATED"), customEngine.lastProfileSequence)
+    }
+
+    private data class CapturedRequest(
+        val url: String,
+        val method: String,
+        val headers: Map<String, String>,
+        val body: String?
+    )
+
+    @Test
+    fun fetchPolarisLoggedOutGraphQL_requestCapture_verifiesYtDlpContract() = runBlocking {
+        val capturedRequests = mutableListOf<CapturedRequest>()
+        val shortcode = "DdS5sMrxkBq"
+        val expectedMediaId = NativeInstagramEngine.shortcodeToMediaId(shortcode)
+
+        val polarisResponseJson = """
+            {
+              "data": {
+                "xig_polaris_media": {
+                  "if_not_gated_logged_out": {
+                    "shortcode": "$shortcode",
+                    "id": "$expectedMediaId",
+                    "is_video": true,
+                    "video_versions": [
+                      {"url": "https://instagram.com/cdn/polaris_capture.mp4", "width": 1080, "height": 1920}
+                    ],
+                    "owner": {"username": "polaris_tester"}
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val bodyStr = body?.let { String(it, Charsets.UTF_8) }
+                capturedRequests.add(CapturedRequest(url, method, customHeaders, bodyStr))
+
+                return when {
+                    url.contains("/api/v1/web/get_ruling_for_content/") -> {
+                        Result.success(HttpResponse(200, url, """{"status":"ok"}""", mapOf("Set-Cookie" to "csrftoken=captured_csrf_123; Path=/")))
+                    }
+                    url == "https://www.instagram.com/p/$shortcode/" -> {
+                        Result.success(HttpResponse(200, url, """["LSD",[],{"token":"captured_lsd_token_abc"}]""", emptyMap()))
+                    }
+                    url.contains("/api/graphql") -> {
+                        Result.success(HttpResponse(200, url, polarisResponseJson, emptyMap()))
+                    }
+                    else -> Result.failure(java.io.IOException("Unknown url: $url"))
+                }
+            }
+        }
+
+        val testEngine = NativeInstagramEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.instagram.com/reel/$shortcode/")
+
+        assertTrue("Expected extraction to succeed", result.isSuccess)
+
+        // 1. Verify content-ruling preflight check happened
+        val rulingReq = capturedRequests.find { it.url.contains("/api/v1/web/get_ruling_for_content/") }
+        assertNotNull("Content-ruling preflight request must be made", rulingReq)
+        assertTrue("Ruling request must target expected numeric mediaId", rulingReq!!.url.contains("target_id=$expectedMediaId"))
+        assertEquals("936619743392459", rulingReq.headers["X-IG-App-ID"])
+
+        // 2. Verify page bootstrap happened to extract LSD
+        val pageReq = capturedRequests.find { it.url == "https://www.instagram.com/p/$shortcode/" }
+        assertNotNull("Page bootstrap request must be made to extract LSD", pageReq)
+
+        // 3. Verify Polaris GraphQL POST request contract
+        val gqlReq = capturedRequests.find { it.url.contains("/api/graphql") }
+        assertNotNull("Polaris GraphQL POST request must be made", gqlReq)
+        assertEquals("POST", gqlReq!!.method)
+
+        // Header contract verification
+        assertEquals("PolarisLoggedOutDesktopWWWPostRootContentQuery", gqlReq.headers["X-FB-Friendly-Name"])
+        assertEquals("captured_lsd_token_abc", gqlReq.headers["X-FB-LSD"])
+        assertEquals("captured_csrf_123", gqlReq.headers["X-CSRFToken"])
+        assertEquals("936619743392459", gqlReq.headers["X-IG-App-ID"])
+        assertEquals("XMLHttpRequest", gqlReq.headers["X-Requested-With"])
+        assertEquals("https://www.instagram.com", gqlReq.headers["Origin"])
+        assertEquals("https://www.instagram.com/p/$shortcode/", gqlReq.headers["Referer"])
+
+        // Form post data contract verification
+        val formBody = gqlReq.body
+        assertNotNull("GraphQL form body must not be null", formBody)
+        assertTrue("Form body must contain lsd token", formBody!!.contains("lsd=captured_lsd_token_abc"))
+        assertTrue("Form body must contain fb_api_caller_class=RelayModern", formBody.contains("fb_api_caller_class=RelayModern"))
+        assertTrue("Form body must contain fb_api_req_friendly_name=PolarisLoggedOutDesktopWWWPostRootContentQuery", formBody.contains("fb_api_req_friendly_name=PolarisLoggedOutDesktopWWWPostRootContentQuery"))
+        assertTrue("Form body must contain doc_id=27130156389949648", formBody.contains("doc_id=27130156389949648"))
+
+        // Critical test requirement: variables MUST contain media_id, NOT shortcode
+        val decodedFormBody = java.net.URLDecoder.decode(formBody, "UTF-8")
+        assertTrue("Variables must contain media_id: $expectedMediaId", decodedFormBody.contains(""""media_id":"$expectedMediaId""""))
+        assertFalse("Variables MUST NOT regress to shortcode", decodedFormBody.contains(""""shortcode":"""))
     }
 }

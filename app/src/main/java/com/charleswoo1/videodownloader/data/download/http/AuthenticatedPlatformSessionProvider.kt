@@ -295,10 +295,10 @@ class AuthenticatedPlatformSessionProvider(
                                 ?: dtsgHtmlRegex.find(body)?.groupValues?.get(1)
                                 ?: dtsgJsonRegex.find(body)?.groupValues?.get(1)
 
-                            val userIdRegex = Regex(""""(?:ACCOUNT_ID|USER_ID|IG_USER_EIMU)":"(\d+)"""")
+                            val userIdRegex = Regex(""""(?:ACCOUNT_ID|USER_ID|IG_USER_EIMU)"\s*:\s*"(\d{3,})"""")
                             val pageUserId = userIdRegex.find(body)?.groupValues?.get(1)
                             val dsUserIdCookie = cookies.firstOrNull { it.name.equals("ds_user_id", ignoreCase = true) }?.value?.trim()?.takeIf {
-                                it.isNotBlank() && it.all { ch -> ch.isDigit() } && (it.toLongOrNull() ?: 0L) > 0L
+                                it.isNotBlank() && it.all { ch -> ch.isDigit() } && it.length >= 3 && (it.toLongOrNull() ?: 0L) > 0L
                             }
                             val userId = pageUserId ?: dsUserIdCookie
 

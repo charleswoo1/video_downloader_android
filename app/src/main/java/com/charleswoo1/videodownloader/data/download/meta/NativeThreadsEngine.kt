@@ -1221,11 +1221,52 @@ class NativeThreadsEngine(
         try {
             val cleanBody = resp.body.trimStart().removePrefix("for (;;);").trimStart()
             val json = JSONObject(cleanBody)
+
+            // Classification 1: Top-level error
+            if (json.has("error") && !json.isNull("error")) {
+                val errObj = json.optJSONObject("error")
+                val errMsg = errObj?.optString("message")?.ifBlank { null }
+                    ?: json.optString("error").ifBlank { null }
+                    ?: "Threads GraphQL 回傳錯誤"
+                return@withContext Result.failure(
+                    PlatformExtractionError.ApiError(
+                        httpCode = resp.code,
+                        detail = "Threads GraphQL API error: $errMsg",
+                        internalReason = "BARCELONA_API_ERROR"
+                    )
+                )
+            }
+
+            // Classification 2: Reference-backed explicit unavailable/restricted Relay response
+            val isDataNull = !json.has("data") || json.isNull("data")
+            val errorsArr = json.optJSONArray("errors")
+            val hasErrors = errorsArr != null && errorsArr.length() > 0
+            if (isDataNull && hasErrors) {
+                val firstErrMsg = errorsArr.optJSONObject(0)?.optString("message") ?: "貼文受限或不存在"
+                return@withContext Result.failure(
+                    PlatformExtractionError.TargetNotInPageData(
+                        detail = "Threads GraphQL 回應貼文受限或不存在 ($firstErrMsg)",
+                        internalReason = "THREADS_AUTH_FALLBACK_ELIGIBLE"
+                    )
+                )
+            }
+
+            // Classification 3: Missing data node without errors
+            if (isDataNull) {
+                return@withContext Result.failure(
+                    PlatformExtractionError.ParseError(
+                        detail = "Threads GraphQL 回應缺少 data 節點",
+                        internalReason = "BARCELONA_NO_DATA"
+                    )
+                )
+            }
+
+            // Classification 4: Non-null data, search target post
             val matchingPost = findTargetPostInGraphQL(json, shortcode, pk)
                 ?: return@withContext Result.failure(
                     PlatformExtractionError.TargetNotInPageData(
-                        "Threads GraphQL 回應中未找到目標貼文或內容受限 ($shortcode / $pk)",
-                        internalReason = "THREADS_AUTH_FALLBACK_ELIGIBLE"
+                        detail = "Threads GraphQL 回應中未找到目標貼文 ($shortcode / $pk)",
+                        internalReason = "BARCELONA_TARGET_NOT_FOUND"
                     )
                 )
 
@@ -1453,11 +1494,39 @@ class NativeThreadsEngine(
             if (parseOutcome != null && parseOutcome.result is MetaExtractionResult.Success) {
                 successfulMedia = parseOutcome.result.media
             } else if (parseOutcome != null && parseOutcome.result is MetaExtractionResult.Failure) {
-                val finalStatus = if (parseOutcome.result.error is MetaExtractionError.NoVideo) "NO_VIDEO" else "PARSE_ERROR"
+                val err = parseOutcome.result.error
+                if (err is MetaExtractionError.NoVideo) {
+                    safeLog("[Threads] final=NO_VIDEO")
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(err)
+                }
+                if (isAuthFallbackEligible) {
+                    safeLog("[Threads] final=UNAVAILABLE_OR_RESTRICTED")
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(
+                        MetaExtractionError.Restricted(
+                            reason = RestrictionReason.DELETED_OR_PRIVATE,
+                            userMessage = "Threads reports this post as unavailable; it may be deleted or require login. If it opens in your browser, import a Threads session. (Threads 回報此貼文無法存取，可能已刪除或需要登入；若在瀏覽器中可正常開啟，請至設定匯入 Threads Session)",
+                            internalReason = "THREADS_UNAVAILABLE_OR_RESTRICTED"
+                        )
+                    )
+                }
+                val finalStatus = "PARSE_ERROR"
                 safeLog("[Threads] final=$finalStatus")
                 lastProfileSequence = profileSteps
-                return@withContext Result.failure(parseOutcome.result.error)
+                return@withContext Result.failure(err)
             } else {
+                if (isAuthFallbackEligible) {
+                    safeLog("[Threads] final=UNAVAILABLE_OR_RESTRICTED")
+                    lastProfileSequence = profileSteps
+                    return@withContext Result.failure(
+                        MetaExtractionError.Restricted(
+                            reason = RestrictionReason.DELETED_OR_PRIVATE,
+                            userMessage = "Threads reports this post as unavailable; it may be deleted or require login. If it opens in your browser, import a Threads session. (Threads 回報此貼文無法存取，可能已刪除或需要登入；若在瀏覽器中可正常開啟，請至設定匯入 Threads Session)",
+                            internalReason = "THREADS_UNAVAILABLE_OR_RESTRICTED"
+                        )
+                    )
+                }
                 safeLog("[Threads] final=PARSE_ERROR")
                 lastProfileSequence = profileSteps
                 return@withContext Result.failure(

@@ -1314,7 +1314,7 @@ class NativeThreadsEngineTest {
                 method: String
             ): Result<HttpResponse> {
                 if (url.contains("/api/graphql")) {
-                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
                 }
                 val html = if (customHeaders.containsKey("X-Anonymous-Context")) {
                     """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>"""
@@ -1360,7 +1360,7 @@ class NativeThreadsEngineTest {
                 method: String
             ): Result<HttpResponse> {
                 if (url.contains("/api/graphql")) {
-                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
                 }
                 if (customHeaders.containsKey("X-Anonymous-Context")) {
                     return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
@@ -1834,8 +1834,8 @@ class NativeThreadsEngineTest {
             ): Result<HttpResponse> {
                 capturedCalls.add(url)
                 if (url.contains("/api/graphql")) {
-                    // GraphQL fails with empty items
-                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                    // Reference-backed unavailable/restricted GraphQL response triggers AUTHENTICATED_RELAY
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
                 }
                 // Target page (bootstrap or authenticated relay)
                 return Result.success(HttpResponse(200, url, authHtml, emptyMap()))
@@ -1922,6 +1922,373 @@ class NativeThreadsEngineTest {
         assertTrue("Should fail without target media", result.isFailure)
         val steps = testEngine.lastProfileSequence
         assertFalse("AUTHENTICATED_RELAY MUST NOT be called on malformed GraphQL JSON", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_emptyEdgesNonNullData_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZEmptyEdges"
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@anon_user/post/$shortcode")
+
+        assertTrue("Should fail without target media", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on non-null data with empty edges", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_unrelatedTargetNonNullData_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZTargetPost"
+        val unrelatedShortcode = "DdZOtherPost"
+        val unrelatedGql = """
+            {
+              "data": {
+                "data": {
+                  "edges": [
+                    {
+                      "node": {
+                        "thread_items": [
+                          {
+                            "post": {
+                              "code": "$unrelatedShortcode",
+                              "pk": "99999999",
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/other_vid.mp4", "width": 1080, "height": 1920}
+                              ],
+                              "user": {"username": "other_user"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, unrelatedGql, emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Should fail when target is not in GraphQL", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called for unrelated post in non-null data", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_topLevelError_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZErrorPost"
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"error":{"message":"API Error occurred"}}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Should fail on GraphQL error", result.isFailure)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on top-level GraphQL error", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_nullDataWithErrors_allFallbacksFail_retainsUnavailableOrRestrictedGuidance() = runBlocking {
+        val shortcode = "DdZUnavailablePost"
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
+                }
+                // Return generic HTML that does not contain target post
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script><body>Feed without target</body></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Expected failure for unavailable post", result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("Error must be MetaExtractionError.Restricted, found $error", error is MetaExtractionError.Restricted)
+        val restrictedErr = error as MetaExtractionError.Restricted
+        assertEquals(RestrictionReason.DELETED_OR_PRIVATE, restrictedErr.reason)
+        assertEquals("THREADS_UNAVAILABLE_OR_RESTRICTED", restrictedErr.internalReason)
+        assertFalse("Restricted error must not allow secondary fallback", restrictedErr.canFallback)
+        assertTrue("Error message must contain session guidance", restrictedErr.message?.contains("Threads") == true && restrictedErr.message?.contains("Session") == true)
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_nullDataWithErrors_anonymousHtmlSucceeds_extractionSucceeds() = runBlocking {
+        val shortcode = "DdZPublicTarget"
+        val targetHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$shortcode",
+                        "user": {"username": "public_user"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/public_video.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            <script>["LSD",[],{"token":"tok_valid_lsd"}]</script>
+            </body></html>
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    // GraphQL returns unavailable
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
+                }
+                // Target page succeeds
+                return Result.success(HttpResponse(200, url, targetHtml, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@public_user/post/$shortcode")
+
+        assertTrue("Expected extraction to succeed via HTML fallback", result.isSuccess)
+        val media = result.getOrNull()
+        assertNotNull(media)
+        assertEquals("https://threads.net/cdn/public_video.mp4", media?.qualityOptions?.first()?.formatSelector)
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_nonNullDataTargetMissing_allFallbacksFail_returnsTargetNotFoundNotRestricted() = runBlocking {
+        val shortcode = "DdZMissingTarget"
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script><body>Feed without target</body></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Should fail", result.isFailure)
+        val error = result.exceptionOrNull()
+        // Must NOT falsely return Restricted / LoginRequired when data was non-null
+        assertTrue("Error should be Technical/ParseError, not Restricted; found $error", error is MetaExtractionError.Technical)
+        assertFalse("Must not claim login is required", error?.message?.contains("需要登入") == true && error is MetaExtractionError.Restricted)
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_topLevelError_returnsApiErrorWithNonAuthReason() = runBlocking {
+        val shortcode = "DdZApiErr"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"error":{"message":"Internal error"}}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"tok_valid_lsd"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.fetchBarcelonaGraphQL(shortcode, pk, "https://www.threads.com/@u/post/$shortcode")
+
+        assertTrue(res.isFailure)
+        val err = res.exceptionOrNull()
+        assertTrue(err is PlatformExtractionError.ApiError)
+        assertEquals("BARCELONA_API_ERROR", (err as PlatformExtractionError.ApiError).internalReason)
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_nullDataWithErrors_returnsAuthFallbackEligible() = runBlocking {
+        val shortcode = "DdZNullData"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":null,"errors":[{"message":"Post unavailable"}]}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"tok_valid_lsd"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.fetchBarcelonaGraphQL(shortcode, pk, "https://www.threads.com/@u/post/$shortcode")
+
+        assertTrue(res.isFailure)
+        val err = res.exceptionOrNull()
+        assertTrue(err is PlatformExtractionError.TargetNotInPageData)
+        assertEquals("THREADS_AUTH_FALLBACK_ELIGIBLE", (err as PlatformExtractionError.TargetNotInPageData).internalReason)
+    }
+
+    @Test
+    fun fetchBarcelonaGraphQL_nonNullDataTargetMissing_returnsTargetNotFound() = runBlocking {
+        val shortcode = "DdZTargetMissing"
+        val pk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, """{"data":{"data":{"edges":[]}}}""", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """["LSD",[],{"token":"tok_valid_lsd"}]""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.fetchBarcelonaGraphQL(shortcode, pk, "https://www.threads.com/@u/post/$shortcode")
+
+        assertTrue(res.isFailure)
+        val err = res.exceptionOrNull()
+        assertTrue(err is PlatformExtractionError.TargetNotInPageData)
+        assertEquals("BARCELONA_TARGET_NOT_FOUND", (err as PlatformExtractionError.TargetNotInPageData).internalReason)
     }
 }
 

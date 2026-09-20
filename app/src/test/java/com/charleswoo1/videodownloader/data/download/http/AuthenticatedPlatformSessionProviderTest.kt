@@ -424,6 +424,101 @@ class AuthenticatedPlatformSessionProviderTest {
     }
 
     @Test
+    fun validateSession_threadsDtsgWithWhitespaceAccountId_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQtest_dtsg"}],{"ACCOUNT_ID": "987654321"}</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.THREADS).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
+    }
+
+    @Test
+    fun validateSession_threadsDtsgWithArbitraryUndocumentedMarker_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQtest_dtsg"}],{"actor_id": "987654321", "currentUser": "987654321"}</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertTrue(provider.sessionStatus(Platform.THREADS).details?.contains("未檢測到有效登入憑證與帳號標記") == true)
+    }
+
+    @Test
+    fun validateSession_threadsDtsgWithShortNonCredibleUserId_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><script>["DTSGInitialData",[],{"token":"AQtest_dtsg"}],{"ACCOUNT_ID": "12"}</script></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        // Less than 3 digits (\d{3,}) must not be accepted as credible user id
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
+    }
+
+    @Test
+    fun validateSession_threadsDsUserIdWithoutDtsgProof_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.THREADS, "sessionid=valid_th_sess; ds_user_id=987654321")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""<html><body>Page without DTSG token</body></html>""".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.THREADS, mockSession)
+        assertTrue(res.isSuccess)
+        // ds_user_id without valid DTSG token MUST remain CONFIGURED
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.THREADS))
+    }
+
+    @Test
     fun validateSession_transientNetworkFailure_preservesConfiguredState() = kotlinx.coroutines.runBlocking {
         provider.importSession(Platform.THREADS, "sessionid=any_sess")
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)

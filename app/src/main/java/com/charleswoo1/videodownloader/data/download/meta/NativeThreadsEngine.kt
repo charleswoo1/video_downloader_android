@@ -1237,26 +1237,15 @@ class NativeThreadsEngine(
                 )
             }
 
-            // Classification 2: Reference-backed explicit unavailable/restricted Relay response
+            // Classification 2: Reference-backed unavailable/restricted Relay response (response.data is null/missing)
             val isDataNull = !json.has("data") || json.isNull("data")
-            val errorsArr = json.optJSONArray("errors")
-            val hasErrors = errorsArr != null && errorsArr.length() > 0
-            if (isDataNull && hasErrors) {
-                val firstErrMsg = errorsArr.optJSONObject(0)?.optString("message") ?: "貼文受限或不存在"
+            if (isDataNull) {
+                val errorsArr = json.optJSONArray("errors")
+                val detailMsg = errorsArr?.optJSONObject(0)?.optString("message")?.ifBlank { null } ?: "no details"
                 return@withContext Result.failure(
                     PlatformExtractionError.TargetNotInPageData(
-                        detail = "Threads GraphQL 回應貼文受限或不存在 ($firstErrMsg)",
+                        detail = "Threads GraphQL 回應貼文受限或不存在 ($detailMsg)",
                         internalReason = "THREADS_AUTH_FALLBACK_ELIGIBLE"
-                    )
-                )
-            }
-
-            // Classification 3: Missing data node without errors
-            if (isDataNull) {
-                return@withContext Result.failure(
-                    PlatformExtractionError.ParseError(
-                        detail = "Threads GraphQL 回應缺少 data 節點",
-                        internalReason = "BARCELONA_NO_DATA"
                     )
                 )
             }

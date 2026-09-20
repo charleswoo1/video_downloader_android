@@ -58,23 +58,7 @@ class AuthenticatedPlatformSessionProvider(
                 return Result.failure(IllegalArgumentException("未能解析出任何屬於 ${platform.displayName} 的有效 Cookie"))
             }
 
-            // Platform-specific mandatory cookie presence checks
-            when (platform) {
-                Platform.INSTAGRAM, Platform.THREADS -> {
-                    val hasSessionId = cookies.any { it.name.equals("sessionid", ignoreCase = true) }
-                    if (!hasSessionId) {
-                        return Result.failure(IllegalArgumentException("匯入的 Cookie 中缺少必要的 'sessionid'"))
-                    }
-                }
-                Platform.X -> {
-                    val hasAuthToken = cookies.any { it.name.equals("auth_token", ignoreCase = true) }
-                    val hasCt0 = cookies.any { it.name.equals("ct0", ignoreCase = true) }
-                    if (!hasAuthToken || !hasCt0) {
-                        return Result.failure(IllegalArgumentException("匯入的 X Cookie 中必須同時包含 'auth_token' 與 'ct0'"))
-                    }
-                }
-                else -> {}
-            }
+            validateMandatoryCookies(platform, cookies)
 
             credentialStore.saveCookies(platform, cookies)
             val info = credentialStore.getStatus(platform)
@@ -82,6 +66,48 @@ class AuthenticatedPlatformSessionProvider(
             Result.success(info)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Imports session cookies captured directly from on-device WebView CookieManager.
+     * Enforces domain isolation and mandatory cookie checks, saving encrypted credentials
+     * with CONFIGURED state.
+     */
+    fun importCapturedSession(platform: Platform, rawCookieHeader: String): Result<PlatformSessionInfo> {
+        return try {
+            val cookies = PlatformCookieParser.parse(rawCookieHeader, platform)
+            if (cookies.isEmpty()) {
+                return Result.failure(IllegalArgumentException("未能解析出任何屬於 ${platform.displayName} 的有效 Cookie"))
+            }
+
+            validateMandatoryCookies(platform, cookies)
+
+            credentialStore.saveCookies(platform, cookies)
+            val info = credentialStore.getStatus(platform)
+            _statusFlows[platform]?.value = info
+            Result.success(info)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun validateMandatoryCookies(platform: Platform, cookies: List<Cookie>) {
+        when (platform) {
+            Platform.INSTAGRAM, Platform.THREADS -> {
+                val hasSessionId = cookies.any { it.name.equals("sessionid", ignoreCase = true) }
+                if (!hasSessionId) {
+                    throw IllegalArgumentException("匯入的 Cookie 中缺少必要的 'sessionid'")
+                }
+            }
+            Platform.X -> {
+                val hasAuthToken = cookies.any { it.name.equals("auth_token", ignoreCase = true) }
+                val hasCt0 = cookies.any { it.name.equals("ct0", ignoreCase = true) }
+                if (!hasAuthToken || !hasCt0) {
+                    throw IllegalArgumentException("匯入的 X Cookie 中必須同時包含 'auth_token' 與 'ct0'")
+                }
+            }
+            else -> {}
         }
     }
 

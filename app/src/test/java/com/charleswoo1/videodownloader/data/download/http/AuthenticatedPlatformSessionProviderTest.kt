@@ -593,4 +593,64 @@ class AuthenticatedPlatformSessionProviderTest {
         assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
         assertTrue(provider.cookiesFor(Platform.INSTAGRAM).isEmpty())
     }
+
+    @Test
+    fun importCapturedSession_validInstagramCandidate_becomesConfigured() {
+        val capturedHeader = "sessionid=captured_sess_123; csrftoken=captured_csrf; ds_user_id=9999"
+        val result = provider.importCapturedSession(Platform.INSTAGRAM, capturedHeader)
+
+        assertTrue(result.isSuccess)
+        val info = result.getOrThrow()
+        assertEquals(SessionState.CONFIGURED, info.state)
+        assertEquals(3, info.cookieCount)
+        assertFalse("CONFIGURED must not be active", provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+
+        val stored = store.getCookies(Platform.INSTAGRAM)
+        assertEquals(3, stored.size)
+        assertTrue(stored.any { it.name == "sessionid" && it.value == "captured_sess_123" })
+    }
+
+    @Test
+    fun importCapturedSession_missingSessionId_fails() {
+        val capturedHeader = "csrftoken=captured_csrf; ds_user_id=9999"
+        val result = provider.importCapturedSession(Platform.INSTAGRAM, capturedHeader)
+
+        assertTrue(result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+    }
+
+    @Test
+    fun importCapturedSession_empty_fails() {
+        val result = provider.importCapturedSession(Platform.INSTAGRAM, "")
+        assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun importCapturedSession_thenValidateSession_becomesActive() {
+        val capturedHeader = "sessionid=captured_valid_sess; ds_user_id=55555"
+        val importRes = provider.importCapturedSession(Platform.INSTAGRAM, capturedHeader)
+        assertTrue(importRes.isSuccess)
+
+        val successSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val json = """{"status":"ok","user":{"pk":55555,"username":"test_captured_user"}}"""
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.INSTAGRAM, successSession)
+        }
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+        assertEquals(2, provider.cookiesFor(Platform.INSTAGRAM).size)
+    }
 }

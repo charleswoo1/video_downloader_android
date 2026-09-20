@@ -134,19 +134,38 @@ class AuthenticatedPlatformSessionProviderTest {
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
     }
 
+    // 1. HTTP 200 + form_data.username + form_data.user_id -> ACTIVE
     @Test
-    fun validateSession_instagramSuccess_becomesActive() = kotlinx.coroutines.runBlocking {
-        provider.importSession(Platform.INSTAGRAM, "sessionid=valid_sess")
+    fun validateSession_instagram_http200_withUsernameAndUserId_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig; csrftoken=test_csrf")
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+
+        var interceptedUrl: String? = null
+        var interceptedAppId: String? = null
+        var interceptedRequestedWith: String? = null
+        var interceptedAccept: String? = null
+        var interceptedReferer: String? = null
+        var interceptedUa: String? = null
+        var interceptedCookie: String? = null
 
         val mockSession = PlatformHttpSession(customClientBuilder = {
             addInterceptor { chain ->
+                val req = chain.request()
+                interceptedUrl = req.url.toString()
+                interceptedAppId = req.header("X-IG-App-ID")
+                interceptedRequestedWith = req.header("X-Requested-With")
+                interceptedAccept = req.header("Accept")
+                interceptedReferer = req.header("Referer")
+                interceptedUa = req.header("User-Agent")
+                interceptedCookie = req.header("Cookie")
+
                 okhttp3.Response.Builder()
-                    .request(chain.request())
+                    .request(req)
                     .protocol(okhttp3.Protocol.HTTP_1_1)
                     .code(200)
                     .message("OK")
-                    .body("""{"status":"ok","user":{"pk":123,"username":"ig_user"}}""".toResponseBody("application/json".toMediaType()))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .body("""{"form_data":{"username":"test_user","user_id":"12345678"}}""".toResponseBody("application/json".toMediaType()))
                     .build()
             }
         })
@@ -155,12 +174,21 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(res.isSuccess)
         assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.INSTAGRAM).state)
         assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
-        assertEquals(1, provider.cookiesFor(Platform.INSTAGRAM).size)
+
+        assertEquals("https://www.instagram.com/api/v1/accounts/edit/web_form_data/", interceptedUrl)
+        assertEquals("936619743392459", interceptedAppId)
+        assertEquals("XMLHttpRequest", interceptedRequestedWith)
+        assertEquals("application/json", interceptedAccept)
+        assertEquals("https://www.instagram.com/accounts/edit/", interceptedReferer)
+        assertTrue(interceptedCookie?.contains("sessionid=test_sess_ig") == true)
+        assertTrue(interceptedUa?.contains("Chrome") == true)
+        assertFalse("UA must not be native app UA", interceptedUa?.contains("Instagram") == true)
     }
 
+    // 2. HTTP 200 + username + pk -> ACTIVE
     @Test
-    fun validateSession_instagramWithoutUserObject_remainsConfigured() = kotlinx.coroutines.runBlocking {
-        provider.importSession(Platform.INSTAGRAM, "sessionid=valid_sess")
+    fun validateSession_instagram_http200_withUsernameAndPk_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
 
         val mockSession = PlatformHttpSession(customClientBuilder = {
             addInterceptor { chain ->
@@ -169,6 +197,79 @@ class AuthenticatedPlatformSessionProviderTest {
                     .protocol(okhttp3.Protocol.HTTP_1_1)
                     .code(200)
                     .message("OK")
+                    .header("Content-Type", "application/json")
+                    .body("""{"form_data":{"username":"ig_creator","pk":87654321}}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 3. HTTP 200 + username + no form ID + valid stored ds_user_id -> ACTIVE
+    @Test
+    fun validateSession_instagram_http200_withUsernameNoFormId_validDsUserId_becomesActive() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig; ds_user_id=99887766")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/json")
+                    .body("""{"form_data":{"username":"cookie_fallback_user"}}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 4. HTTP 200 + username + no usable identity -> CONFIGURED
+    @Test
+    fun validateSession_instagram_http200_withUsernameNoUsableIdentity_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/json")
+                    .body("""{"form_data":{"username":"user_no_id"}}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 5. HTTP 200 + missing form_data -> CONFIGURED
+    @Test
+    fun validateSession_instagram_http200_missingFormData_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/json")
                     .body("""{"status":"ok"}""".toResponseBody("application/json".toMediaType()))
                     .build()
             }
@@ -178,59 +279,12 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(res.isSuccess)
         assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
         assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
-        assertTrue(provider.sessionStatus(Platform.INSTAGRAM).details?.contains("未檢測到有效登入帳號資料") == true)
     }
 
+    // 6. login redirect -> EXPIRED
     @Test
-    fun validateSession_instagramWithNullUser_remainsConfigured() = kotlinx.coroutines.runBlocking {
-        provider.importSession(Platform.INSTAGRAM, "sessionid=valid_sess")
-
-        val mockSession = PlatformHttpSession(customClientBuilder = {
-            addInterceptor { chain ->
-                okhttp3.Response.Builder()
-                    .request(chain.request())
-                    .protocol(okhttp3.Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body("""{"user":null,"status":"ok"}""".toResponseBody("application/json".toMediaType()))
-                    .build()
-            }
-        })
-
-        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
-        assertTrue(res.isSuccess)
-        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
-        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
-        assertTrue(provider.sessionStatus(Platform.INSTAGRAM).details?.contains("未檢測到有效登入帳號資料") == true)
-    }
-
-    @Test
-    fun validateSession_instagramStatusOk_usernameOnlyWithoutPk_remainsConfigured() = kotlinx.coroutines.runBlocking {
-        provider.importSession(Platform.INSTAGRAM, "sessionid=valid_sess")
-
-        val mockSession = PlatformHttpSession(customClientBuilder = {
-            addInterceptor { chain ->
-                okhttp3.Response.Builder()
-                    .request(chain.request())
-                    .protocol(okhttp3.Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body("""{"status":"ok","user":{"username":"ig_username_only"}}""".toResponseBody("application/json".toMediaType()))
-                    .build()
-            }
-        })
-
-        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
-        assertTrue(res.isSuccess)
-        // Username without numeric pk/id must NOT mark ACTIVE
-        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
-        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
-        assertTrue(provider.sessionStatus(Platform.INSTAGRAM).details?.contains("未檢測到有效登入帳號資料") == true)
-    }
-
-    @Test
-    fun validateSession_instagramRejection_becomesExpired() = kotlinx.coroutines.runBlocking {
-        provider.importSession(Platform.INSTAGRAM, "sessionid=expired_sess")
+    fun validateSession_instagram_loginRedirect_becomesExpired() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
 
         val mockSession = PlatformHttpSession(customClientBuilder = {
             addInterceptor { chain ->
@@ -250,6 +304,139 @@ class AuthenticatedPlatformSessionProviderTest {
         assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.INSTAGRAM).state)
         assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
         assertTrue(provider.cookiesFor(Platform.INSTAGRAM).isEmpty())
+    }
+
+    // 7. 401 -> EXPIRED
+    @Test
+    fun validateSession_instagram_http401_becomesExpired() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(401)
+                    .message("Unauthorized")
+                    .body("""{"message":"checkpoint_required","status":"fail"}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 8. explicit login_required -> EXPIRED
+    @Test
+    fun validateSession_instagram_explicitLoginRequired_becomesExpired() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/json")
+                    .body("""{"message":"login_required","status":"fail"}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 9. 429 -> retain CONFIGURED
+    @Test
+    fun validateSession_instagram_http429_retainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(429)
+                    .message("Too Many Requests")
+                    .body("""{"message":"rate limited"}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 10. 5xx -> retain CONFIGURED
+    @Test
+    fun validateSession_instagram_http5xx_retainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(500)
+                    .message("Internal Server Error")
+                    .body("Server Error".toResponseBody("text/plain".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 11. network failure -> retain CONFIGURED
+    @Test
+    fun validateSession_instagram_networkFailure_retainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor {
+                throw java.io.IOException("Connection reset by peer")
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
+    }
+
+    // 12. malformed JSON -> retain CONFIGURED
+    @Test
+    fun validateSession_instagram_malformedJson_retainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importSession(Platform.INSTAGRAM, "sessionid=test_sess_ig")
+
+        val mockSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("<html><body>Maintenance In Progress</body></html>".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val res = provider.validateSession(Platform.INSTAGRAM, mockSession)
+        assertTrue(res.isSuccess)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.INSTAGRAM).state)
+        assertFalse(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
     }
 
     @Test
@@ -633,7 +820,7 @@ class AuthenticatedPlatformSessionProviderTest {
 
         val successSession = PlatformHttpSession(customClientBuilder = {
             addInterceptor { chain ->
-                val json = """{"status":"ok","user":{"pk":55555,"username":"test_captured_user"}}"""
+                val json = """{"form_data":{"user_id":"55555","username":"test_captured_user"}}"""
                 okhttp3.Response.Builder()
                     .request(chain.request())
                     .protocol(okhttp3.Protocol.HTTP_1_1)

@@ -1,5 +1,6 @@
 package com.charleswoo1.videodownloader.data.download.http
 
+import android.util.Log
 import com.charleswoo1.videodownloader.domain.model.Platform
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -202,47 +203,98 @@ class AuthenticatedPlatformSessionProvider(
 
                     val cookieHeader = cookies.joinToString("; ") { "${it.name}=${it.value}" }
                     val respResult = httpSession.fetch(
-                        url = "https://i.instagram.com/api/v1/accounts/current_user/?edit=true",
+                        url = "https://www.instagram.com/api/v1/accounts/edit/web_form_data/",
                         profile = RequestProfile.API,
+                        identity = BrowserIdentity.DESKTOP,
+                        origin = "https://www.instagram.com",
+                        referer = "https://www.instagram.com/accounts/edit/",
                         customHeaders = mapOf(
                             "X-IG-App-ID" to "936619743392459",
-                            "User-Agent" to BrowserIdentity.DESKTOP.userAgent,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Accept" to "application/json",
+                            "Referer" to "https://www.instagram.com/accounts/edit/",
                             "Cookie" to cookieHeader
                         )
                     )
 
+                    val dsUserIdCookie = cookies.firstOrNull { it.name.equals("ds_user_id", ignoreCase = true) }?.value?.trim()
+                    val hasCredibleDsUserId = isCredibleNumericId(dsUserIdCookie)
+
                     val resp = respResult.getOrNull()
                     if (resp != null) {
+                        val code = resp.code
                         val body = resp.body
-                        val isLoginRedirect = resp.code == 302 || resp.finalUrl.contains("/accounts/login")
+                        val contentType = resp.getHeader("Content-Type") ?: resp.getHeader("content-type") ?: ""
+                        val isJson = contentType.contains("application/json", ignoreCase = true)
+                        val finalUrl = resp.finalUrl
                         val json = try { JSONObject(body) } catch (_: Exception) { null }
-                        val isAuthRejected = resp.code in listOf(401, 403) || isLoginRedirect ||
-                                body.contains("checkpoint_required") || body.contains("login_required") ||
-                                (json != null && (json.optString("message").contains("checkpoint_required") || json.optString("message").contains("login_required")))
 
-                        if (isAuthRejected) {
-                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
-                        } else if (resp.code == 200) {
-                            val status = json?.optString("status")
-                            val userObj = json?.optJSONObject("user")
-                            val pkStr = userObj?.optString("pk")?.trim()?.ifBlank { null }
-                            val pk = pkStr ?: userObj?.optLong("pk", 0L)?.takeIf { it > 0 }?.toString()
-                            val hasCredibleUserId = pk != null && pk.all { it.isDigit() } && (pk.toLongOrNull() ?: 0L) > 0L
+                        val isLoginRedirect = code == 302 || finalUrl.contains("/accounts/login")
+                        val jsonMessage = json?.optString("message").orEmpty()
+                        val jsonStatus = json?.optString("status").orEmpty()
+                        val hasExplicitLoginRequired = body.contains("login_required", ignoreCase = true) ||
+                                jsonMessage.contains("login_required", ignoreCase = true) ||
+                                jsonStatus.contains("login_required", ignoreCase = true)
+                        val hasExplicitCheckpoint = body.contains("checkpoint_required", ignoreCase = true) ||
+                                jsonMessage.contains("checkpoint_required", ignoreCase = true)
 
-                            if (status == "ok" && userObj != null && hasCredibleUserId) {
-                                markActive(platform, "驗證成功 (已連線)")
+                        val isExplicitAuthRejection = code == 401 ||
+                                (code == 403 && (hasExplicitLoginRequired || hasExplicitCheckpoint || isLoginRedirect || body.contains("user_has_logged_out", ignoreCase = true))) ||
+                                isLoginRedirect ||
+                                hasExplicitLoginRequired ||
+                                hasExplicitCheckpoint
+
+                        if (isExplicitAuthRejection) {
+                            val diag = "validator=instagram_web_form_data http_status=$code content_type_json=$isJson form_data_present=false username_present=false form_user_id_present=false ds_user_id_present=$hasCredibleDsUserId classification=EXPIRED"
+                            Log.d(TAG, diag)
+                            markExpired(platform, "登入狀態已失效 (HTTP $code)")
+                        } else if (code == 200) {
+                            val formDataObj = json?.optJSONObject("form_data")
+                            val formDataPresent = formDataObj != null
+                            val username = formDataObj?.optString("username")?.trim()?.ifBlank { null }
+                            val usernamePresent = !username.isNullOrBlank()
+
+                            val formUserId = extractUserId(formDataObj, "user_id")
+                                ?: extractUserId(formDataObj, "username_id")
+                                ?: extractUserId(formDataObj, "pk")
+                                ?: extractUserId(formDataObj, "id")
+                            val hasCredibleFormUserId = isCredibleNumericId(formUserId)
+
+                            val resolvedUserId = if (hasCredibleFormUserId) formUserId else if (hasCredibleDsUserId) dsUserIdCookie else null
+                            val hasActiveProof = formDataPresent && usernamePresent && resolvedUserId != null
+
+                            val classification = if (hasActiveProof) SessionState.ACTIVE else SessionState.CONFIGURED
+                            val diag = "validator=instagram_web_form_data http_status=$code content_type_json=$isJson form_data_present=$formDataPresent username_present=$usernamePresent form_user_id_present=$hasCredibleFormUserId ds_user_id_present=$hasCredibleDsUserId classification=$classification"
+                            Log.d(TAG, diag)
+
+                            if (hasActiveProof) {
+                                markActive(platform, "驗證成功 (@$username)")
                             } else {
-                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效登入帳號資料，請確認 Cookie 是否有效")
+                                val detailMsg = if (json == null) {
+                                    "伺服器回應格式異常，保留待驗證"
+                                } else {
+                                    "未檢測到有效帳號身分資料，保留待驗證"
+                                }
+                                credentialStore.updateStatus(platform, SessionState.CONFIGURED, detailMsg)
                                 _statusFlows[platform]?.value = sessionStatus(platform)
                             }
                         } else {
-                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
+                            val diag = "validator=instagram_web_form_data http_status=$code content_type_json=$isJson form_data_present=false username_present=false form_user_id_present=false ds_user_id_present=$hasCredibleDsUserId classification=CONFIGURED"
+                            Log.d(TAG, diag)
+                            val errorDetail = if (code == 429) {
+                                "請求過於頻繁 (HTTP 429)，保留待驗證"
+                            } else {
+                                "伺服器暫時無法驗證 (HTTP $code)，保留待驗證"
+                            }
+                            credentialStore.updateStatus(platform, SessionState.CONFIGURED, errorDetail)
                             _statusFlows[platform]?.value = sessionStatus(platform)
                         }
                     } else {
+                        val diag = "validator=instagram_web_form_data http_status=0 content_type_json=false form_data_present=false username_present=false form_user_id_present=false ds_user_id_present=$hasCredibleDsUserId classification=CONFIGURED"
+                        Log.d(TAG, diag)
                         val err = respResult.exceptionOrNull()
                         val msg = err?.message ?: "連線逾時"
-                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
+                        credentialStore.updateStatus(platform, SessionState.CONFIGURED, "網路連線失敗 ($msg)，保留待驗證")
                         _statusFlows[platform]?.value = sessionStatus(platform)
                     }
                     Result.success(sessionStatus(platform))
@@ -352,6 +404,27 @@ class AuthenticatedPlatformSessionProvider(
             }
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    companion object {
+        private const val TAG = "AuthPlatformSession"
+
+        private fun extractUserId(obj: JSONObject?, key: String): String? {
+            if (obj == null || !obj.has(key)) return null
+            val str = obj.optString(key, "").trim()
+            if (str.isNotBlank() && str != "null") {
+                return str
+            }
+            val num = obj.optLong(key, 0L)
+            if (num > 0L) {
+                return num.toString()
+            }
+            return null
+        }
+
+        private fun isCredibleNumericId(id: String?): Boolean {
+            return !id.isNullOrBlank() && id.all { it.isDigit() } && (id.toLongOrNull() ?: 0L) > 0L
         }
     }
 }

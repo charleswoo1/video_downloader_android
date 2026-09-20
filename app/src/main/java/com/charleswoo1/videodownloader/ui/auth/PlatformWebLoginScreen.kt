@@ -19,18 +19,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,6 +43,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,16 +55,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.charleswoo1.videodownloader.data.download.http.CookieCandidateResult
+import com.charleswoo1.videodownloader.data.download.http.AndroidCookieScrubber
 import com.charleswoo1.videodownloader.data.download.http.PlatformWebLoginCatalog
 import com.charleswoo1.videodownloader.data.download.http.PlatformWebLoginConfig
-import com.charleswoo1.videodownloader.data.download.http.SessionState
 import com.charleswoo1.videodownloader.data.download.http.WebViewCookieCapture
 import com.charleswoo1.videodownloader.domain.model.Platform
 import com.charleswoo1.videodownloader.ui.MainViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Full-screen platform WebView login destination with hardware-backed encryption,
@@ -90,10 +86,22 @@ fun PlatformWebLoginScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var loginState by remember { mutableStateOf<PlatformWebLoginState>(PlatformWebLoginState.Preparing) }
+    val coordinator = remember(config) {
+        PlatformWebLoginCoordinator(
+            config = config,
+            cookieScrubber = AndroidCookieScrubber(),
+            importSessionAction = { header -> viewModel.importCapturedSession(config.platform, header) },
+            validateSessionAction = { viewModel.validateSessionSuspending(config.platform) },
+            cookieProbe = { url ->
+                runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
+            },
+            scope = scope
+        )
+    }
+
+    val loginState by coordinator.state.collectAsState()
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var progressPercent by remember { mutableStateOf(0) }
-    val isValidating = remember { AtomicBoolean(false) }
 
     // Enforce FLAG_SECURE on the Activity window while login screen is visible
     DisposableEffect(Unit) {
@@ -115,18 +123,16 @@ fun PlatformWebLoginScreen(
         if (webView != null && webView.canGoBack()) {
             webView.goBack()
         } else {
-            onDismiss()
+            coordinator.onCancelOrExit {
+                onDismiss()
+            }
         }
     }
 
     // Comprehensive lifecycle cleanup on teardown
     DisposableEffect(Unit) {
         onDispose {
-            runCatching {
-                val cm = CookieManager.getInstance()
-                cm.removeAllCookies(null)
-                cm.flush()
-            }
+            coordinator.onCancelOrExit { }
             webViewRef?.apply {
                 stopLoading()
                 loadUrl("about:blank")
@@ -141,85 +147,11 @@ fun PlatformWebLoginScreen(
         }
     }
 
-    fun triggerCandidateCheck(currentUrl: String?) {
-        if (isValidating.get()) return
-        if (currentUrl.isNullOrBlank()) return
-
-        // Skip candidate check on intermediate challenge/2FA/login paths
-        val isIntermediate = config.intermediatePatterns.any { pattern ->
-            currentUrl.contains(pattern, ignoreCase = true)
-        }
-        if (isIntermediate) {
-            loginState = PlatformWebLoginState.AwaitingUser
-            return
-        }
-
-        // Probe native CookieManager
-        val probeUrl = config.cookieProbeUrls.firstOrNull() ?: config.loginUrl
-        val rawCookies = runCatching {
-            CookieManager.getInstance().getCookie(probeUrl)
-        }.getOrNull()
-
-        val candidate = WebViewCookieCapture.extractCandidate(rawCookies, config)
-        if (candidate is CookieCandidateResult.Candidate) {
-            if (isValidating.compareAndSet(false, true)) {
-                loginState = PlatformWebLoginState.Validating
-                scope.launch {
-                    try {
-                        val importRes = viewModel.importCapturedSession(config.platform, candidate.filteredCookieHeader)
-                        if (importRes.isFailure) {
-                            isValidating.set(false)
-                            loginState = PlatformWebLoginState.Error(
-                                importRes.exceptionOrNull()?.message ?: "憑證儲存失敗",
-                                canRetry = true
-                            )
-                            return@launch
-                        }
-
-                        // Validate session with the platform API
-                        val valRes = viewModel.validateSessionSuspending(config.platform)
-                        val sessionInfo = valRes.getOrNull()
-
-                        when (sessionInfo?.state) {
-                            SessionState.ACTIVE -> {
-                                loginState = PlatformWebLoginState.Active()
-                                delay(600)
-                                onLoginSuccess()
-                            }
-                            SessionState.CONFIGURED -> {
-                                isValidating.set(false)
-                                loginState = PlatformWebLoginState.Challenge(
-                                    "已取得 Session，但尚未完成登入驗證，請完成 Instagram 頁面上的驗證後再試。"
-                                )
-                            }
-                            SessionState.EXPIRED -> {
-                                isValidating.set(false)
-                                loginState = PlatformWebLoginState.Error(
-                                    "Instagram 拒絕此 Session，請重新登入。",
-                                    canRetry = true
-                                )
-                            }
-                            else -> {
-                                isValidating.set(false)
-                                val msg = sessionInfo?.details ?: valRes.exceptionOrNull()?.message ?: "網路驗證逾時"
-                                loginState = PlatformWebLoginState.Error(
-                                    "驗證未完成 ($msg)，可繼續在頁面操作或按重試。",
-                                    canRetry = true
-                                )
-                            }
-                        }
-                    } catch (e: Exception) {
-                        isValidating.set(false)
-                        loginState = PlatformWebLoginState.Error(
-                            "驗證程序發生異常: ${e.message}",
-                            canRetry = true
-                        )
-                    }
-                }
-            }
-        } else {
-            if (loginState is PlatformWebLoginState.LoadingLogin || loginState is PlatformWebLoginState.Preparing) {
-                loginState = PlatformWebLoginState.AwaitingUser
+    fun handleSuccess() {
+        scope.launch {
+            delay(600)
+            coordinator.onCancelOrExit {
+                onLoginSuccess()
             }
         }
     }
@@ -252,7 +184,11 @@ fun PlatformWebLoginScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = {
+                        coordinator.onCancelOrExit {
+                            onDismiss()
+                        }
+                    }) {
                         Icon(Icons.Default.Close, contentDescription = "關閉")
                     }
                 },
@@ -380,7 +316,9 @@ fun PlatformWebLoginScreen(
                             }
                             if (state.canRetry) {
                                 OutlinedButton(onClick = {
-                                    triggerCandidateCheck(webViewRef?.url)
+                                    coordinator.onPageFinishedOrHistory(webViewRef?.url) {
+                                        handleSuccess()
+                                    }
                                 }) {
                                     Text("重試驗證", style = MaterialTheme.typography.labelSmall)
                                 }
@@ -441,19 +379,21 @@ fun PlatformWebLoginScreen(
 
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                     super.onPageStarted(view, url, favicon)
-                                    if (loginState !is PlatformWebLoginState.Validating) {
-                                        loginState = PlatformWebLoginState.LoadingLogin
-                                    }
+                                    coordinator.onPageStarted(url)
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     super.onPageFinished(view, url)
-                                    triggerCandidateCheck(url)
+                                    coordinator.onPageFinishedOrHistory(url) {
+                                        handleSuccess()
+                                    }
                                 }
 
                                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                                     super.doUpdateVisitedHistory(view, url, isReload)
-                                    triggerCandidateCheck(url)
+                                    coordinator.onPageFinishedOrHistory(url) {
+                                        handleSuccess()
+                                    }
                                 }
 
                                 override fun onReceivedError(
@@ -467,24 +407,20 @@ fun PlatformWebLoginScreen(
                                         if (desc.contains("redirect", ignoreCase = true) ||
                                             error?.errorCode == -15
                                         ) {
-                                            loginState = PlatformWebLoginState.Error(
-                                                "平台拒絕目前的內嵌登入流程 (重新導向過多)。你仍可使用「手動匯入 Cookie」作為備援。",
-                                                canRetry = false
-                                            )
+                                            coordinator.onRedirectLoopDetected()
                                         }
                                     }
                                 }
                             }
 
-                            // Fresh login: clear stale cookies first, flush, clear cache, then load URL
-                            cm.removeAllCookies {
-                                cm.flush()
+                            // Fresh login: clear stale cookies first, flush upon completion, then load login URL
+                            coordinator.prepareFreshLogin { targetUrl ->
                                 post {
                                     if (isAttachedToWindow) {
                                         clearCache(true)
                                         clearHistory()
                                         clearFormData()
-                                        loadUrl(config.loginUrl)
+                                        loadUrl(targetUrl)
                                     }
                                 }
                             }

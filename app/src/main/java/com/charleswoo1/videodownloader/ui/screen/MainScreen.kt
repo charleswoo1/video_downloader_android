@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -251,12 +253,16 @@ fun MainScreen(
         }
     }
 
-    if (showSettingsDialog) {
+    if (showSettingsDialog && activeLoginPlatform == null) {
         PlatformSessionsDialog(
             viewModel = viewModel,
             onDismiss = { showSettingsDialog = false },
             onOpenImport = { targetPlatform ->
                 importPlatform = targetPlatform
+            },
+            onStartWebLogin = { targetPlatform ->
+                showSettingsDialog = false
+                viewModel.startWebLogin(targetPlatform)
             }
         )
     }
@@ -284,10 +290,13 @@ fun MainScreen(
         PlatformWebLoginScreen(
             platform = target,
             viewModel = viewModel,
-            onDismiss = { viewModel.dismissWebLogin() },
+            onDismiss = {
+                viewModel.dismissWebLogin()
+                showSettingsDialog = true
+            },
             onLoginSuccess = {
                 viewModel.dismissWebLogin()
-                showSettingsDialog = false
+                showSettingsDialog = true
                 Toast.makeText(context, "${target.displayName} 登入成功 (已連線)", Toast.LENGTH_SHORT).show()
             }
         )
@@ -680,7 +689,8 @@ fun DownloadProgressSection(
 fun PlatformSessionsDialog(
     viewModel: MainViewModel,
     onDismiss: () -> Unit,
-    onOpenImport: (Platform) -> Unit
+    onOpenImport: (Platform) -> Unit,
+    onStartWebLogin: (Platform) -> Unit
 ) {
     val igSession by (viewModel.instagramSession?.collectAsState() ?: remember { mutableStateOf(null) })
     val thSession by (viewModel.threadsSession?.collectAsState() ?: remember { mutableStateOf(null) })
@@ -707,7 +717,7 @@ fun PlatformSessionsDialog(
                     onImport = { onOpenImport(Platform.INSTAGRAM) },
                     onValidate = { viewModel.validateSession(Platform.INSTAGRAM) },
                     onClear = { viewModel.clearSession(Platform.INSTAGRAM) },
-                    onWebLogin = { viewModel.startWebLogin(Platform.INSTAGRAM) }
+                    onWebLogin = { onStartWebLogin(Platform.INSTAGRAM) }
                 )
 
                 SessionPlatformCard(
@@ -739,6 +749,7 @@ fun PlatformSessionsDialog(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SessionPlatformCard(
     title: String,
@@ -783,7 +794,10 @@ fun SessionPlatformCard(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 if (onWebLogin != null) {
                     if (status == SessionState.NOT_CONFIGURED) {
                         Button(

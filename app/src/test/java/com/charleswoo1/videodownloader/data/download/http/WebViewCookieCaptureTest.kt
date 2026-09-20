@@ -1,5 +1,6 @@
 package com.charleswoo1.videodownloader.data.download.http
 
+import com.charleswoo1.videodownloader.domain.model.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -123,5 +124,51 @@ class WebViewCookieCaptureTest {
         assertFalse("Normalized UA must not contain 'Version/4.0'", normalized.contains("Version/", ignoreCase = true))
         assertTrue("Chrome token must be preserved", normalized.contains("Chrome/128.0.6613.88"))
         assertTrue("Android OS must be preserved", normalized.contains("Android 14"))
+    }
+
+    @Test
+    fun isCandidateOrigin_instagram_validOrigins_returnsTrue() {
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://www.instagram.com/", Platform.INSTAGRAM))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://instagram.com/accounts/onetap/?next=%2F", Platform.INSTAGRAM))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://i.instagram.com/api/v1/", Platform.INSTAGRAM))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("http://instagram.com", Platform.INSTAGRAM))
+    }
+
+    @Test
+    fun isCandidateOrigin_instagram_spoofedOrInvalidOrigins_returnsFalse() {
+        assertFalse("Subdomain bypass must be rejected", WebViewCookieCapture.isCandidateOrigin("https://instagram.com.evil.example/", Platform.INSTAGRAM))
+        assertFalse("Prefix bypass must be rejected", WebViewCookieCapture.isCandidateOrigin("https://evilinstagram.com/", Platform.INSTAGRAM))
+        assertFalse("Google account origin must be rejected", WebViewCookieCapture.isCandidateOrigin("https://accounts.google.com/signin", Platform.INSTAGRAM))
+        assertFalse("Facebook origin must be rejected for IG config", WebViewCookieCapture.isCandidateOrigin("https://m.facebook.com/login", Platform.INSTAGRAM))
+        assertFalse("about:blank must be rejected", WebViewCookieCapture.isCandidateOrigin("about:blank", Platform.INSTAGRAM))
+        assertFalse("null must be rejected", WebViewCookieCapture.isCandidateOrigin(null, Platform.INSTAGRAM))
+        assertFalse("blank must be rejected", WebViewCookieCapture.isCandidateOrigin("   ", Platform.INSTAGRAM))
+    }
+
+    @Test
+    fun isCandidateOrigin_threadsAndX_origins() {
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://www.threads.net/@user", Platform.THREADS))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://threads.com/", Platform.THREADS))
+        assertFalse(WebViewCookieCapture.isCandidateOrigin("https://threads.net.attacker.com/", Platform.THREADS))
+
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://x.com/home", Platform.X))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://twitter.com/login", Platform.X))
+        assertFalse(WebViewCookieCapture.isCandidateOrigin("https://x.com.evil.com/", Platform.X))
+    }
+
+    @Test
+    fun isIntermediateUrl_matchingPatterns_returnsTrue() {
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/accounts/onetap/?next=%2F", instagramConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/challenge/", instagramConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/two_factor", instagramConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/accounts/login/", instagramConfig))
+    }
+
+    @Test
+    fun isIntermediateUrl_nonMatchingPatterns_returnsFalse() {
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/reels/DA12345/", instagramConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/p/DB12345/", instagramConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl(null, instagramConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("", instagramConfig))
     }
 }

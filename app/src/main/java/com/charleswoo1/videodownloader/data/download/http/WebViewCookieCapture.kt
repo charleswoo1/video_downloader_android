@@ -86,6 +86,43 @@ object WebViewCookieCapture {
     }
 
     /**
+     * Checks if the current page URL belongs to a valid web origin for the platform.
+     * Uses parsed URI host semantics to prevent substring bypasses like 'instagram.com.evil.example'.
+     */
+    fun isCandidateOrigin(url: String?, platform: com.charleswoo1.videodownloader.domain.model.Platform): Boolean {
+        if (url.isNullOrBlank()) return false
+        val host = runCatching {
+            val uri = java.net.URI(url)
+            uri.host
+        }.getOrNull()?.lowercase() ?: return false
+
+        return when (platform) {
+            com.charleswoo1.videodownloader.domain.model.Platform.INSTAGRAM -> {
+                host == "instagram.com" || host.endsWith(".instagram.com")
+            }
+            com.charleswoo1.videodownloader.domain.model.Platform.THREADS -> {
+                host == "threads.net" || host.endsWith(".threads.net") ||
+                        host == "threads.com" || host.endsWith(".threads.com")
+            }
+            com.charleswoo1.videodownloader.domain.model.Platform.X -> {
+                host == "x.com" || host.endsWith(".x.com") ||
+                        host == "twitter.com" || host.endsWith(".twitter.com")
+            }
+            else -> false
+        }
+    }
+
+    /**
+     * Checks if the given URL matches known intermediate login, 2FA, checkpoint, or save-info patterns.
+     */
+    fun isIntermediateUrl(url: String?, config: PlatformWebLoginConfig): Boolean {
+        if (url.isNullOrBlank()) return false
+        return config.intermediatePatterns.any { pattern ->
+            url.contains(pattern, ignoreCase = true)
+        }
+    }
+
+    /**
      * Checks if a navigation URL is safe to load inside the WebView.
      */
     fun isAllowedNavigation(url: String): Boolean {

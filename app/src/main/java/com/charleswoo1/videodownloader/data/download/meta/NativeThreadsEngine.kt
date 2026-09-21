@@ -481,7 +481,7 @@ class NativeThreadsEngine(
         if (clean.contains("/share/")) return false
 
         val path = uri.encodedPath
-        val matchesPath = path.matches(Regex("""^/(?:@[^/]+/post/|t/)[A-Za-z0-9_-]+.*$"""))
+        val matchesPath = path.matches(Regex("""^/(?:@[^/]+/post/|t/)[A-Za-z0-9_-]+$"""))
         val shortcode = extractPostId(clean)
         return matchesPath && !shortcode.isNullOrBlank()
     }

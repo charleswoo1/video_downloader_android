@@ -3135,6 +3135,14 @@ class NativeThreadsEngineTest {
         assertTrue(engine.isValidThreadsCanonicalPost("https://www.threads.com/t/ABC"))
         assertTrue(engine.isValidThreadsCanonicalPost("https://threads.net/t/ABC"))
 
+        // /media suffix normalized and accepted
+        assertTrue(engine.isValidThreadsCanonicalPost("https://www.threads.com/@user/post/ABC/media"))
+
+        // extra / unexpected paths rejected
+        assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/@user/post/ABC/extra"))
+        assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/@user/post/ABC/random"))
+        assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/t/ABC/extra"))
+
         // bare /post rejected
         assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/post/ABC"))
         assertFalse(engine.isValidThreadsCanonicalPost("https://threads.net/post/ABC"))

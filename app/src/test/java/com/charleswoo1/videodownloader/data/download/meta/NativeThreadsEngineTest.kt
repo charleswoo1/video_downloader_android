@@ -11,6 +11,7 @@ import com.charleswoo1.videodownloader.domain.model.Platform
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -3076,6 +3077,75 @@ class NativeThreadsEngineTest {
         assertFalse("Existing canonical URL must bypass share resolver", shareResolverCalled)
         assertTrue("Extraction should succeed for canonical URL", result.isSuccess)
         assertEquals("https://www.threads.com/@user/post/ABC", result.getOrNull()?.sourceUrl)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_sharedCookieJarWithSession_doesNotLeakCookiesInOutgoingRequest() = runBlocking {
+        val sharedCookieJar = com.charleswoo1.videodownloader.data.download.http.PlatformCookieJar()
+        val threadsUrl = okhttp3.HttpUrl.Builder()
+            .scheme("https")
+            .host("www.threads.com")
+            .build()
+        val cookie = okhttp3.Cookie.Builder()
+            .domain("threads.com")
+            .name("sessionid")
+            .value("active_session_secret_xyz")
+            .path("/")
+            .build()
+        sharedCookieJar.saveFromResponse(threadsUrl, listOf(cookie))
+
+        var capturedCookieHeader: String? = "INITIAL_NOT_CALLED"
+        val sessionWithInterceptor = PlatformHttpSession(
+            cookieJar = sharedCookieJar,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    val req = chain.request()
+                    capturedCookieHeader = req.header("Cookie")
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(302)
+                        .message("Found")
+                        .header("Location", "/@user/post/DdhP9fiD1aG")
+                        .body("".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        )
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = sessionWithInterceptor)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertNull("Outgoing request must NOT contain Cookie header", capturedCookieHeader)
+        assertEquals("https://www.threads.com/@user/post/DdhP9fiD1aG", res.resolvedUrl)
+        assertEquals("redirect_location", res.resolver)
+        assertEquals(302, res.httpStatus)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun isValidThreadsCanonicalPost_strictPathValidation() {
+        // @user/post accepted
+        assertTrue(engine.isValidThreadsCanonicalPost("https://threads.com/@user/post/ABC"))
+        assertTrue(engine.isValidThreadsCanonicalPost("https://www.threads.com/@user/post/ABC"))
+        assertTrue(engine.isValidThreadsCanonicalPost("https://threads.net/@user/post/ABC"))
+        assertTrue(engine.isValidThreadsCanonicalPost("https://www.threads.net/@user/post/ABC"))
+
+        // /t/ accepted
+        assertTrue(engine.isValidThreadsCanonicalPost("https://www.threads.com/t/ABC"))
+        assertTrue(engine.isValidThreadsCanonicalPost("https://threads.net/t/ABC"))
+
+        // bare /post rejected
+        assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/post/ABC"))
+        assertFalse(engine.isValidThreadsCanonicalPost("https://threads.net/post/ABC"))
+
+        // /share/ rejected
+        assertFalse(engine.isValidThreadsCanonicalPost("https://www.threads.com/share/ABC"))
+        assertFalse(engine.isValidThreadsCanonicalPost("https://threads.net/share/ABC"))
+
+        // external host rejected
+        assertFalse(engine.isValidThreadsCanonicalPost("https://evil.com/@user/post/ABC"))
+        assertFalse(engine.isValidThreadsCanonicalPost("https://example.com/t/ABC"))
     }
 }
 

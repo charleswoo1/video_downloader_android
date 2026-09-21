@@ -263,6 +263,7 @@ open class PlatformHttpSession(
 
     open fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
         val nonRedirectClient = okHttpClient.newBuilder()
+            .cookieJar(okhttp3.CookieJar.NO_COOKIES)
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
@@ -283,10 +284,9 @@ open class PlatformHttpSession(
                         put(name, response.header(name) ?: "")
                     }
                 }
-                val body = response.body?.string() ?: ""
                 val locHeader = headersMap["location"]?.substringBefore('?')
                 safeLog("Threads share check: ${sanitizeLogText(url)} -> HTTP $code Location=$locHeader")
-                Result.success(HttpResponse(code, finalUrl, body, headersMap))
+                Result.success(HttpResponse(code, finalUrl, "", headersMap))
             }
         } catch (e: Exception) {
             safeLog("Threads share check failed for ${sanitizeLogText(url)}: ${e.message}")

@@ -123,6 +123,12 @@ open class PlatformExtractionError(
         cause: Throwable? = null
     ) : PlatformExtractionError(PlatformErrorCode.PARSE_ERROR, userMessage, canFallback = true, internalReason = internalReason, cause = cause)
 
+    class ShareResolveFailed(
+        userMessage: String = "無法解析此 Threads 分享連結，平台分享網址格式可能已變更。",
+        internalReason: String? = "THREADS_SHARE_RESOLVE_FAILED",
+        cause: Throwable? = null
+    ) : PlatformExtractionError(PlatformErrorCode.PARSE_ERROR, userMessage, canFallback = true, internalReason = internalReason, cause = cause)
+
     class ApiError(
         val httpCode: Int,
         val detail: String,

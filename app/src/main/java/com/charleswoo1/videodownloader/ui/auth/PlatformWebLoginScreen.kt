@@ -254,7 +254,7 @@ fun PlatformWebLoginScreen(
                         )
                     }
                     Text(
-                        text = "建議使用 Instagram 帳號密碼登入；第三方（Google 等）在內嵌視窗中可能受安全限制。",
+                        text = "建議使用 ${platform.displayName} 帳號密碼登入；第三方（Google 等）在內嵌視窗中可能受安全限制。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                     )

@@ -48,8 +48,30 @@ object PlatformWebLoginCatalog {
         postLoginProbe = null
     )
 
+    val THREADS = PlatformWebLoginConfig(
+        platform = Platform.THREADS,
+        loginUrl = "https://www.threads.com/login",
+        cookieProbeUrls = listOf("https://www.threads.com/"),
+        requiredCookieNames = setOf("sessionid"),
+        optionalCookieNames = setOf("csrftoken", "ds_user_id"),
+        allowThirdPartyCookies = true,
+        intermediatePatterns = listOf(
+            "/login",
+            "/accounts/login/",
+            "/accounts/onetap/",
+            "/accounts/password/",
+            "/challenge/",
+            "/two_factor",
+            "/verify/",
+            "security_check",
+            "checkpoint"
+        ),
+        postLoginProbe = null
+    )
+
     fun configFor(platform: Platform): PlatformWebLoginConfig? = when (platform) {
         Platform.INSTAGRAM -> INSTAGRAM
-        else -> null // Threads and X are deferred to Phase 2 / Phase 3
+        Platform.THREADS -> THREADS
+        else -> null // X is deferred to Phase 3
     }
 }

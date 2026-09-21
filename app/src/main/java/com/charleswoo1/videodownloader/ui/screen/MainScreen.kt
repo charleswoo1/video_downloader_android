@@ -727,7 +727,8 @@ fun PlatformSessionsDialog(
                     details = thSession?.details,
                     onImport = { onOpenImport(Platform.THREADS) },
                     onValidate = { viewModel.validateSession(Platform.THREADS) },
-                    onClear = { viewModel.clearSession(Platform.THREADS) }
+                    onClear = { viewModel.clearSession(Platform.THREADS) },
+                    onWebLogin = { onStartWebLogin(Platform.THREADS) }
                 )
 
                 SessionPlatformCard(

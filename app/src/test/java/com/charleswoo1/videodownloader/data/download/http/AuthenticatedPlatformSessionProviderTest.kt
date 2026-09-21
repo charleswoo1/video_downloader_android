@@ -1011,4 +1011,59 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(provider.hasAuthenticatedSession(Platform.INSTAGRAM))
         assertEquals(2, provider.cookiesFor(Platform.INSTAGRAM).size)
     }
+
+    @Test
+    fun importCapturedSession_validThreadsCandidate_becomesConfigured() {
+        val capturedHeader = "sessionid=captured_threads_123; csrftoken=captured_csrf; ds_user_id=7777"
+        val result = provider.importCapturedSession(Platform.THREADS, capturedHeader)
+
+        assertTrue(result.isSuccess)
+        val info = result.getOrThrow()
+        assertEquals(SessionState.CONFIGURED, info.state)
+        assertEquals(3, info.cookieCount)
+        assertFalse("CONFIGURED must not be active", provider.hasAuthenticatedSession(Platform.THREADS))
+
+        val stored = store.getCookies(Platform.THREADS)
+        assertEquals(3, stored.size)
+        assertTrue(stored.any { it.name == "sessionid" && it.value == "captured_threads_123" })
+        assertEquals("threads.com", stored[0].domain)
+    }
+
+    @Test
+    fun importCapturedSession_threadsMissingSessionId_fails() {
+        val capturedHeader = "csrftoken=captured_csrf; ds_user_id=7777"
+        val result = provider.importCapturedSession(Platform.THREADS, capturedHeader)
+
+        assertTrue(result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.THREADS).state)
+    }
+
+    @Test
+    fun importCapturedSession_threadsThenValidateSession_becomesActive() {
+        val capturedHeader = "sessionid=th_valid_sess; ds_user_id=66666"
+        val importRes = provider.importCapturedSession(Platform.THREADS, capturedHeader)
+        assertTrue(importRes.isSuccess)
+
+        val successSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val body = """<html><body><input type="hidden" name="fb_dtsg" value="NAcTestDtsgToken" />"ACCOUNT_ID":"66666"</body></html>"""
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.THREADS, successSession)
+        }
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
+        assertEquals(2, provider.cookiesFor(Platform.THREADS).size)
+    }
 }

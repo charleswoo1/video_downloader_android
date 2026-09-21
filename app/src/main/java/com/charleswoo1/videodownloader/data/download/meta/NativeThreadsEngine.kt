@@ -130,7 +130,8 @@ class NativeThreadsEngine(
             "link_preview_response",
             "quoted_post",
             "quoted_attachment_post",
-            "text_post_app_info"
+            "text_post_app_info",
+            "reposted_post"
         )
 
         fun formatSizeBucket(bytes: Int): String = when {
@@ -161,7 +162,8 @@ class NativeThreadsEngine(
             raw: String,
             candidates: MutableList<JSONObject>,
             maxDepth: Int = 3,
-            targetMarker: String? = null
+            targetMarker: String? = null,
+            targetMarkerAlt: String? = null
         ) {
             val trimmed = raw.trim()
             if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
@@ -184,7 +186,7 @@ class NativeThreadsEngine(
                     return
                 } catch (_: Exception) {}
             }
-            extractBalancedJsonPayloads(trimmed, candidates, maxDepth, targetMarker)
+            extractBalancedJsonPayloads(trimmed, candidates, maxDepth, targetMarker, targetMarkerAlt)
         }
 
         fun collectNestedJsonStrings(
@@ -242,7 +244,8 @@ class NativeThreadsEngine(
             text: String,
             candidates: MutableList<JSONObject>,
             maxDepth: Int,
-            targetMarker: String? = null
+            targetMarker: String? = null,
+            targetMarkerAlt: String? = null
         ) {
             var i = 0
             val n = text.length
@@ -268,7 +271,10 @@ class NativeThreadsEngine(
                                 if (depth == 0) {
                                     val candidateStr = text.substring(start, j + 1)
                                     var parsed = false
-                                    if (targetMarker == null || candidateStr.contains(targetMarker)) {
+                                    val matchesMarker = targetMarker == null ||
+                                        candidateStr.contains(targetMarker) ||
+                                        (!targetMarkerAlt.isNullOrBlank() && candidateStr.contains(targetMarkerAlt))
+                                    if (matchesMarker) {
                                         try {
                                             val obj = JSONObject(candidateStr)
                                             candidates.add(obj)
@@ -501,7 +507,8 @@ class NativeThreadsEngine(
         canonicalUrl: String,
         resolvedShare: Boolean = false
     ): ThreadsParseOutcome {
-        val rawCodeInHtml = html.contains(targetShortcode)
+        val targetPk = shortcodeToPk(targetShortcode)
+        val rawCodeInHtml = html.contains(targetShortcode) || (targetPk.isNotBlank() && html.contains(targetPk))
         val presentMarkers = THREADS_MARKERS.filter { html.contains(it) }
 
         fun countMatches(p: Pattern): Int {
@@ -535,16 +542,16 @@ class NativeThreadsEngine(
             )
         }
 
-        // 2. Scan script tags for JSON payload (application/json, data-sjs, generic containing shortcode)
+        // 2. Scan script tags for JSON payload (application/json, data-sjs, generic containing shortcode or pk)
         val candidates = mutableListOf<JSONObject>()
         var detectedScriptSource = "none"
 
-        fun scanScriptPatterns(pattern: Pattern, targetMarker: String? = null, sourceName: String) {
+        fun scanScriptPatterns(pattern: Pattern, targetMarker: String? = null, targetMarkerAlt: String? = null, sourceName: String) {
             val matcher = pattern.matcher(html)
             while (matcher.find()) {
                 val raw = matcher.group(1)?.trim() ?: continue
                 val beforeCount = candidates.size
-                collectJsonFromScript(raw, candidates, maxDepth = 3, targetMarker = targetMarker)
+                collectJsonFromScript(raw, candidates, maxDepth = 3, targetMarker = targetMarker, targetMarkerAlt = targetMarkerAlt)
                 if (candidates.size > beforeCount && detectedScriptSource == "none") {
                     detectedScriptSource = sourceName
                 }
@@ -552,17 +559,20 @@ class NativeThreadsEngine(
         }
 
         scanScriptPatterns(SCRIPT_JSON_PATTERN, sourceName = "application_json")
-        scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode, sourceName = "data_sjs")
-        scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode, sourceName = "nested_json")
+        scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode, targetMarkerAlt = targetPk, sourceName = "data_sjs")
+        scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode, targetMarkerAlt = targetPk, sourceName = "nested_json")
 
-        val decodedCodeInHtml = candidates.any { it.toString().contains(targetShortcode) }
+        val decodedCodeInHtml = candidates.any {
+            val s = it.toString()
+            s.contains(targetShortcode) || (targetPk.isNotBlank() && s.contains(targetPk))
+        }
         val diagWithDecode = baseDiag.copy(
             scriptSource = if (detectedScriptSource == "none" && candidates.isNotEmpty()) "application_json" else detectedScriptSource,
             decodedCodeInHtml = decodedCodeInHtml
         )
 
-        // 3. Find target post strictly matching code == targetShortcode
-        val searchResult = searchTargetPost(candidates, targetShortcode, diagWithDecode.scriptSource)
+        // 3. Find target post strictly matching code == targetShortcode OR pk == targetPk
+        val searchResult = searchTargetPost(candidates, targetShortcode, targetPk, diagWithDecode.scriptSource)
         val targetPost = searchResult.postNode
 
         // Target post isolation: If target post was not found, STRICTLY REFUSE to use unrelated feed posts
@@ -637,16 +647,20 @@ class NativeThreadsEngine(
                 if (checkObjectHasMedia(shareInfo.optJSONObject("media"))) return true
                 if (checkObjectHasMedia(shareInfo.optJSONObject("quoted_post"))) return true
                 if (checkObjectHasMedia(shareInfo.optJSONObject("quoted_attachment_post"))) return true
+                val reposted = shareInfo.optJSONObject("reposted_post")
+                if (reposted != null && hasThreadsMediaStructure(reposted)) return true
             }
             if (checkObjectHasMedia(textPostAppInfo.optJSONObject("quoted_post"))) return true
             if (checkObjectHasMedia(textPostAppInfo.optJSONObject("quoted_attachment_post"))) return true
+            val repostedUnderApp = textPostAppInfo.optJSONObject("reposted_post")
+            if (repostedUnderApp != null && hasThreadsMediaStructure(repostedUnderApp)) return true
             val linkedMedia = textPostAppInfo.optJSONObject("linked_inline_media")?.optJSONObject("media")
                 ?: textPostAppInfo.optJSONObject("link_preview_response")?.optJSONObject("video")
                 ?: textPostAppInfo.optJSONObject("linked_inline_media")
             if (checkObjectHasMedia(linkedMedia)) return true
         }
 
-        val repost = obj.optJSONObject("repost_post")
+        val repost = obj.optJSONObject("repost_post") ?: obj.optJSONObject("reposted_post")
         if (repost != null && hasThreadsMediaStructure(repost)) return true
 
         val quoted = obj.optJSONObject("quoted_post")
@@ -695,12 +709,17 @@ class NativeThreadsEngine(
         return false
     }
 
-    private fun searchTargetPost(candidates: List<JSONObject>, targetCode: String, scriptSource: String): ThreadsPostSearchResult {
+    private fun searchTargetPost(
+        candidates: List<JSONObject>,
+        targetCode: String,
+        targetPk: String,
+        scriptSource: String
+    ): ThreadsPostSearchResult {
         var wrapperSeen = false
         var fallbackPostNode: JSONObject? = null
         var matchedKeys = emptyList<String>()
         for (candidate in candidates) {
-            val res = findPostByCode(candidate, targetCode)
+            val res = findPostByCodeOrPk(candidate, targetCode, targetPk)
             if (res.wrapperSeen) {
                 wrapperSeen = true
                 if (res.matchedKeys.isNotEmpty()) matchedKeys = res.matchedKeys
@@ -722,12 +741,23 @@ class NativeThreadsEngine(
         )
     }
 
-    private fun findPostByCode(root: Any?, targetCode: String): ThreadsPostSearchResult {
+    private fun findPostByCodeOrPk(root: Any?, targetCode: String, targetPk: String): ThreadsPostSearchResult {
         if (root == null) return ThreadsPostSearchResult()
         var wrapperSeen = false
         if (root is JSONObject) {
             val code = root.optString("code")
-            if (code == targetCode) {
+            val pk = root.optString("pk").ifBlank {
+                val pkLong = root.optLong("pk", 0L)
+                if (pkLong > 0L) pkLong.toString() else ""
+            }.ifBlank {
+                root.optString("id").ifBlank {
+                    val idLong = root.optLong("id", 0L)
+                    if (idLong > 0L) idLong.toString() else ""
+                }
+            }
+            val matchesCode = code.isNotBlank() && code == targetCode
+            val matchesPk = pk.isNotBlank() && targetPk.isNotBlank() && pk == targetPk
+            if (matchesCode || matchesPk) {
                 wrapperSeen = true
                 val keys = root.keys().asSequence().toList().sorted()
                 if (hasThreadsMediaStructure(root)) {
@@ -741,7 +771,7 @@ class NativeThreadsEngine(
                     val key = childKeys.next()
                     if (isExcludedContainerKey(key)) continue
                     val child = root.opt(key)
-                    val childRes = findPostByCode(child, targetCode)
+                    val childRes = findPostByCodeOrPk(child, targetCode, targetPk)
                     if (childRes.wrapperSeen) wrapperSeen = true
                     if (childRes.postNode != null) {
                         if (hasThreadsMediaStructure(childRes.postNode)) return childRes
@@ -763,7 +793,7 @@ class NativeThreadsEngine(
                 val key = keys.next()
                 if (isExcludedContainerKey(key)) continue
                 val child = root.opt(key)
-                val childRes = findPostByCode(child, targetCode)
+                val childRes = findPostByCodeOrPk(child, targetCode, targetPk)
                 if (childRes.wrapperSeen) wrapperSeen = true
                 if (childRes.postNode != null) {
                     if (hasThreadsMediaStructure(childRes.postNode)) return childRes
@@ -774,7 +804,7 @@ class NativeThreadsEngine(
         } else if (root is JSONArray) {
             var fallbackChildResult: ThreadsPostSearchResult? = null
             for (i in 0 until root.length()) {
-                val childRes = findPostByCode(root.opt(i), targetCode)
+                val childRes = findPostByCodeOrPk(root.opt(i), targetCode, targetPk)
                 if (childRes.wrapperSeen) wrapperSeen = true
                 if (childRes.postNode != null) {
                     if (hasThreadsMediaStructure(childRes.postNode)) return childRes
@@ -784,7 +814,7 @@ class NativeThreadsEngine(
             if (fallbackChildResult != null) return fallbackChildResult
         } else if (root is String) {
             val trimmed = root.trim()
-            if (trimmed.contains(targetCode)) {
+            if (trimmed.contains(targetCode) || (targetPk.isNotBlank() && trimmed.contains(targetPk))) {
                 val start = minOf(
                     trimmed.indexOf('{').takeIf { it >= 0 } ?: Int.MAX_VALUE,
                     trimmed.indexOf('[').takeIf { it >= 0 } ?: Int.MAX_VALUE
@@ -796,7 +826,7 @@ class NativeThreadsEngine(
                         val sub = trimmed.substring(start, end + 1)
                         try {
                             val parsed = if (isObj) JSONObject(sub) else JSONArray(sub)
-                            val found = findPostByCode(parsed, targetCode)
+                            val found = findPostByCodeOrPk(parsed, targetCode, targetPk)
                             if (found.wrapperSeen || found.postNode != null) return found
                         } catch (_: Exception) {}
                     }
@@ -971,6 +1001,62 @@ class NativeThreadsEngine(
             }
         }
 
+        // Check reposted_post (text_post_app_info.share_info.reposted_post or text_post_app_info.reposted_post)
+        if (renditions.isEmpty() && dashVideoUrl == null) {
+            val reposted = post.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("reposted_post")
+                ?: post.optJSONObject("text_post_app_info")?.optJSONObject("reposted_post")
+                ?: post.optJSONObject("reposted_post")
+            if (reposted != null) {
+                renditions = extractRenditions(reposted.optJSONArray("video_versions"))
+                if (renditions.isEmpty()) {
+                    val repostedMedia = reposted.optJSONObject("media")
+                        ?: reposted.optJSONObject("text_post_app_info")?.optJSONObject("media")
+                    if (repostedMedia != null) {
+                        renditions = extractRenditions(repostedMedia.optJSONArray("video_versions"))
+                        if (renditions.isEmpty()) {
+                            val dashManifest = repostedMedia.optString("video_dash_manifest")
+                            if (dashManifest.isNotBlank()) {
+                                val (v, a) = parseDashManifest(dashManifest)
+                                dashVideoUrl = v
+                                dashAudioUrl = a
+                            }
+                        }
+                    }
+                }
+                if (renditions.isEmpty() && dashVideoUrl == null) {
+                    val dashManifest = reposted.optString("video_dash_manifest")
+                    if (dashManifest.isNotBlank()) {
+                        val (v, a) = parseDashManifest(dashManifest)
+                        dashVideoUrl = v
+                        dashAudioUrl = a
+                    }
+                }
+                if (renditions.isEmpty() && dashVideoUrl == null) {
+                    val carousel = reposted.optJSONArray("carousel_media")
+                        ?: reposted.optJSONObject("media")?.optJSONArray("carousel_media")
+                    if (carousel != null && carousel.length() > 0) {
+                        for (i in 0 until carousel.length()) {
+                            val item = carousel.optJSONObject(i) ?: continue
+                            val itemRenditions = extractRenditions(item.optJSONArray("video_versions"))
+                            if (itemRenditions.isNotEmpty()) {
+                                renditions = itemRenditions
+                                break
+                            }
+                            val dash = item.optString("video_dash_manifest")
+                            if (dash.isNotBlank()) {
+                                val (v, a) = parseDashManifest(dash)
+                                if (v != null) {
+                                    dashVideoUrl = v
+                                    dashAudioUrl = a
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Check repost_post
         if (renditions.isEmpty() && dashVideoUrl == null) {
             val repost = post.optJSONObject("repost_post")
@@ -1113,6 +1199,10 @@ class NativeThreadsEngine(
         val candidates = post.optJSONObject("image_versions2")?.optJSONArray("candidates")
             ?: post.optJSONObject("media")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
             ?: post.optJSONObject("text_post_app_info")?.optJSONObject("media")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("reposted_post")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("text_post_app_info")?.optJSONObject("share_info")?.optJSONObject("reposted_post")?.optJSONObject("media")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("text_post_app_info")?.optJSONObject("reposted_post")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
+            ?: post.optJSONObject("reposted_post")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
             ?: post.optJSONObject("repost_post")?.optJSONObject("image_versions2")?.optJSONArray("candidates")
         if (candidates != null && candidates.length() > 0) {
             val bestCandidate = candidates.optJSONObject(0)?.optString("url")
@@ -1374,7 +1464,8 @@ class NativeThreadsEngine(
         } else {
             val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
             safeLog("[Threads] Barcelona GraphQL failed: ${gqlErr?.message}")
-            diagnosticHistory.add("[profile=BARCELONA_GRAPHQL stage=FAILURE error=${gqlErr?.javaClass?.simpleName}]")
+            val reasonStr = gqlErr?.internalReason?.let { " reason=$it" } ?: ""
+            diagnosticHistory.add("[profile=BARCELONA_GRAPHQL stage=FAILURE error=${gqlErr?.javaClass?.simpleName}$reasonStr]")
             lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
             if (gqlErr is PlatformExtractionError.RateLimited) {
                 lastProfileSequence = profileSteps
@@ -1387,11 +1478,13 @@ class NativeThreadsEngine(
 
         val gqlErr = gqlResult.exceptionOrNull() as? PlatformExtractionError
         val isAuthFallbackEligible = (gqlErr?.internalReason == "THREADS_AUTH_FALLBACK_ELIGIBLE")
+        val isTargetNotFound = (gqlErr?.internalReason == "BARCELONA_TARGET_NOT_FOUND")
+        val canAttemptAuthRelay = (isAuthFallbackEligible || isTargetNotFound) && httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)
 
-        // 2. Authenticated Relay fallback ONLY if auth-fallback eligible AND active session exists
-        if (successfulMedia == null && isAuthFallbackEligible && httpSession.sessionProvider.hasAuthenticatedSession(Platform.THREADS)) {
+        // 2. Authenticated Relay fallback ONLY if auth-fallback eligible or target not found AND active session exists
+        if (successfulMedia == null && canAttemptAuthRelay) {
             profileSteps.add("AUTHENTICATED_RELAY")
-            safeLog("[Threads] authenticated session available and post is restricted/unavailable in anonymous GraphQL, attempting authenticated page fetch fallback")
+            safeLog("[Threads] authenticated session available and post is restricted/target not found in anonymous GraphQL, attempting authenticated page fetch fallback")
             httpSession.syncSessionCookies(Platform.THREADS)
             val authResp = httpSession.fetch(canonicalUrl, RequestProfile.DESKTOP_NAVIGATION)
             val authRespObj = authResp.getOrNull()

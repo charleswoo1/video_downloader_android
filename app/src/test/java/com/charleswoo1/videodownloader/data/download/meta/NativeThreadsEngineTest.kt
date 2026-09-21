@@ -1925,7 +1925,7 @@ class NativeThreadsEngineTest {
     }
 
     @Test
-    fun extractMediaInfo_activeSession_emptyEdgesNonNullData_authenticatedRelayNotCalled() = runBlocking {
+    fun extractMediaInfo_activeSession_emptyEdgesNonNullData_authenticatedRelayCalled() = runBlocking {
         val store = InMemoryPlatformCredentialStore()
         val sessionProvider = AuthenticatedPlatformSessionProvider(store)
         sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
@@ -1958,19 +1958,19 @@ class NativeThreadsEngineTest {
 
         assertTrue("Should fail without target media", result.isFailure)
         val steps = testEngine.lastProfileSequence
-        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on non-null data with empty edges", steps.contains("AUTHENTICATED_RELAY"))
+        assertTrue("AUTHENTICATED_RELAY MUST be called on non-null data with empty edges when active session exists", steps.contains("AUTHENTICATED_RELAY"))
     }
 
     @Test
-    fun extractMediaInfo_activeSession_unrelatedTargetNonNullData_authenticatedRelayNotCalled() = runBlocking {
+    fun extractMediaInfo_activeSession_targetNotFound_authenticatedRelaySucceeds() = runBlocking {
         val store = InMemoryPlatformCredentialStore()
         val sessionProvider = AuthenticatedPlatformSessionProvider(store)
         sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
         sessionProvider.markActive(Platform.THREADS, "Test active")
         assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
 
-        val shortcode = "DdZTargetPost"
-        val unrelatedShortcode = "DdZOtherPost"
+        val shortcode = "DdhP9fiD1aG"
+        val unrelatedShortcode = "DdOtherCode"
         val unrelatedGql = """
             {
               "data": {
@@ -1998,6 +1998,31 @@ class NativeThreadsEngineTest {
             }
         """.trimIndent()
 
+        val authHtml = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$shortcode",
+                        "user": {"username": "target_user"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/target_video.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            <script>["LSD",[],{"token":"tok_valid_lsd"}]</script>
+            </body></html>
+        """.trimIndent()
+
         val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
             override fun fetch(
                 url: String,
@@ -2014,16 +2039,60 @@ class NativeThreadsEngineTest {
                 if (url.contains("/api/graphql")) {
                     return Result.success(HttpResponse(200, url, unrelatedGql, emptyMap()))
                 }
-                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+                return Result.success(HttpResponse(200, url, authHtml, emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@target_user/post/$shortcode")
+
+        assertTrue("Expected extraction to succeed via AUTHENTICATED_RELAY when GraphQL had BARCELONA_TARGET_NOT_FOUND", result.isSuccess)
+        val steps = testEngine.lastProfileSequence
+        assertTrue("AUTHENTICATED_RELAY MUST be called when active session exists and GraphQL target not found", steps.contains("AUTHENTICATED_RELAY"))
+        assertEquals(listOf("BARCELONA_GRAPHQL", "AUTHENTICATED_RELAY"), steps)
+        val media = result.getOrNull()
+        assertEquals("https://threads.net/cdn/target_video.mp4", media?.qualityOptions?.first()?.formatSelector)
+    }
+
+    @Test
+    fun extractMediaInfo_noSession_targetNotFound_authenticatedRelayNotCalled() = runBlocking {
+        val shortcode = "DdZTargetMissingNoSession"
+        val unrelatedGql = """
+            {
+              "data": {
+                "data": {
+                  "edges": []
+                }
+              }
+            }
+        """.trimIndent()
+
+        val fakeSession = object : PlatformHttpSession() {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(200, url, unrelatedGql, emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script><body>No target</body></html>""", emptyMap()))
             }
         }
 
         val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
         val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
 
-        assertTrue("Should fail when target is not in GraphQL", result.isFailure)
+        assertTrue("Should fail when no active session and target missing", result.isFailure)
         val steps = testEngine.lastProfileSequence
-        assertFalse("AUTHENTICATED_RELAY MUST NOT be called for unrelated post in non-null data", steps.contains("AUTHENTICATED_RELAY"))
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called without an active session", steps.contains("AUTHENTICATED_RELAY"))
     }
 
     @Test
@@ -2424,6 +2493,229 @@ class NativeThreadsEngineTest {
         val targetErr = err as PlatformExtractionError.TargetNotInPageData
         assertEquals("THREADS_AUTH_FALLBACK_ELIGIBLE", targetErr.internalReason)
         assertTrue("Detail should include 'no details' when errors is absent", targetErr.detail.contains("no details"))
+    }
+
+    @Test
+    fun extractMediaInfo_activeSession_http429_authenticatedRelayNotCalled() = runBlocking {
+        val store = InMemoryPlatformCredentialStore()
+        val sessionProvider = AuthenticatedPlatformSessionProvider(store)
+        sessionProvider.importSession(Platform.THREADS, "sessionid=active_threads_sess")
+        sessionProvider.markActive(Platform.THREADS, "Test active")
+        assertTrue(sessionProvider.hasAuthenticatedSession(Platform.THREADS))
+
+        val shortcode = "DdZ429Post"
+        val fakeSession = object : PlatformHttpSession(sessionProvider = sessionProvider) {
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                if (url.contains("/api/graphql")) {
+                    return Result.success(HttpResponse(429, url, "Rate limited", emptyMap()))
+                }
+                return Result.success(HttpResponse(200, url, """<html><script>["LSD",[],{"token":"tok_valid_lsd"}]</script></html>""", emptyMap()))
+            }
+        }
+
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/$shortcode")
+
+        assertTrue("Should fail on HTTP 429", result.isFailure)
+        val err = result.exceptionOrNull()
+        assertTrue("Error should be RateLimited", err is PlatformExtractionError.RateLimited)
+        val steps = testEngine.lastProfileSequence
+        assertFalse("AUTHENTICATED_RELAY MUST NOT be called on HTTP 429", steps.contains("AUTHENTICATED_RELAY"))
+    }
+
+    @Test
+    fun parseThreadsPage_targetMatchesByPkOnly_extractsSuccessfully() {
+        val shortcode = "DdhP9fiD1aG"
+        val targetPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val canonical = "https://www.threads.com/@pk_user/post/$shortcode"
+
+        // Embedded payload has NO "code", but has "pk" matching targetPk
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "pk": "$targetPk",
+                        "user": {"username": "pk_user"},
+                        "caption": {"text": "Post matched strictly by numeric pk"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/pk_video_1080.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success when target post matches by pk only", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertEquals("pk_user", media.uploader)
+        assertEquals("Post matched strictly by numeric pk", media.title)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/pk_video_1080.mp4"))
+    }
+
+    @Test
+    fun parseThreadsPage_repostedPostWithVideoVersions_extractsSuccessfully() {
+        val shortcode = "DdRepostedPost"
+        val canonical = "https://www.threads.com/@reposter/post/$shortcode"
+
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$shortcode",
+                        "user": {"username": "reposter"},
+                        "caption": {"text": "Check out this reposted video"},
+                        "text_post_app_info": {
+                          "share_info": {
+                            "reposted_post": {
+                              "user": {"username": "original_author"},
+                              "video_versions": [
+                                {"url": "https://threads.net/cdn/reposted_vid_1080.mp4", "width": 1080, "height": 1920}
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for reposted_post structure", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals(shortcode, media.postId)
+        assertTrue(media.progressiveVideoUrls.contains("https://threads.net/cdn/reposted_vid_1080.mp4"))
+    }
+
+    @Test
+    fun parseThreadsPage_repostedPostWithDash_extractsSuccessfully() {
+        val shortcode = "DdRepostedDash"
+        val canonical = "https://www.threads.com/@dash_reposter/post/$shortcode"
+
+        val dashManifest = """
+            <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+              <Period>
+                <AdaptationSet mimeType="video/mp4" contentType="video">
+                  <Representation id="v1" width="1080" height="1920" bandwidth="3000000">
+                    <BaseURL>https://threads.net/cdn/reposted_dash_v.mp4</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+                <AdaptationSet mimeType="audio/mp4" contentType="audio">
+                  <Representation id="a1" bandwidth="128000">
+                    <BaseURL>https://threads.net/cdn/reposted_dash_a.mp4</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        """.trimIndent()
+
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$shortcode",
+                        "user": {"username": "dash_reposter"},
+                        "text_post_app_info": {
+                          "share_info": {
+                            "reposted_post": {
+                              "video_dash_manifest": ${org.json.JSONObject.quote(dashManifest)}
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Expected success for reposted_post with DASH manifest", result is MetaExtractionResult.Success)
+        val media = (result as MetaExtractionResult.Success).media
+        assertEquals("https://threads.net/cdn/reposted_dash_v.mp4", media.dashVideoUrl)
+        assertEquals("https://threads.net/cdn/reposted_dash_a.mp4", media.dashAudioUrl)
+    }
+
+    @Test
+    fun parseThreadsPage_strictTargetIsolation_unrelatedPkAndCode_refusesExtraction() {
+        val targetShortcode = "DdTargetWanted"
+        val unrelatedShortcode = "DdUnrelatedOther"
+        val unrelatedPk = "8888888888"
+        val canonical = "https://www.threads.com/@user/post/$targetShortcode"
+
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "code": "$unrelatedShortcode",
+                        "pk": "$unrelatedPk",
+                        "user": {"username": "unrelated_user"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/unrelated_vid.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, targetShortcode, canonical)
+
+        assertTrue("Target isolation must refuse to extract unrelated video", result is MetaExtractionResult.Failure)
+        val err = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error should be Technical/ParseError indicating target post not found", err is MetaExtractionError.Technical)
     }
 }
 

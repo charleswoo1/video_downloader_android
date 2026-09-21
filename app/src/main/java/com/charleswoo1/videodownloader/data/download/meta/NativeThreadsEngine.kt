@@ -483,7 +483,9 @@ class NativeThreadsEngine(
         val scriptCount: Int = 0,
         val scriptSource: String = "none",
         val rawCodeInHtml: Boolean = false,
+        val rawPkInHtml: Boolean = false,
         val decodedCodeInHtml: Boolean = false,
+        val decodedPkInHtml: Boolean = false,
         val targetWrapperFound: Boolean = false,
         val mediaNodeFound: Boolean = false,
         val matchedContainerKeys: List<String> = emptyList(),
@@ -508,7 +510,8 @@ class NativeThreadsEngine(
         resolvedShare: Boolean = false
     ): ThreadsParseOutcome {
         val targetPk = shortcodeToPk(targetShortcode)
-        val rawCodeInHtml = html.contains(targetShortcode) || (targetPk.isNotBlank() && html.contains(targetPk))
+        val rawCodeInHtml = html.contains(targetShortcode)
+        val rawPkInHtml = targetPk.isNotBlank() && html.contains(targetPk)
         val presentMarkers = THREADS_MARKERS.filter { html.contains(it) }
 
         fun countMatches(p: Pattern): Int {
@@ -523,6 +526,7 @@ class NativeThreadsEngine(
             resolvedShare = resolvedShare,
             scriptCount = totalScriptCount,
             rawCodeInHtml = rawCodeInHtml,
+            rawPkInHtml = rawPkInHtml,
             presentMarkers = presentMarkers
         )
 
@@ -562,13 +566,12 @@ class NativeThreadsEngine(
         scanScriptPatterns(DATA_SJS_PATTERN, targetMarker = targetShortcode, targetMarkerAlt = targetPk, sourceName = "data_sjs")
         scanScriptPatterns(GENERIC_SCRIPT_PATTERN, targetMarker = targetShortcode, targetMarkerAlt = targetPk, sourceName = "nested_json")
 
-        val decodedCodeInHtml = candidates.any {
-            val s = it.toString()
-            s.contains(targetShortcode) || (targetPk.isNotBlank() && s.contains(targetPk))
-        }
+        val decodedCodeInHtml = candidates.any { it.toString().contains(targetShortcode) }
+        val decodedPkInHtml = targetPk.isNotBlank() && candidates.any { it.toString().contains(targetPk) }
         val diagWithDecode = baseDiag.copy(
             scriptSource = if (detectedScriptSource == "none" && candidates.isNotEmpty()) "application_json" else detectedScriptSource,
-            decodedCodeInHtml = decodedCodeInHtml
+            decodedCodeInHtml = decodedCodeInHtml,
+            decodedPkInHtml = decodedPkInHtml
         )
 
         // 3. Find target post strictly matching code == targetShortcode OR pk == targetPk
@@ -749,11 +752,6 @@ class NativeThreadsEngine(
             val pk = root.optString("pk").ifBlank {
                 val pkLong = root.optLong("pk", 0L)
                 if (pkLong > 0L) pkLong.toString() else ""
-            }.ifBlank {
-                root.optString("id").ifBlank {
-                    val idLong = root.optLong("id", 0L)
-                    if (idLong > 0L) idLong.toString() else ""
-                }
             }
             val matchesCode = code.isNotBlank() && code == targetCode
             val matchesPk = pk.isNotBlank() && targetPk.isNotBlank() && pk == targetPk
@@ -1403,7 +1401,9 @@ class NativeThreadsEngine(
             val scriptSource: String
             val scriptCount: Int
             val rawCode: Boolean
+            val rawPk: Boolean
             val decodedCode: Boolean
+            val decodedPk: Boolean
             val targetWrapper: Boolean
             val mediaNode: Boolean
             val matchedKeysStr: String
@@ -1418,7 +1418,9 @@ class NativeThreadsEngine(
                 scriptSource = diag.scriptSource
                 scriptCount = diag.scriptCount
                 rawCode = diag.rawCodeInHtml
+                rawPk = diag.rawPkInHtml
                 decodedCode = diag.decodedCodeInHtml
+                decodedPk = diag.decodedPkInHtml
                 targetWrapper = diag.targetWrapperFound
                 mediaNode = diag.mediaNodeFound
                 matchedKeysStr = if (diag.matchedContainerKeys.isNotEmpty()) diag.matchedContainerKeys.joinToString(",") else "none"
@@ -1432,7 +1434,9 @@ class NativeThreadsEngine(
                 scriptSource = "none"
                 scriptCount = 0
                 rawCode = false
+                rawPk = false
                 decodedCode = false
+                decodedPk = false
                 targetWrapper = false
                 mediaNode = false
                 matchedKeysStr = "none"
@@ -1442,7 +1446,7 @@ class NativeThreadsEngine(
                 [profile=$stepName http_status=$httpCode content_type=$contentType body_size=$sizeBucket host_and_path=$cleanPath redirect=$redirect stage=$stage error=$errorClassName]
                 share: input=$isShareInput resolved=$shareResolved
                 scripts: source=$scriptSource count=$scriptCount
-                target: raw_code=$rawCode decoded_code=$decodedCode wrapper=$targetWrapper media_node=$mediaNode
+                target: raw_code=$rawCode raw_pk=$rawPk decoded_code=$decodedCode decoded_pk=$decodedPk wrapper=$targetWrapper media_node=$mediaNode
                 matched_keys: $matchedKeysStr
             """.trimIndent()
             diagnosticHistory.add(stepFp)

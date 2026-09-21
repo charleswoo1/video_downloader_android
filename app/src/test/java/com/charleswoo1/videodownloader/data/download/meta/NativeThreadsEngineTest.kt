@@ -2717,5 +2717,44 @@ class NativeThreadsEngineTest {
         val err = (result as MetaExtractionResult.Failure).error
         assertTrue("Error should be Technical/ParseError indicating target post not found", err is MetaExtractionError.Technical)
     }
+
+    @Test
+    fun parseThreadsPage_genericIdOnlyWithoutPkOrCode_refusesExtraction() {
+        val shortcode = "DdhP9fiD1aG"
+        val targetPk = NativeThreadsEngine.shortcodeToPk(shortcode)
+        val canonical = "https://www.threads.com/@id_user/post/$shortcode"
+
+        // Embedded payload has object with "id": "<targetPk>", but NO "code" and NO "pk"
+        val html = """
+            <!DOCTYPE html><html><body>
+            <script type="application/json">
+            {
+              "data": {
+                "containing_thread": {
+                  "thread_items": [
+                    {
+                      "post": {
+                        "id": "$targetPk",
+                        "user": {"username": "id_user"},
+                        "caption": {"text": "Object with generic id only"},
+                        "video_versions": [
+                          {"url": "https://threads.net/cdn/generic_id_video.mp4", "width": 1080, "height": 1920}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
+
+        val result = engine.parseThreadsPage(html, shortcode, canonical)
+
+        assertTrue("Must NOT be success when object only has generic id", result is MetaExtractionResult.Failure)
+        val err = (result as MetaExtractionResult.Failure).error
+        assertTrue("Error should be Technical indicating target not found", err is MetaExtractionError.Technical)
+    }
 }
 

@@ -157,11 +157,102 @@ class WebViewCookieCaptureTest {
     }
 
     @Test
+    fun isCandidateOrigin_threads_strictOriginChecks() {
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://www.threads.com/", Platform.THREADS))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://threads.com/@user/post/123", Platform.THREADS))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://www.threads.net/@user", Platform.THREADS))
+
+        assertFalse("Subdomain spoofing must be rejected", WebViewCookieCapture.isCandidateOrigin("https://threads.com.evil.example/", Platform.THREADS))
+        assertFalse("Prefix spoofing must be rejected", WebViewCookieCapture.isCandidateOrigin("https://evilthreads.com/", Platform.THREADS))
+        assertFalse("Instagram domain must be rejected for Threads", WebViewCookieCapture.isCandidateOrigin("https://www.instagram.com/", Platform.THREADS))
+        assertFalse("Facebook domain must be rejected for Threads", WebViewCookieCapture.isCandidateOrigin("https://facebook.com/", Platform.THREADS))
+    }
+
+    @Test
+    fun extractCandidate_threads_noSessionId_returnsMissingRequired() {
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        val raw = "csrftoken=csrf123; ds_user_id=1234567; other=val"
+        val result = WebViewCookieCapture.extractCandidate(raw, threadsConfig)
+
+        assertTrue(result is CookieCandidateResult.MissingRequired)
+        val missing = (result as CookieCandidateResult.MissingRequired).missingNames
+        assertEquals(setOf("sessionid"), missing)
+    }
+
+    @Test
+    fun extractCandidate_threads_onlySessionId_returnsCandidate() {
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        val raw = "sessionid=threads_test_session"
+        val result = WebViewCookieCapture.extractCandidate(raw, threadsConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(1, candidate.cookieCount)
+        assertEquals("sessionid=threads_test_session", candidate.filteredCookieHeader)
+    }
+
+    @Test
+    fun extractCandidate_threads_allowlistAndDropsUnrelated() {
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        val raw = "mid=drop_me; sessionid=valid_th_sess; csrftoken=th_csrf; ds_user_id=77777; datr=drop_datr"
+        val result = WebViewCookieCapture.extractCandidate(raw, threadsConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(3, candidate.cookieCount)
+
+        val pairs = candidate.filteredCookieHeader.split("; ").map { it.split("=") }.associate { it[0] to it[1] }
+        assertEquals("valid_th_sess", pairs["sessionid"])
+        assertEquals("th_csrf", pairs["csrftoken"])
+        assertEquals("77777", pairs["ds_user_id"])
+        assertFalse("mid must be stripped", pairs.containsKey("mid"))
+        assertFalse("datr must be stripped", pairs.containsKey("datr"))
+    }
+
+    @Test
+    fun extractCandidate_threads_duplicateCookieNames_latestWins() {
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        val raw = "sessionid=first_th_sess; csrftoken=th_csrf1; sessionid=second_th_sess"
+        val result = WebViewCookieCapture.extractCandidate(raw, threadsConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(2, candidate.cookieCount)
+
+        val pairs = candidate.filteredCookieHeader.split("; ").map { it.split("=") }.associate { it[0] to it[1] }
+        assertEquals("second_th_sess", pairs["sessionid"])
+        assertEquals("th_csrf1", pairs["csrftoken"])
+    }
+
+    @Test
+    fun candidateToString_threads_doesNotLeakSecrets() {
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        val raw = "sessionid=super_secret_threads_token_99999"
+        val result = WebViewCookieCapture.extractCandidate(raw, threadsConfig) as CookieCandidateResult.Candidate
+
+        val stringRepr = result.toString()
+        assertFalse(stringRepr.contains("super_secret"))
+        assertFalse(stringRepr.contains("sessionid="))
+        assertEquals("Candidate(cookieCount=1)", stringRepr)
+    }
+
+    @Test
     fun isIntermediateUrl_matchingPatterns_returnsTrue() {
         assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/accounts/onetap/?next=%2F", instagramConfig))
         assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/challenge/", instagramConfig))
         assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/two_factor", instagramConfig))
         assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/accounts/login/", instagramConfig))
+
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/login", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/accounts/login/", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/accounts/onetap/", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/accounts/password/", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/challenge/", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/two_factor", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/verify/", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/security_check", threadsConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/checkpoint", threadsConfig))
     }
 
     @Test
@@ -170,5 +261,10 @@ class WebViewCookieCaptureTest {
         assertFalse(WebViewCookieCapture.isIntermediateUrl("https://www.instagram.com/p/DB12345/", instagramConfig))
         assertFalse(WebViewCookieCapture.isIntermediateUrl(null, instagramConfig))
         assertFalse(WebViewCookieCapture.isIntermediateUrl("", instagramConfig))
+
+        val threadsConfig = PlatformWebLoginCatalog.THREADS
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/@user/post/123", threadsConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl(null, threadsConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("", threadsConfig))
     }
 }

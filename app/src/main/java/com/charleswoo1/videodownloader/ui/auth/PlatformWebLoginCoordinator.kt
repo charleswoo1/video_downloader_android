@@ -117,13 +117,13 @@ class PlatformWebLoginCoordinator(
                         SessionState.CONFIGURED -> {
                             isValidating.set(false)
                             _state.value = PlatformWebLoginState.Challenge(
-                                "已取得 Session，但尚未完成登入驗證，請完成 Instagram 頁面上的驗證後再試。"
+                                "已取得 Session，但尚未完成登入驗證，請完成 ${config.platform.displayName} 頁面上的驗證後再試。"
                             )
                         }
                         SessionState.EXPIRED -> {
                             isValidating.set(false)
                             _state.value = PlatformWebLoginState.Error(
-                                "Instagram 拒絕此 Session，請重新登入。",
+                                "${config.platform.displayName} 拒絕此 Session，請重新登入。",
                                 canRetry = true
                             )
                         }

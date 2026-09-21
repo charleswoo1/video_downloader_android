@@ -2756,5 +2756,326 @@ class NativeThreadsEngineTest {
         val err = (result as MetaExtractionResult.Failure).error
         assertTrue("Error should be Technical indicating target not found", err is MetaExtractionError.Technical)
     }
+
+    @Test
+    fun resolveThreadsShareUrl_relativeLocation_resolvesToCanonicalPost() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "/@user/post/DdhP9fiD1aG")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertEquals("https://www.threads.com/@user/post/DdhP9fiD1aG", res.resolvedUrl)
+        assertEquals("redirect_location", res.resolver)
+        assertEquals(302, res.httpStatus)
+        assertTrue(res.locationPresent)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_absoluteLocation_resolvesToCanonicalPost() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "https://www.threads.com/@user/post/DdhtxBmk4Ug")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertEquals("https://www.threads.com/@user/post/DdhtxBmk4Ug", res.resolvedUrl)
+        assertEquals("redirect_location", res.resolver)
+        assertEquals(302, res.httpStatus)
+        assertTrue(res.locationPresent)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_threadsNetLocation_normalizesToThreadsCom() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "https://www.threads.net/@user/post/XYZ")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertEquals("https://www.threads.com/@user/post/XYZ", res.resolvedUrl)
+        assertEquals("redirect_location", res.resolver)
+        assertEquals(302, res.httpStatus)
+        assertTrue(res.locationPresent)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_plainClientRedirect_succeedsWithoutHtmlParsing() = runBlocking {
+        var htmlFetchCalled = false
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "/@user/post/DdhP9fiD1aG")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                htmlFetchCalled = true
+                return Result.success(HttpResponse(200, url, "<html><body>JS Shell</body></html>", emptyMap()))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/BBTLyzjtuF/")
+
+        assertEquals("https://www.threads.com/@user/post/DdhP9fiD1aG", res.resolvedUrl)
+        assertEquals("redirect_location", res.resolver)
+        assertFalse("Primary resolver must succeed without fetching HTML", htmlFetchCalled)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_redirectLocationMissing_fallsBackToHtml() = runBlocking {
+        var htmlFetchCalled = false
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                return Result.success(HttpResponse(302, url, "", emptyMap()))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                htmlFetchCalled = true
+                val html = """<html><head><link rel="canonical" href="https://www.threads.com/@fallback_user/post/DdFallback123" /></head></html>"""
+                return Result.success(HttpResponse(200, url, html, emptyMap()))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertTrue("Should invoke HTML fallback when redirect Location is missing", htmlFetchCalled)
+        assertEquals("https://www.threads.com/@fallback_user/post/DdFallback123", res.resolvedUrl)
+        assertEquals("html_canonical", res.resolver)
+        assertFalse(res.locationPresent)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_htmlFallback_extractsCanonical() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, "", emptyMap()))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val html = """
+                    <!DOCTYPE html><html><head>
+                    <link rel="canonical" href="https://www.threads.com/@user/post/ABC">
+                    </head><body></body></html>
+                """.trimIndent()
+                return Result.success(HttpResponse(200, url, html, emptyMap()))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val res = testEngine.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+
+        assertEquals("https://www.threads.com/@user/post/ABC", res.resolvedUrl)
+        assertEquals("html_canonical", res.resolver)
+        assertTrue(res.isCanonicalPost)
+    }
+
+    @Test
+    fun resolveThreadsShareUrl_invalidRedirectLocation_rejected() = runBlocking {
+        val fakeSessionShare = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "/share/OTHER")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, "<html><body>No canonical</body></html>", emptyMap()))
+            }
+        }
+        val testEngineShare = NativeThreadsEngine(context = null, httpSession = fakeSessionShare)
+        val resShare = testEngineShare.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+        org.junit.Assert.assertNull("Secondary share URL must not be accepted as canonical", resShare.resolvedUrl)
+        assertEquals("failed", resShare.resolver)
+        assertFalse(resShare.isCanonicalPost)
+
+        val fakeSessionExternal = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                val headers = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER).apply {
+                    put("Location", "https://evil.com/@user/post/ABC")
+                }
+                return Result.success(HttpResponse(302, url, "", headers))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, "<html><body>No canonical</body></html>", emptyMap()))
+            }
+        }
+        val testEngineExternal = NativeThreadsEngine(context = null, httpSession = fakeSessionExternal)
+        val resExternal = testEngineExternal.resolveThreadsShareUrl("https://www.threads.com/share/ABC123/")
+        org.junit.Assert.assertNull("External host must not be accepted as canonical", resExternal.resolvedUrl)
+        assertEquals("failed", resExternal.resolver)
+        assertFalse(resExternal.isCanonicalPost)
+    }
+
+    @Test
+    fun extractMediaInfo_noRedirectAndNoCanonical_failsWithExplicitShareResolveFailed() = runBlocking {
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, "", emptyMap()))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                return Result.success(HttpResponse(200, url, "<html><body>No canonical here</body></html>", emptyMap()))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/share/ABC123/")
+
+        assertTrue("Must fail when share URL cannot be resolved", result.isFailure)
+        val error = result.exceptionOrNull() as? PlatformExtractionError
+        assertNotNull("Expected PlatformExtractionError", error)
+        assertTrue("Error should be ShareResolveFailed", error is PlatformExtractionError.ShareResolveFailed)
+        assertEquals("THREADS_SHARE_RESOLVE_FAILED", error?.internalReason)
+        assertEquals("無法解析此 Threads 分享連結，平台分享網址格式可能已變更。", error?.userMessage)
+        assertFalse("Must NOT accidentally surface PAGE_VARIANT_UNSUPPORTED", error?.code == com.charleswoo1.videodownloader.data.download.PlatformErrorCode.PAGE_VARIANT_UNSUPPORTED)
+
+        val fp = testEngine.lastDiagnosticFingerprint
+        assertNotNull("Diagnostic fingerprint must be recorded", fp)
+        assertTrue("Fingerprint must contain share: input=true", fp!!.contains("share:\n input=true"))
+        assertTrue("Fingerprint must contain resolver=failed", fp.contains("resolver=failed"))
+    }
+
+    @Test
+    fun extractMediaInfo_existingCanonicalUrl_bypassesShareResolver() = runBlocking {
+        var shareResolverCalled = false
+        val fakeSession = object : PlatformHttpSession() {
+            override fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+                shareResolverCalled = true
+                return Result.failure(java.io.IOException("Should not be called"))
+            }
+
+            override fun fetch(
+                url: String,
+                profile: RequestProfile,
+                identity: BrowserIdentity,
+                origin: String?,
+                referer: String?,
+                customHeaders: Map<String, String>,
+                followRedirects: Boolean,
+                body: ByteArray?,
+                contentType: String?,
+                method: String
+            ): Result<HttpResponse> {
+                val html = """
+                    <!DOCTYPE html><html><body>
+                    <script type="application/json">
+                    {
+                      "data": {
+                        "containing_thread": {
+                          "thread_items": [
+                            {
+                              "post": {
+                                "code": "ABC",
+                                "user": {"username": "user"},
+                                "caption": {"text": "Canonical bypass test"},
+                                "video_versions": [
+                                  {"url": "https://threads.net/cdn/canonical_video.mp4", "width": 1080, "height": 1920}
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                    </script>
+                    </body></html>
+                """.trimIndent()
+                return Result.success(HttpResponse(200, url, html, emptyMap()))
+            }
+        }
+        val testEngine = NativeThreadsEngine(context = null, httpSession = fakeSession)
+        val result = testEngine.extractMediaInfo("https://www.threads.com/@user/post/ABC")
+
+        assertFalse("Existing canonical URL must bypass share resolver", shareResolverCalled)
+        assertTrue("Extraction should succeed for canonical URL", result.isSuccess)
+        assertEquals("https://www.threads.com/@user/post/ABC", result.getOrNull()?.sourceUrl)
+    }
 }
 

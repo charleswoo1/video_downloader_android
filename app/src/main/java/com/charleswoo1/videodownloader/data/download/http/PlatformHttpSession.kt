@@ -261,6 +261,39 @@ open class PlatformHttpSession(
         return Result.success(currentUrl)
     }
 
+    open fun resolveThreadsShareUrl(url: String): Result<HttpResponse> {
+        val nonRedirectClient = okHttpClient.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("User-Agent", "curl/8.0")
+            .header("Accept", "*/*")
+            .build()
+
+        return try {
+            nonRedirectClient.newCall(request).execute().use { response ->
+                val code = response.code
+                val finalUrl = response.request.url.toString()
+                val headersMap = java.util.TreeMap<String, String>(java.lang.String.CASE_INSENSITIVE_ORDER).apply {
+                    for (name in response.headers.names()) {
+                        put(name, response.header(name) ?: "")
+                    }
+                }
+                val body = response.body?.string() ?: ""
+                val locHeader = headersMap["location"]?.substringBefore('?')
+                safeLog("Threads share check: ${sanitizeLogText(url)} -> HTTP $code Location=$locHeader")
+                Result.success(HttpResponse(code, finalUrl, body, headersMap))
+            }
+        } catch (e: Exception) {
+            safeLog("Threads share check failed for ${sanitizeLogText(url)}: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
     open fun downloadMediaStream(
         streamUrl: String,
         destination: File,

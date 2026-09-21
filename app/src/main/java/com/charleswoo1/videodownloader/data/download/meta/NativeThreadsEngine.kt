@@ -14,6 +14,7 @@ import com.charleswoo1.videodownloader.domain.model.Platform
 import com.charleswoo1.videodownloader.domain.model.QualityOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -456,26 +457,97 @@ class NativeThreadsEngine(
         return null
     }
 
-    suspend fun resolveShareUrl(url: String): String = withContext(Dispatchers.IO) {
+    data class ThreadsShareResolution(
+        val resolvedUrl: String?,
+        val resolver: String,
+        val httpStatus: Int,
+        val locationPresent: Boolean,
+        val isCanonicalPost: Boolean
+    )
+
+    fun isValidThreadsCanonicalPost(url: String): Boolean {
+        val clean = normalizeUrl(url)
+        val uri = try {
+            clean.toHttpUrlOrNull()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+
+        val host = uri.host.lowercase()
+        val isThreadsHost = host == "threads.com" || host == "www.threads.com" ||
+                host == "threads.net" || host == "www.threads.net"
+        if (!isThreadsHost) return false
+
+        if (clean.contains("/share/")) return false
+
+        val path = uri.encodedPath
+        val matchesPath = path.matches(Regex("""^/(?:@[^/]+/post/|t/|post/)[A-Za-z0-9_-]+.*$"""))
+        val shortcode = extractPostId(clean)
+        return matchesPath && !shortcode.isNullOrBlank()
+    }
+
+    suspend fun resolveThreadsShareUrl(url: String): ThreadsShareResolution = withContext(Dispatchers.IO) {
         if (!url.contains("/share/")) {
-            return@withContext normalizeUrl(url)
+            val normalized = normalizeUrl(url)
+            return@withContext ThreadsShareResolution(
+                resolvedUrl = normalized,
+                resolver = "none",
+                httpStatus = 200,
+                locationPresent = false,
+                isCanonicalPost = isValidThreadsCanonicalPost(normalized)
+            )
         }
 
-        val redirected = httpSession.resolveRedirectUrl(url, RequestProfile.DESKTOP_NAVIGATION)
-        val targetUrl = redirected.getOrDefault(url)
-        val normalized = normalizeUrl(targetUrl)
-        if (normalized.contains("/post/") || normalized.contains("/t/")) {
-            return@withContext normalized
+        // 1. Primary strategy: plain-client GET + followRedirects=false + Location inspection
+        val respResult = httpSession.resolveThreadsShareUrl(url)
+        val resp = respResult.getOrNull()
+        val httpStatus = resp?.code ?: 0
+        val location = resp?.getHeader("Location")?.trim()?.takeIf { it.isNotBlank() }
+        val locationPresent = location != null
+
+        if (httpStatus in setOf(301, 302, 303, 307, 308) && location != null) {
+            val resolvedTarget = try {
+                url.toHttpUrlOrNull()?.resolve(location)?.toString() ?: location
+            } catch (_: Exception) {
+                location
+            }
+            val normalizedTarget = normalizeUrl(resolvedTarget)
+            if (isValidThreadsCanonicalPost(normalizedTarget)) {
+                return@withContext ThreadsShareResolution(
+                    resolvedUrl = normalizedTarget,
+                    resolver = "redirect_location",
+                    httpStatus = httpStatus,
+                    locationPresent = true,
+                    isCanonicalPost = true
+                )
+            }
         }
 
-        // Fetch share page HTML to inspect canonical meta tags
+        // 2. Secondary fallback: fetch share page HTML with browser UA and inspect canonical/og:url
         val shareHtml = httpSession.fetch(url, RequestProfile.DESKTOP_NAVIGATION).getOrNull()?.body ?: ""
         val canonical = extractCanonicalFromHtml(shareHtml)
-        if (canonical != null) {
-            return@withContext canonical
+        if (canonical != null && isValidThreadsCanonicalPost(canonical)) {
+            return@withContext ThreadsShareResolution(
+                resolvedUrl = canonical,
+                resolver = "html_canonical",
+                httpStatus = httpStatus,
+                locationPresent = locationPresent,
+                isCanonicalPost = true
+            )
         }
 
-        normalized
+        // 3. Unresolved failure
+        ThreadsShareResolution(
+            resolvedUrl = null,
+            resolver = "failed",
+            httpStatus = httpStatus,
+            locationPresent = locationPresent,
+            isCanonicalPost = false
+        )
+    }
+
+    suspend fun resolveShareUrl(url: String): String = withContext(Dispatchers.IO) {
+        resolveThreadsShareUrl(url).resolvedUrl ?: normalizeUrl(url)
     }
 
     data class ThreadsDiagnostics(
@@ -1366,16 +1438,48 @@ class NativeThreadsEngine(
         lastBootstrapResp = null
 
         val isShareInput = url.contains("/share/")
-        val resolvedUrl = resolveShareUrl(url)
-        val shareResolved = isShareInput && resolvedUrl != url && !resolvedUrl.contains("/share/")
-        val shortcode = extractPostId(resolvedUrl)
-            ?: return@withContext Result.failure(
-                PlatformExtractionError.PageVariantUnsupported("無法從網址中解析 Threads 貼文代碼，請確認網址格式")
-            )
-
-        val canonicalUrl = normalizeUrl(resolvedUrl)
-        val profileSteps = mutableListOf<String>()
         val diagnosticHistory = mutableListOf<String>()
+
+        val canonicalUrl: String
+        val shareResolved: Boolean
+        val shortcode: String
+
+        if (isShareInput) {
+            val shareRes = resolveThreadsShareUrl(url)
+            shareResolved = shareRes.resolvedUrl != null
+            val shareDiag = """
+                share:
+                 input=true
+                 resolver=${shareRes.resolver}
+                 http_status=${shareRes.httpStatus}
+                 location_present=${shareRes.locationPresent}
+                 canonical_post=${shareRes.isCanonicalPost}
+            """.trimIndent()
+            safeLog("[Threads] $shareDiag")
+            diagnosticHistory.add(shareDiag)
+
+            val resolved = shareRes.resolvedUrl
+            if (resolved == null) {
+                lastDiagnosticFingerprint = diagnosticHistory.joinToString("\n---\n")
+                return@withContext Result.failure(
+                    PlatformExtractionError.ShareResolveFailed()
+                )
+            }
+            canonicalUrl = resolved
+            shortcode = extractPostId(canonicalUrl)
+                ?: return@withContext Result.failure(
+                    PlatformExtractionError.ShareResolveFailed()
+                )
+        } else {
+            shareResolved = false
+            canonicalUrl = normalizeUrl(url)
+            shortcode = extractPostId(canonicalUrl)
+                ?: return@withContext Result.failure(
+                    PlatformExtractionError.PageVariantUnsupported("無法從網址中解析 Threads 貼文代碼，請確認網址格式")
+                )
+        }
+
+        val profileSteps = mutableListOf<String>()
 
         safeLog("[Resolver] platform=THREADS")
         safeLog("[Threads] is_share_input=$isShareInput share_resolved=$shareResolved")

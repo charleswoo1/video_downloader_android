@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import com.charleswoo1.videodownloader.ui.auth.PlatformWebLoginScreen
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +93,7 @@ fun MainScreen(
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var importPlatform by remember { mutableStateOf<Platform?>(null) }
+    val activeLoginPlatform by viewModel.activeLoginPlatform.collectAsState()
 
     Scaffold(
         topBar = {
@@ -249,12 +253,16 @@ fun MainScreen(
         }
     }
 
-    if (showSettingsDialog) {
+    if (showSettingsDialog && activeLoginPlatform == null) {
         PlatformSessionsDialog(
             viewModel = viewModel,
             onDismiss = { showSettingsDialog = false },
             onOpenImport = { targetPlatform ->
                 importPlatform = targetPlatform
+            },
+            onStartWebLogin = { targetPlatform ->
+                showSettingsDialog = false
+                viewModel.startWebLogin(targetPlatform)
             }
         )
     }
@@ -273,6 +281,23 @@ fun MainScreen(
                 }.onFailure { err ->
                     Toast.makeText(context, "匯入失敗: ${err.message}", Toast.LENGTH_LONG).show()
                 }
+            }
+        )
+    }
+
+    if (activeLoginPlatform != null) {
+        val target = activeLoginPlatform!!
+        PlatformWebLoginScreen(
+            platform = target,
+            viewModel = viewModel,
+            onDismiss = {
+                viewModel.dismissWebLogin()
+                showSettingsDialog = true
+            },
+            onLoginSuccess = {
+                viewModel.dismissWebLogin()
+                showSettingsDialog = true
+                Toast.makeText(context, "${target.displayName} 登入成功 (已連線)", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -664,7 +689,8 @@ fun DownloadProgressSection(
 fun PlatformSessionsDialog(
     viewModel: MainViewModel,
     onDismiss: () -> Unit,
-    onOpenImport: (Platform) -> Unit
+    onOpenImport: (Platform) -> Unit,
+    onStartWebLogin: (Platform) -> Unit
 ) {
     val igSession by (viewModel.instagramSession?.collectAsState() ?: remember { mutableStateOf(null) })
     val thSession by (viewModel.threadsSession?.collectAsState() ?: remember { mutableStateOf(null) })
@@ -690,7 +716,8 @@ fun PlatformSessionsDialog(
                     details = igSession?.details,
                     onImport = { onOpenImport(Platform.INSTAGRAM) },
                     onValidate = { viewModel.validateSession(Platform.INSTAGRAM) },
-                    onClear = { viewModel.clearSession(Platform.INSTAGRAM) }
+                    onClear = { viewModel.clearSession(Platform.INSTAGRAM) },
+                    onWebLogin = { onStartWebLogin(Platform.INSTAGRAM) }
                 )
 
                 SessionPlatformCard(
@@ -722,6 +749,7 @@ fun PlatformSessionsDialog(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SessionPlatformCard(
     title: String,
@@ -730,7 +758,8 @@ fun SessionPlatformCard(
     details: String?,
     onImport: () -> Unit,
     onValidate: () -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    onWebLogin: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -765,27 +794,76 @@ fun SessionPlatformCard(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onImport,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                ) {
-                    Text(if (status == SessionState.NOT_CONFIGURED) "匯入 Cookie" else "更新 Cookie", style = MaterialTheme.typography.labelSmall)
-                }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (onWebLogin != null) {
+                    if (status == SessionState.NOT_CONFIGURED) {
+                        Button(
+                            onClick = onWebLogin,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("登入 $title", style = MaterialTheme.typography.labelSmall)
+                        }
 
-                if (status != SessionState.NOT_CONFIGURED) {
+                        OutlinedButton(
+                            onClick = onImport,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("手動匯入 Cookie", style = MaterialTheme.typography.labelSmall)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onWebLogin,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("重新登入", style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        OutlinedButton(
+                            onClick = onValidate,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("驗證狀態", style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        OutlinedButton(
+                            onClick = onImport,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("更新 Cookie", style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        OutlinedButton(
+                            onClick = onClear,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("清除", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                } else {
                     OutlinedButton(
-                        onClick = onValidate,
+                        onClick = onImport,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                     ) {
-                        Text("驗證狀態", style = MaterialTheme.typography.labelSmall)
+                        Text(if (status == SessionState.NOT_CONFIGURED) "匯入 Cookie" else "更新 Cookie", style = MaterialTheme.typography.labelSmall)
                     }
 
-                    OutlinedButton(
-                        onClick = onClear,
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Text("清除", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                    if (status != SessionState.NOT_CONFIGURED) {
+                        OutlinedButton(
+                            onClick = onValidate,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("驗證狀態", style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        OutlinedButton(
+                            onClick = onClear,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("清除", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
             }

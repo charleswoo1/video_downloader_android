@@ -53,8 +53,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val threadsSession: StateFlow<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>? = sessionProvider.statusFlow(com.charleswoo1.videodownloader.domain.model.Platform.THREADS)
     val xSession: StateFlow<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>? = sessionProvider.statusFlow(com.charleswoo1.videodownloader.domain.model.Platform.X)
 
+    private val _activeLoginPlatform = MutableStateFlow<com.charleswoo1.videodownloader.domain.model.Platform?>(null)
+    val activeLoginPlatform: StateFlow<com.charleswoo1.videodownloader.domain.model.Platform?> = _activeLoginPlatform.asStateFlow()
+
+    fun startWebLogin(platform: com.charleswoo1.videodownloader.domain.model.Platform) {
+        _activeLoginPlatform.value = platform
+    }
+
+    fun dismissWebLogin() {
+        _activeLoginPlatform.value = null
+    }
+
     fun importSession(platform: com.charleswoo1.videodownloader.domain.model.Platform, rawInput: String): Result<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo> {
         return sessionProvider.importSession(platform, rawInput)
+    }
+
+    fun importCapturedSession(
+        platform: com.charleswoo1.videodownloader.domain.model.Platform,
+        rawCookieHeader: String
+    ): Result<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo> {
+        return sessionProvider.importCapturedSession(platform, rawCookieHeader)
     }
 
     fun importMetaSession(rawInput: String): Result<Pair<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo, com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo>> {
@@ -70,6 +88,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val httpSession = com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession(sessionProvider = sessionProvider)
             sessionProvider.validateSession(platform, httpSession)
         }
+    }
+
+    suspend fun validateSessionSuspending(
+        platform: com.charleswoo1.videodownloader.domain.model.Platform
+    ): Result<com.charleswoo1.videodownloader.data.download.http.PlatformSessionInfo> {
+        val httpSession = com.charleswoo1.videodownloader.data.download.http.PlatformHttpSession(sessionProvider = sessionProvider)
+        return sessionProvider.validateSession(platform, httpSession)
     }
 
     init {

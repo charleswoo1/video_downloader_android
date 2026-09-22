@@ -106,13 +106,18 @@ CI Artifact 是測試產物，與正式 GitHub Release 不同。
 
 1. `versionName` / `versionCode` 正確。
 2. Unit tests、lint、assemble 全部通過。
-3. Manual Debug CI PASS。
-4. Signed Release Candidate workflow PASS。
-5. Release candidate 已完成實機驗證。
-6. README、CHANGELOG、SECURITY、THIRD_PARTY_NOTICES 與版本資訊一致。
-7. Release APK 命名與 checksum 已確認。
-8. Project-level license 與 third-party obligations 已完成確認。
-9. 建立 tag 與 GitHub Release 前取得 repository owner 明確授權。
+3. Release branch 的 Manual Debug CI PASS。
+4. Release preparation PR 完成 review 後 merge 到 `main`。
+5. 從 `main` 執行 Signed Release Candidate workflow 並 PASS。
+6. Release candidate 已完成實機驗證。
+7. README、CHANGELOG、SECURITY、THIRD_PARTY_NOTICES、LICENSE 與版本資訊一致。
+8. Release APK 命名與 checksum 已確認。
+9. 確認 RC 後 `main` 沒有新增變更；tag 必須指向已驗證 RC 的同一 commit。
+10. 建立 tag 與 GitHub Release 前取得 repository owner 明確授權。
+
+> **重要：** `release-candidate.yml` 為 manual `workflow_dispatch`。v1.0.0 的正式流程是先將已 review 的 release-prep PR merge 至 default branch `main`，再從 `main` 產生 signed RC；RC 驗證通過前不得建立正式 tag / Release。
+
+本專案採 **GNU GPL v3.0 (GPL-3.0)**，完整條款見根目錄 [LICENSE](../LICENSE)。第三方元件授權與來源見 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 v1.0.0 採：
 

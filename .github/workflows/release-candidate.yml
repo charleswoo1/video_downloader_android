@@ -58,24 +58,27 @@ jobs:
           ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
-      - name: Verify APK signature
-        run: |
-          set -euo pipefail
-          APK="app/build/outputs/apk/release/app-release.apk"
-          test -f "$APK"
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
-          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
-
-      - name: Prepare v1.0.0 release candidate
+      - name: Copy to deterministic filename
         run: |
           set -euo pipefail
           mkdir -p build-artifacts
           cp app/build/outputs/apk/release/app-release.apk \
             build-artifacts/SocialVideoDownloader-Android-v1.0.0.apk
-          (
-            cd build-artifacts
-            sha256sum SocialVideoDownloader-Android-v1.0.0.apk > SHA256SUMS.txt
-          )
+
+      - name: Verify final APK signature
+        run: |
+          set -euo pipefail
+          APK="build-artifacts/SocialVideoDownloader-Android-v1.0.0.apk"
+          test -f "$APK"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          cd build-artifacts
+          sha256sum SocialVideoDownloader-Android-v1.0.0.apk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Upload Release Candidate
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

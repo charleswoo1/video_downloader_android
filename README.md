@@ -2,6 +2,8 @@
 
 在 Android 上直接從社群 App 分享影片網址，快速解析並下載到手機。
 
+**官方網站：** https://charleswoo1.github.io/video_downloader_android/
+
 支援 **YouTube、Facebook、Instagram、Threads、X (Twitter)、TikTok** 等常見平台；也可以直接在 App 內貼上網址使用。
 
 ## 主要功能

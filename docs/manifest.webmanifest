@@ -1,0 +1,9 @@
+{
+  "name": "Social Video Downloader for Android",
+  "short_name": "Video Downloader",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#0a0d14",
+  "icons": []
+}

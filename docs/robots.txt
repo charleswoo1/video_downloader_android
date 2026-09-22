@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://charleswoo1.github.io/video_downloader_android/sitemap.xml

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Social Video Downloader for Android</title>
+  <meta name="description" content="從 Android 分享選單直接下載 Instagram、Threads、X、YouTube、Facebook、TikTok 等平台影片。支援 App 內登入、背景下載與本機 Session。">
+  <meta name="theme-color" content="#0a0d14">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://charleswoo1.github.io/video_downloader_android/">
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./styles.css">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="zh_TW">
+  <meta property="og:title" content="Social Video Downloader for Android">
+  <meta property="og:description" content="分享網址，選擇 App，直接解析並下載。支援 Instagram、Threads、X、YouTube、Facebook、TikTok。">
+  <meta property="og:url" content="https://charleswoo1.github.io/video_downloader_android/">
+  <meta name="twitter:card" content="summary">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Social Video Downloader for Android",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Android 8.0+",
+    "softwareVersion": "1.0.0",
+    "downloadUrl": "https://github.com/charleswoo1/video_downloader_android/releases/tag/v1.0.0",
+    "codeRepository": "https://github.com/charleswoo1/video_downloader_android",
+    "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="回到首頁">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" role="img">
+          <rect x="4" y="3" width="32" height="34" rx="9"></rect>
+          <path d="M15 13.5h10M20 11v14m0 0-5-5m5 5 5-5"></path>
+          <path d="M13 29.5h14"></path>
+        </svg>
+      </span>
+      <span>Social Video Downloader</span>
+    </a>
+    <nav aria-label="主要導覽">
+      <a href="#features">功能</a>
+      <a href="#install">安裝</a>
+      <a href="#privacy">隱私</a>
+      <a href="https://github.com/charleswoo1/video_downloader_android" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero section">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="status-dot"></span><span id="versionLabel">正式版 v1.0.0</span></div>
+        <h1>分享網址。<br><span>直接下載。</span></h1>
+        <p class="lead">在 Android 社群 App 點「分享」，選擇 Social Video Downloader，就能解析影片並下載到手機。需要帳號權限的內容，也可直接在 App 內登入。</p>
+
+        <div class="platforms" aria-label="支援平台">
+          <span>YouTube</span><span>Facebook</span><span>Instagram</span><span>Threads</span><span>X</span><span>TikTok</span>
+        </div>
+
+        <div class="hero-actions">
+          <a id="downloadButton" class="button primary" href="https://github.com/charleswoo1/video_downloader_android/releases/download/v1.0.0/SocialVideoDownloader-Android-v1.0.0.apk">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"></path></svg>
+            下載 Android APK
+          </a>
+          <a class="button secondary" href="https://github.com/charleswoo1/video_downloader_android/releases/latest" rel="noopener">查看 Release</a>
+        </div>
+
+        <div class="release-meta">
+          <span>Android 8.0+</span>
+          <span>GPL-3.0</span>
+          <span>免費・開源</span>
+        </div>
+      </div>
+
+      <div class="phone-stage" aria-label="App 介面示意">
+        <div class="glow"></div>
+        <div class="phone">
+          <div class="phone-top"><span></span></div>
+          <div class="phone-screen">
+            <div class="mini-header">
+              <div class="mini-logo">↓</div>
+              <div>
+                <strong>Social Video Downloader</strong>
+                <small>Android</small>
+              </div>
+              <div class="mini-gear">⚙</div>
+            </div>
+            <div class="mini-card">
+              <span class="mini-label">影片網址</span>
+              <div class="url-box">https://www.instagram.com/…</div>
+              <button type="button">解析影片</button>
+            </div>
+            <div class="share-flow">
+              <div class="flow-icon">↗</div>
+              <div>
+                <strong>從社群 App 分享</strong>
+                <p>分享 → Social Video Downloader</p>
+              </div>
+            </div>
+            <div class="login-row">
+              <span>Instagram</span><b>已連線</b>
+            </div>
+            <div class="login-row">
+              <span>Threads</span><b>已連線</b>
+            </div>
+            <div class="login-row">
+              <span>X</span><b>已連線</b>
+            </div>
+            <div class="download-card">
+              <div>
+                <strong>1080p MP4</strong>
+                <small>準備下載</small>
+              </div>
+              <span>↓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section block">
+      <div class="section-heading">
+        <span>FEATURES</span>
+        <h2>少一點步驟，直接把影片存下來</h2>
+        <p>以 Android 分享流程為核心，同時保留手動貼網址與平台登入。</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card">
+          <div class="feature-icon">↗</div>
+          <h3>分享即下載</h3>
+          <p>從 Instagram、Threads、X、YouTube 等 App 直接分享網址，不必在 App 之間複製貼上。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-icon">⌁</div>
+          <h3>多平台解析</h3>
+          <p>支援常見社群平台，並保留 yt-dlp fallback，讓公開內容有更多解析路徑。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-icon">◎</div>
+          <h3>App 內登入</h3>
+          <p>Instagram、Threads、X 可透過 WebView 登入，處理需要 Session、年齡驗證或帳號權限的內容。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-icon">↓</div>
+          <h3>背景下載</h3>
+          <p>下載期間可切換到其他 App，進度與完成狀態透過 Android 通知顯示。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-icon">▣</div>
+          <h3>統一檔案位置</h3>
+          <p>完成的內容預設存放在 <code>Downloads/SocialVideoDownloader/</code>，方便直接開啟或分享。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-icon">&lt;/&gt;</div>
+          <h3>需要時才顯示 Debug</h3>
+          <p>一般使用預設隱藏診斷資訊；遇到問題時，可從設定開啟 Engine Trace 與 Runtime Diagnostics。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="install" class="section split">
+      <div class="section-heading left">
+        <span>INSTALL</span>
+        <h2>三步完成安裝</h2>
+        <p>目前以 GitHub Release APK 發布，不需要 Google Play。</p>
+      </div>
+      <ol class="steps">
+        <li>
+          <span>01</span>
+          <div><strong>下載 APK</strong><p>使用上方「下載 Android APK」取得最新正式版本。</p></div>
+        </li>
+        <li>
+          <span>02</span>
+          <div><strong>允許安裝未知來源 App</strong><p>Android 若跳出提示，僅需授權目前使用的瀏覽器或檔案管理器安裝。</p></div>
+        </li>
+        <li>
+          <span>03</span>
+          <div><strong>直接分享影片網址</strong><p>回到社群 App，點「分享」並選擇 Social Video Downloader。</p></div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="section integrity">
+      <div>
+        <span class="kicker">RELEASE INTEGRITY</span>
+        <h2>可驗證的正式版本</h2>
+        <p>Release APK 使用專用 release key 簽署，並隨版本提供 SHA-256 checksum。</p>
+      </div>
+      <div class="checksum-card">
+        <div class="checksum-head">
+          <span id="checksumVersion">v1.0.0 SHA-256</span>
+          <a id="checksumLink" href="https://github.com/charleswoo1/video_downloader_android/releases/download/v1.0.0/SHA256SUMS.txt" rel="noopener">SHA256SUMS.txt</a>
+        </div>
+        <code id="checksumValue">83e67c1fbff756ca2460d639f8a98aee9fa1e4cc4b80755eb19d6970ba604f3a</code>
+      </div>
+    </section>
+
+    <section id="privacy" class="section split privacy">
+      <div class="section-heading left">
+        <span>PRIVACY</span>
+        <h2>登入資料留在你的裝置</h2>
+        <p>Session 資料使用 Android Keystore 保護並加密儲存在裝置本機。App 不會把登入 Cookie 上傳到開發者伺服器。</p>
+      </div>
+      <div class="privacy-list">
+        <div><span>01</span><p><strong>本機保存</strong><br>Instagram、Threads、X Session 儲存在 Android 裝置。</p></div>
+        <div><span>02</span><p><strong>可自行清除</strong><br>不再需要登入狀態時，可從 App 的平台登入設定清除。</p></div>
+        <div><span>03</span><p><strong>公開內容不強迫登入</strong><br>可匿名解析時會優先使用不需帳號的流程。</p></div>
+      </div>
+    </section>
+
+    <section class="section caution">
+      <div>
+        <strong>使用提醒</strong>
+        <p>請僅下載你有權存取與保存的內容，並遵守所在地法律、來源網站條款及著作權規範。本專案不提供 DRM 繞過或破解。</p>
+      </div>
+      <a href="https://github.com/charleswoo1/video_downloader_android/issues" rel="noopener">回報問題 →</a>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-brand">
+      <strong>Social Video Downloader for Android</strong>
+      <span>Open source · GPL-3.0</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/charleswoo1/video_downloader_android">Source</a>
+      <a href="https://github.com/charleswoo1/video_downloader_android/releases/latest">Releases</a>
+      <a href="https://github.com/charleswoo1/video_downloader_android/blob/main/LICENSE">License</a>
+      <a href="https://github.com/charleswoo1/video_downloader">Windows 版</a>
+    </div>
+  </footer>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

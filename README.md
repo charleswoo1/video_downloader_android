@@ -154,3 +154,11 @@ Windows 版本為獨立專案：
 本專案整合多個開源元件，包括 yt-dlp、FFmpeg、AndroidX / Jetpack Compose 等。
 
 完整清單與授權資訊請參閱 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 授權
+
+本專案原始碼以 **GNU General Public License v3.0 (GPL-3.0)** 授權釋出，完整條款請參閱 [LICENSE](LICENSE)。
+
+第三方元件仍依各自的授權條款提供，完整清單、版本與來源請參閱 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+正式 GitHub Release 的對應原始碼以相同版本的 Git tag 為準；例如 `v1.0.0` APK 對應 `v1.0.0` tag 的原始碼。

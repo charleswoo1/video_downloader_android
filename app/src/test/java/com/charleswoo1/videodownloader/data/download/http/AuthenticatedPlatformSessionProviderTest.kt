@@ -1744,4 +1744,179 @@ class AuthenticatedPlatformSessionProviderTest {
             assertFalse("info.toString() must not leak bearer token (code $code)", stringRepr.contains(AuthenticatedPlatformSessionProvider.X_BEARER_TOKEN))
         }
     }
+
+    // 1. previous EXPIRED + all network failure -> remains EXPIRED
+    @Test
+    fun validateSession_previousExpired_allNetworkFailure_remainsExpired() = kotlinx.coroutines.runBlocking {
+        provider.importCapturedSession(Platform.X, "auth_token=tok; ct0=csrf")
+        provider.markExpired(Platform.X, "先前已失效")
+        assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.X).state)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor {
+                    throw java.io.IOException("Network down")
+                }
+            }
+        )
+
+        val res = provider.validateSession(Platform.X, session)
+        assertTrue(res.isSuccess)
+        val info = res.getOrThrow()
+        assertEquals("Previous EXPIRED must remain EXPIRED on network failure", SessionState.EXPIRED, info.state)
+        assertTrue(info.details?.contains("網路連線失敗") == true)
+    }
+
+    // 2. previous EXPIRED + HTTP 503 -> remains EXPIRED
+    @Test
+    fun validateSession_previousExpired_http503_remainsExpired() = kotlinx.coroutines.runBlocking {
+        provider.importCapturedSession(Platform.X, "auth_token=tok; ct0=csrf")
+        provider.markExpired(Platform.X, "先前已失效")
+        assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.X).state)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Service Unavailable")
+                        .body("503 Service Unavailable".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        )
+
+        val res = provider.validateSession(Platform.X, session)
+        assertTrue(res.isSuccess)
+        val info = res.getOrThrow()
+        assertEquals("Previous EXPIRED must remain EXPIRED on 503", SessionState.EXPIRED, info.state)
+        assertTrue(info.details?.contains("503") == true)
+    }
+
+    // 3. previous EXPIRED + ambiguous 403 / 404 chain -> remains EXPIRED
+    @Test
+    fun validateSession_previousExpired_ambiguous403And404Chain_remainsExpired() = kotlinx.coroutines.runBlocking {
+        provider.importCapturedSession(Platform.X, "auth_token=tok; ct0=csrf")
+        provider.markExpired(Platform.X, "先前已失效")
+        assertEquals(SessionState.EXPIRED, provider.sessionStatus(Platform.X).state)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                if (req.url.toString().contains("verify_credentials")) {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(403)
+                        .message("Forbidden")
+                        .body("<html>Cloudflare challenge</html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(404)
+                        .message("Not Found")
+                        .body("Not Found".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        })
+
+        val res = provider.validateSession(Platform.X, session)
+        assertTrue(res.isSuccess)
+        val info = res.getOrThrow()
+        assertEquals("Previous EXPIRED must remain EXPIRED on 403/404 chain", SessionState.EXPIRED, info.state)
+        assertTrue(info.details?.contains("403") == true)
+    }
+
+    // 4. previous ACTIVE transient chain -> remains ACTIVE
+    @Test
+    fun validateSession_previousActive_transientChain_remainsActive() = kotlinx.coroutines.runBlocking {
+        provider.importCapturedSession(Platform.X, "auth_token=tok; ct0=csrf")
+        provider.markActive(Platform.X, "先前已連線")
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.X).state)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(429)
+                        .message("Too Many Requests")
+                        .body("Rate limit exceeded".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        )
+
+        val res = provider.validateSession(Platform.X, session)
+        assertTrue(res.isSuccess)
+        val info = res.getOrThrow()
+        assertEquals("Previous ACTIVE must remain ACTIVE on transient chain", SessionState.ACTIVE, info.state)
+        assertTrue(info.details?.contains("429") == true)
+    }
+
+    // 5. previous CONFIGURED transient chain -> remains CONFIGURED
+    @Test
+    fun validateSession_previousConfigured_transientChain_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        provider.importCapturedSession(Platform.X, "auth_token=tok; ct0=csrf")
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.X).state)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Service Unavailable")
+                        .body("Service Unavailable".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        )
+
+        val res = provider.validateSession(Platform.X, session)
+        assertTrue(res.isSuccess)
+        val info = res.getOrThrow()
+        assertEquals("Previous CONFIGURED must remain CONFIGURED on transient chain", SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("503") == true)
+    }
+
+    // 6. diagnostics regression: bounded attempt sequence formatter records sequence without secrets
+    @Test
+    fun formatXValidatorDiagnostics_recordsSequenceWithoutSecrets() {
+        val attempts = listOf(
+            "verify_credentials:403:ambiguous",
+            "account_settings:404",
+            "legacy_account_settings:200:insufficient_identity"
+        )
+        val diag = AuthenticatedPlatformSessionProvider.formatXValidatorDiagnostics(
+            attempts = attempts,
+            classification = SessionState.CONFIGURED
+        )
+
+        assertEquals(
+            "validator=x attempts=verify_credentials:403:ambiguous,account_settings:404,legacy_account_settings:200:insufficient_identity classification=CONFIGURED",
+            diag
+        )
+        assertTrue(diag.contains("verify_credentials:403:ambiguous"))
+        assertTrue(diag.contains("account_settings:404"))
+        assertTrue(diag.contains("legacy_account_settings:200:insufficient_identity"))
+        assertTrue(diag.contains("classification=CONFIGURED"))
+
+        // Must NOT leak secrets
+        assertFalse("Must not leak auth_token", diag.contains("auth_token"))
+        assertFalse("Must not leak ct0", diag.contains("ct0"))
+        assertFalse("Must not leak Cookie header", diag.contains("Cookie"))
+        assertFalse("Must not leak Bearer token", diag.contains(AuthenticatedPlatformSessionProvider.X_BEARER_TOKEN))
+    }
 }

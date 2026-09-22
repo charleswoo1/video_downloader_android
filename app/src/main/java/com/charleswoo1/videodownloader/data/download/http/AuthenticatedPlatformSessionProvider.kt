@@ -376,7 +376,7 @@ class AuthenticatedPlatformSessionProvider(
                                 val identityProof = extractXIdentityProof(resp.body)
                                 if (!identityProof.isNullOrBlank()) {
                                     attempts.add("${endpoint.name}:200:identity")
-                                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=ACTIVE"
+                                    val diag = formatXValidatorDiagnostics(attempts, SessionState.ACTIVE)
                                     Log.d(TAG, diag)
                                     markActive(platform, "驗證成功 (已連線: $identityProof)")
                                     return@withContext Result.success(sessionStatus(platform))
@@ -386,7 +386,7 @@ class AuthenticatedPlatformSessionProvider(
                             }
                             401 -> {
                                 attempts.add("${endpoint.name}:401:auth_rejected")
-                                val diag = "validator=x attempts=${attempts.joinToString(",")} classification=EXPIRED"
+                                val diag = formatXValidatorDiagnostics(attempts, SessionState.EXPIRED)
                                 Log.d(TAG, diag)
                                 markExpired(platform, "登入狀態已失效 (HTTP 401)")
                                 return@withContext Result.success(sessionStatus(platform))
@@ -395,7 +395,7 @@ class AuthenticatedPlatformSessionProvider(
                                 val isExplicitAuthRejection = isXExplicitAuthRejection(resp.body)
                                 if (isExplicitAuthRejection) {
                                     attempts.add("${endpoint.name}:403:auth_rejected")
-                                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=EXPIRED"
+                                    val diag = formatXValidatorDiagnostics(attempts, SessionState.EXPIRED)
                                     Log.d(TAG, diag)
                                     markExpired(platform, "登入狀態已失效 (HTTP 403)")
                                     return@withContext Result.success(sessionStatus(platform))
@@ -418,13 +418,13 @@ class AuthenticatedPlatformSessionProvider(
                         }
                     }
 
-                    val finalState = retainTransientState(previousState)
-                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=$finalState"
+                    val finalState = previousState
+                    val diag = formatXValidatorDiagnostics(attempts, finalState)
                     Log.d(TAG, diag)
 
                     val finalDetail = when {
                         attempts.all { it.endsWith(":404") } ->
-                            "驗證端點皆無法使用 (HTTP 404)，保留待驗證"
+                            if (finalState == SessionState.CONFIGURED) "驗證端點皆無法使用 (HTTP 404)，保留待驗證" else "驗證端點皆無法使用 (HTTP 404)，保留目前狀態"
                         attempts.all { it.contains(":0:network_failure") } ->
                             "網路連線失敗，保留目前狀態"
                         attempts.any { it.contains(":429:rate_limited") } ->
@@ -434,11 +434,11 @@ class AuthenticatedPlatformSessionProvider(
                             "伺服器暫時無法驗證 (HTTP $first5xx)，保留目前狀態"
                         }
                         attempts.all { it.contains(":200:insufficient_identity") || it.endsWith(":404") } && attempts.any { it.contains(":200:insufficient_identity") } ->
-                            "未檢測到有效帳號標記，保留待驗證"
+                            if (finalState == SessionState.CONFIGURED) "未檢測到有效帳號標記，保留待驗證" else "未檢測到有效帳號標記，保留目前狀態"
                         attempts.any { it.contains(":403:ambiguous") } ->
-                            "需要安全驗證或受到限制 (HTTP 403)，保留待驗證"
+                            if (finalState == SessionState.CONFIGURED) "需要安全驗證或受到限制 (HTTP 403)，保留待驗證" else "需要安全驗證或受到限制 (HTTP 403)，保留目前狀態"
                         else ->
-                            "無法完成 X 登入驗證，已嘗試 ${attempts.size} 個驗證方式，保留待驗證"
+                            if (finalState == SessionState.CONFIGURED) "無法完成 X 登入驗證，已嘗試 ${attempts.size} 個驗證方式，保留待驗證" else "無法完成 X 登入驗證，已嘗試 ${attempts.size} 個驗證方式，保留目前狀態"
                     }
 
                     credentialStore.updateStatus(platform, finalState, finalDetail)
@@ -538,6 +538,13 @@ class AuthenticatedPlatformSessionProvider(
 
         private fun retainTransientState(previousState: SessionState): SessionState {
             return if (previousState == SessionState.ACTIVE) SessionState.ACTIVE else SessionState.CONFIGURED
+        }
+
+        internal fun formatXValidatorDiagnostics(
+            attempts: List<String>,
+            classification: SessionState
+        ): String {
+            return "validator=x attempts=${attempts.joinToString(",")} classification=$classification"
         }
 
         data class XValidatorEndpoint(

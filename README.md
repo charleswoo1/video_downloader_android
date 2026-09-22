@@ -142,7 +142,9 @@ Windows 版本為獨立專案：
 
 開發與維護相關資訊已移至：
 
+- [Changelog](CHANGELOG.md)
 - [Development Guide](docs/DEVELOPMENT.md)
+- [Release Guide](docs/RELEASE.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security Policy](SECURITY.md)
 - [Third-Party Notices](THIRD_PARTY_NOTICES.md)

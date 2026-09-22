@@ -127,8 +127,6 @@ This document provides notice of these dependencies, their upstream repositories
 
 ---
 
----
-
 ## Project License
 
 This project's original source code is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the repository's top-level [LICENSE](LICENSE) file for the complete license text.

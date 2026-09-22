@@ -39,4 +39,13 @@
     <string name="quality_480p">480p 標清</string>
     <string name="quality_360p">360p 流暢</string>
     <string name="quality_audio_only">僅音訊 (MP3/M4A)</string>
+    <string name="action_settings">設定</string>
+    <string name="title_settings">設定</string>
+    <string name="section_platform_sessions">平台登入</string>
+    <string name="action_manage_platform_sessions">管理平台登入</string>
+    <string name="section_advanced">進階</string>
+    <string name="setting_debug_ui">除錯資訊</string>
+    <string name="setting_debug_ui_desc">顯示引擎路由與執行環境診斷資訊</string>
+    <string name="reminder_login_title">部分平台尚未登入</string>
+    <string name="action_go_to_settings">前往設定</string>
 </resources>

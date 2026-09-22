@@ -127,7 +127,11 @@ This document provides notice of these dependencies, their upstream repositories
 
 ---
 
-> [!NOTE]
-> Public production releases are gated until overall project repository licensing is formally determined by the project owner.
-> GPL-licensed repositories (InstaDownload, YTDLnis, Seal, NewPipeExtractor) are retained as architectural research references only; NO GPL source code has been copied or directly translated into this repository.
+## Project License
 
+This project's original source code is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the repository's top-level [LICENSE](LICENSE) file for the complete license text.
+
+Third-party components remain subject to their respective licenses documented above. Public binary releases must continue to satisfy the applicable redistribution and corresponding-source obligations of bundled components. Each production release must point to the exact matching Git tag/source revision.
+
+> [!NOTE]
+> GPL-licensed repositories used only for architectural research (InstaDownload, YTDLnis, Seal, NewPipeExtractor) remain reference-only; no source code from those repositories is intentionally copied or directly translated into this repository.

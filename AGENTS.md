@@ -83,10 +83,14 @@ GitHub Actions 可用於：
 
 ## Releases
 
-- Android 採獨立版本線，初始開發版本由 `v0.1.0` 開始。
-- CI Artifact 與正式 Release 必須區分。
+- Android 採獨立版本線；第一個正式穩定版本為 `v1.0.0`。
+- `versionCode` 採 `major * 10000 + minor * 100 + patch`，例如 1.0.0 = 10000。
+- CI Artifact、Release Candidate Artifact 與正式 GitHub Release 必須區分。
+- 一般 Android CI 僅建立 Debug 測試產物。
+- Release Candidate 使用手動 workflow，建立 signed APK 與 `SHA256SUMS.txt`，但不得自動建立 tag / GitHub Release。
 - 未經 repository owner 明確要求，不建立 tag、不發布正式 Release、不覆寫既有 Release。
-- 正式發布前必須確認 versionName / versionCode、測試結果與產物名稱。
+- 正式發布前必須確認 versionName / versionCode、測試結果、實機 regression、產物名稱、checksum 與 signing。
+- 發佈流程以 `docs/RELEASE.md` 為準。
 
 ## Change discipline
 

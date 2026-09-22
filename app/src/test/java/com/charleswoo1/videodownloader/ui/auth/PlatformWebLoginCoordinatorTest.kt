@@ -518,4 +518,211 @@ class PlatformWebLoginCoordinatorTest {
         assertTrue(exitCompleted)
         assertFalse(coordinator.isValidating.get())
     }
+
+    // 16. X: no cookies transitions to AwaitingUser
+    @Test
+    fun x_onPageFinished_noCookies_transitionsToAwaitingUser() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            validateSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.ACTIVE, 2)) },
+            cookieProbe = { null },
+            scope = this
+        )
+        coordinator.onPageStarted("https://x.com/i/flow/login")
+        assertEquals(PlatformWebLoginState.LoadingLogin, coordinator.state.value)
+
+        var successCalled = false
+        coordinator.onPageFinishedOrHistory("https://x.com/i/flow/login") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        assertEquals(PlatformWebLoginState.AwaitingUser, coordinator.state.value)
+        assertFalse(successCalled)
+    }
+
+    // 17. X: candidate + ACTIVE transitions to Active and invokes callback
+    @Test
+    fun x_onPageFinished_candidateWithActiveValidation_transitionsToActiveAndInvokesCallback() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        var importedCookie: String? = null
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = {
+                importedCookie = it
+                Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 4))
+            },
+            validateSessionAction = {
+                Result.success(PlatformSessionInfo(Platform.X, SessionState.ACTIVE, 4, details = "x_user"))
+            },
+            cookieProbe = { "auth_token=x_test_auth; ct0=x_test_ct0; twid=u%3D123; kdt=x_test_kdt; guest_id=strip_me" },
+            scope = this
+        )
+
+        var successCalled = false
+        coordinator.onPageFinishedOrHistory("https://x.com/home") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        assertTrue(coordinator.state.value is PlatformWebLoginState.Active)
+        assertTrue("onActiveSuccess callback must be invoked", successCalled)
+        assertEquals("auth_token=x_test_auth; ct0=x_test_ct0; twid=u%3D123; kdt=x_test_kdt", importedCookie)
+    }
+
+    // 18. X: candidate + CONFIGURED transitions to Challenge with X-specific text
+    @Test
+    fun x_onPageFinished_candidateWithConfiguredSession_transitionsToChallengeAndAllowsRetry() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            validateSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            cookieProbe = { "auth_token=x_test_auth; ct0=x_test_ct0" },
+            scope = this
+        )
+
+        var successCalled = false
+        coordinator.onPageFinishedOrHistory("https://x.com/home") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        val state = coordinator.state.value
+        assertTrue(state is PlatformWebLoginState.Challenge)
+        val challengeState = state as PlatformWebLoginState.Challenge
+        assertTrue("Challenge message must mention X (Twitter)", challengeState.message.contains("X (Twitter)"))
+        assertFalse("Challenge message must not mention Instagram", challengeState.message.contains("Instagram"))
+        assertFalse("Challenge message must not mention Threads", challengeState.message.contains("Threads"))
+        assertEquals("已取得 Session，但尚未完成登入驗證，請完成 X (Twitter) 頁面上的驗證後再試。", challengeState.message)
+        assertFalse("onActiveSuccess must not be called when state is CONFIGURED", successCalled)
+        assertFalse("isValidating lock must be released for user retry", coordinator.isValidating.get())
+    }
+
+    // 19. X: candidate + EXPIRED transitions to Error with X-specific text
+    @Test
+    fun x_onPageFinished_candidateWithExpiredSession_transitionsToErrorAndAllowsRetry() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            validateSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.EXPIRED, 2)) },
+            cookieProbe = { "auth_token=x_test_auth; ct0=x_test_ct0" },
+            scope = this
+        )
+
+        var successCalled = false
+        coordinator.onPageFinishedOrHistory("https://x.com/home") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        val state = coordinator.state.value
+        assertTrue(state is PlatformWebLoginState.Error)
+        val errorState = state as PlatformWebLoginState.Error
+        assertTrue("Error must be retryable", errorState.canRetry)
+        assertTrue("Error message must mention X (Twitter)", errorState.message.contains("X (Twitter)"))
+        assertFalse("Error message must not mention Instagram", errorState.message.contains("Instagram"))
+        assertFalse("Error message must not mention Threads", errorState.message.contains("Threads"))
+        assertEquals("X (Twitter) 拒絕此 Session，請重新登入。", errorState.message)
+        assertFalse("onActiveSuccess must not be called when session is EXPIRED", successCalled)
+        assertFalse("isValidating lock must be released for user retry", coordinator.isValidating.get())
+    }
+
+    // 20. X: challenge / intermediate URL does not itself complete login
+    @Test
+    fun x_onPageFinished_intermediateUrlDoesNotItselfCompleteLogin() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            validateSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.ACTIVE, 2)) },
+            cookieProbe = { null },
+            scope = this
+        )
+
+        var successCalled = false
+        coordinator.onPageFinishedOrHistory("https://x.com/account/login_verification") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        assertFalse("Intermediate URL must not complete login without candidate cookies", successCalled)
+        assertFalse(coordinator.isValidating.get())
+    }
+
+    // 21. X: leaving candidate origin does not capture cookies or trigger validation
+    @Test
+    fun x_onPageFinished_leavingCandidateOrigin_validationNotTriggered() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber()
+        var importCalled = false
+        var validateCalled = false
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = {
+                importCalled = true
+                Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2))
+            },
+            validateSessionAction = {
+                validateCalled = true
+                Result.success(PlatformSessionInfo(Platform.X, SessionState.ACTIVE, 2))
+            },
+            cookieProbe = { "auth_token=x_valid_auth; ct0=x_valid_ct0" },
+            scope = this
+        )
+
+        var successCalled = false
+        // Spoofed subdomain origin
+        coordinator.onPageFinishedOrHistory("https://x.com.evil.example/home") {
+            successCalled = true
+        }
+
+        advanceUntilIdle()
+        assertFalse("Import must NOT be called on spoofed origin", importCalled)
+        assertFalse("Validate must NOT be called on spoofed origin", validateCalled)
+        assertFalse(successCalled)
+        assertFalse(coordinator.isValidating.get())
+
+        // Also test about:blank
+        coordinator.onPageFinishedOrHistory("about:blank") {
+            successCalled = true
+        }
+        advanceUntilIdle()
+        assertFalse("Import must NOT be called on about:blank", importCalled)
+        assertFalse(successCalled)
+    }
+
+    // 22. X: cancel/exit scrubs cookies and cleans up
+    @Test
+    fun x_onCancelOrExit_scrubsCookiesAndInvokesCompletionCallback() = runTest(testDispatcher) {
+        val scrubber = FakeCookieScrubber(autoExecuteCallback = false)
+        val coordinator = PlatformWebLoginCoordinator(
+            config = PlatformWebLoginCatalog.X,
+            cookieScrubber = scrubber,
+            importSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.CONFIGURED, 2)) },
+            validateSessionAction = { Result.success(PlatformSessionInfo(Platform.X, SessionState.ACTIVE, 2)) },
+            cookieProbe = { null },
+            scope = this
+        )
+
+        var exitCompleted = false
+        coordinator.onCancelOrExit {
+            exitCompleted = true
+        }
+
+        assertEquals(1, scrubber.scrubCallCount)
+        assertFalse(exitCompleted)
+
+        scrubber.completePending(true)
+        assertTrue(exitCompleted)
+        assertFalse(coordinator.isValidating.get())
+    }
 }

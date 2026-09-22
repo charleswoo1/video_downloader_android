@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
@@ -333,34 +334,202 @@ class AuthenticatedPlatformSessionProvider(
                         return@withContext Result.failure(IllegalStateException("缺少 auth_token 或 ct0"))
                     }
 
+                    val cookieHeader = buildString {
+                        append("auth_token=").append(authToken)
+                        append("; ct0=").append(ct0)
+                        for (c in cookies) {
+                            if (!c.name.equals("auth_token", ignoreCase = true) && !c.name.equals("ct0", ignoreCase = true)) {
+                                append("; ").append(c.name).append("=").append(c.value)
+                            }
+                        }
+                    }
+
+                    val headers = mapOf(
+                        "Authorization" to "Bearer $X_BEARER_TOKEN",
+                        "x-csrf-token" to ct0,
+                        "x-twitter-auth-type" to "OAuth2Session",
+                        "x-twitter-active-user" to "yes",
+                        "x-twitter-client-language" to "zh-tw",
+                        "Accept" to "*/*",
+                        "Cookie" to cookieHeader
+                    )
+
+                    val previousState = sessionStatus(platform).state
+
                     val respResult = httpSession.fetch(
-                        url = "https://api.x.com/1.1/account/settings.json",
+                        url = X_ACCOUNT_MULTI_LIST_URL,
                         profile = RequestProfile.API,
-                        customHeaders = mapOf(
-                            "Authorization" to "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-                            "x-csrf-token" to ct0,
-                            "x-twitter-auth-type" to "OAuth2Session",
-                            "Cookie" to "auth_token=$authToken; ct0=$ct0"
-                        )
+                        origin = "https://x.com",
+                        referer = "https://x.com/",
+                        customHeaders = headers
                     )
 
                     val resp = respResult.getOrNull()
-                    if (resp != null) {
-                        if (resp.code == 200) {
-                            markActive(platform, "驗證成功 (已連線)")
-                        } else if (resp.code in listOf(401, 403)) {
-                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
-                        } else {
-                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
-                            _statusFlows[platform]?.value = sessionStatus(platform)
-                        }
-                    } else {
-                        val err = respResult.exceptionOrNull()
-                        val msg = err?.message ?: "連線逾時"
-                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
+                    if (resp == null) {
+                        val diag = formatXValidatorDiagnostics(
+                            endpoint = "account_multi_list",
+                            httpStatus = 0,
+                            identityPresent = false,
+                            classification = "NETWORK_FAILURE"
+                        )
+                        Log.d(TAG, diag)
+                        credentialStore.updateStatus(platform, previousState, "網路連線失敗，保留目前狀態")
                         _statusFlows[platform]?.value = sessionStatus(platform)
+                        return@withContext Result.success(sessionStatus(platform))
                     }
-                    Result.success(sessionStatus(platform))
+
+                    val code = resp.code
+                    when (code) {
+                        200 -> {
+                            val identity = extractXMultiListIdentity(resp.body)
+                            if (!identity.screenName.isNullOrBlank() && !identity.userId.isNullOrBlank()) {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 200,
+                                    responseShape = identity.responseShape,
+                                    identityPresent = true,
+                                    classification = "ACTIVE"
+                                )
+                                Log.d(TAG, diag)
+                                markActive(platform, "驗證成功 (已連線: @${identity.screenName})")
+                                return@withContext Result.success(sessionStatus(platform))
+                            } else {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 200,
+                                    identityPresent = false,
+                                    classification = "INSUFFICIENT_IDENTITY"
+                                )
+                                Log.d(TAG, diag)
+                                val finalDetail = if (previousState == SessionState.CONFIGURED) {
+                                    "未取得有效 X 帳號資訊，保留待驗證"
+                                } else {
+                                    "未取得有效 X 帳號資訊，保留目前狀態"
+                                }
+                                credentialStore.updateStatus(platform, previousState, finalDetail)
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                        }
+                        401 -> {
+                            val isExplicit = isXExplicitAuthRejection(resp.body)
+                            if (isExplicit) {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 401,
+                                    identityPresent = false,
+                                    classification = "EXPIRED"
+                                )
+                                Log.d(TAG, diag)
+                                markExpired(platform, "登入狀態已失效 (HTTP 401)")
+                                return@withContext Result.success(sessionStatus(platform))
+                            } else {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 401,
+                                    identityPresent = false,
+                                    classification = "AMBIGUOUS_AUTH_FAILURE"
+                                )
+                                Log.d(TAG, diag)
+                                val finalDetail = if (previousState == SessionState.CONFIGURED) {
+                                    "無法完成 X 帳號驗證 (HTTP 401)，保留待驗證"
+                                } else {
+                                    "無法完成 X 帳號驗證 (HTTP 401)，保留目前狀態"
+                                }
+                                credentialStore.updateStatus(platform, previousState, finalDetail)
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                        }
+                        403 -> {
+                            val isExplicit = isXExplicitAuthRejection(resp.body)
+                            if (isExplicit) {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 403,
+                                    identityPresent = false,
+                                    classification = "EXPIRED"
+                                )
+                                Log.d(TAG, diag)
+                                markExpired(platform, "登入狀態已失效 (HTTP 403)")
+                                return@withContext Result.success(sessionStatus(platform))
+                            } else {
+                                val diag = formatXValidatorDiagnostics(
+                                    endpoint = "account_multi_list",
+                                    httpStatus = 403,
+                                    identityPresent = false,
+                                    classification = "CHALLENGE_OR_RESTRICTION"
+                                )
+                                Log.d(TAG, diag)
+                                val finalDetail = if (previousState == SessionState.CONFIGURED) {
+                                    "需要安全驗證或受到限制 (HTTP 403)，保留待驗證"
+                                } else {
+                                    "需要安全驗證或受到限制 (HTTP 403)，保留目前狀態"
+                                }
+                                credentialStore.updateStatus(platform, previousState, finalDetail)
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                        }
+                        404 -> {
+                            val diag = formatXValidatorDiagnostics(
+                                endpoint = "account_multi_list",
+                                httpStatus = 404,
+                                identityPresent = false,
+                                classification = "ENDPOINT_UNAVAILABLE_OR_REQUEST_INCOMPATIBLE"
+                            )
+                            Log.d(TAG, diag)
+                            val finalDetail = if (previousState == SessionState.CONFIGURED) {
+                                "驗證端點無法使用 (HTTP 404)，保留待驗證"
+                            } else {
+                                "驗證端點無法使用 (HTTP 404)，保留目前狀態"
+                            }
+                            credentialStore.updateStatus(platform, previousState, finalDetail)
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                            return@withContext Result.success(sessionStatus(platform))
+                        }
+                        429 -> {
+                            val diag = formatXValidatorDiagnostics(
+                                endpoint = "account_multi_list",
+                                httpStatus = 429,
+                                identityPresent = false,
+                                classification = "RATE_LIMITED"
+                            )
+                            Log.d(TAG, diag)
+                            credentialStore.updateStatus(platform, previousState, "請求過於頻繁 (HTTP 429)，保留目前狀態")
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                            return@withContext Result.success(sessionStatus(platform))
+                        }
+                        in 500..599 -> {
+                            val diag = formatXValidatorDiagnostics(
+                                endpoint = "account_multi_list",
+                                httpStatus = code,
+                                identityPresent = false,
+                                classification = "SERVER_ERROR"
+                            )
+                            Log.d(TAG, diag)
+                            credentialStore.updateStatus(platform, previousState, "伺服器暫時無法驗證 (HTTP $code)，保留目前狀態")
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                            return@withContext Result.success(sessionStatus(platform))
+                        }
+                        else -> {
+                            val diag = formatXValidatorDiagnostics(
+                                endpoint = "account_multi_list",
+                                httpStatus = code,
+                                identityPresent = false,
+                                classification = "UNEXPECTED_STATUS"
+                            )
+                            Log.d(TAG, diag)
+                            val finalDetail = if (previousState == SessionState.CONFIGURED) {
+                                "伺服器回應狀態異常 (HTTP $code)，保留待驗證"
+                            } else {
+                                "伺服器回應狀態異常 (HTTP $code)，保留目前狀態"
+                            }
+                            credentialStore.updateStatus(platform, previousState, finalDetail)
+                            _statusFlows[platform]?.value = sessionStatus(platform)
+                            return@withContext Result.success(sessionStatus(platform))
+                        }
+                    }
                 }
                 Platform.THREADS -> {
                     val sessionid = cookies.firstOrNull { it.name.equals("sessionid", ignoreCase = true) }?.value
@@ -455,6 +624,153 @@ class AuthenticatedPlatformSessionProvider(
 
         private fun retainTransientState(previousState: SessionState): SessionState {
             return if (previousState == SessionState.ACTIVE) SessionState.ACTIVE else SessionState.CONFIGURED
+        }
+
+        internal fun formatXValidatorDiagnostics(
+            attempts: List<String>,
+            classification: SessionState
+        ): String {
+            return "validator=x attempts=${attempts.joinToString(",")} classification=$classification"
+        }
+
+        internal fun formatXValidatorDiagnostics(
+            endpoint: String = "account_multi_list",
+            httpStatus: Int,
+            responseShape: String? = null,
+            identityPresent: Boolean,
+            classification: String
+        ): String {
+            return buildString {
+                append("validator=x endpoint=").append(endpoint)
+                append(" http_status=").append(httpStatus)
+                if (!responseShape.isNullOrBlank()) {
+                    append(" response_shape=").append(responseShape)
+                }
+                append(" identity_present=").append(identityPresent)
+                append(" classification=").append(classification)
+            }
+        }
+
+        const val X_ACCOUNT_MULTI_LIST_URL = "https://x.com/i/api/1.1/account/multi/list.json"
+
+        data class XMultiListIdentityResult(
+            val screenName: String?,
+            val userId: String?,
+            val responseShape: String?
+        )
+
+        internal fun extractXMultiListIdentity(body: String): XMultiListIdentityResult {
+            return runCatching {
+                val trimmed = body.trim()
+                if (trimmed.startsWith("{")) {
+                    val json = JSONObject(trimmed)
+                    val usersArray = json.optJSONArray("users")
+                    if (usersArray != null && usersArray.length() > 0) {
+                        val firstUser = usersArray.optJSONObject(0)
+                        if (firstUser != null) {
+                            val screenName = firstUser.optString("screen_name", "").trim().takeIf { it.isNotBlank() && it != "null" }
+                            val userId = extractUserId(firstUser, "user_id") ?: extractUserId(firstUser, "id_str") ?: extractUserId(firstUser, "id")
+                            val validUserId = userId?.takeIf { isCredibleNumericId(it) }
+                            return@runCatching XMultiListIdentityResult(
+                                screenName = screenName,
+                                userId = validUserId,
+                                responseShape = "users_object"
+                            )
+                        }
+                    }
+                    XMultiListIdentityResult(null, null, "users_object")
+                } else if (trimmed.startsWith("[")) {
+                    val array = JSONArray(trimmed)
+                    if (array.length() > 0) {
+                        val firstObj = array.optJSONObject(0)
+                        val userObj = firstObj?.optJSONObject("user") ?: firstObj
+                        if (userObj != null) {
+                            val screenName = userObj.optString("screen_name", "").trim().takeIf { it.isNotBlank() && it != "null" }
+                            val userId = extractUserId(userObj, "id_str") ?: extractUserId(userObj, "user_id") ?: extractUserId(userObj, "id")
+                            val validUserId = userId?.takeIf { isCredibleNumericId(it) }
+                            return@runCatching XMultiListIdentityResult(
+                                screenName = screenName,
+                                userId = validUserId,
+                                responseShape = "legacy_array"
+                            )
+                        }
+                    }
+                    XMultiListIdentityResult(null, null, "legacy_array")
+                } else {
+                    XMultiListIdentityResult(null, null, null)
+                }
+            }.getOrDefault(XMultiListIdentityResult(null, null, null))
+        }
+
+        data class XValidatorEndpoint(
+            val name: String,
+            val url: String
+        )
+
+        val X_VALIDATOR_ENDPOINTS = listOf(
+            XValidatorEndpoint("verify_credentials", "https://api.x.com/1.1/account/verify_credentials.json"),
+            XValidatorEndpoint("account_settings", "https://x.com/i/api/1.1/account/settings.json"),
+            XValidatorEndpoint("legacy_account_settings", "https://api.x.com/1.1/account/settings.json")
+        )
+
+        const val X_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+
+        private fun extractXIdentityProof(body: String): String? {
+            return runCatching {
+                val json = JSONObject(body)
+                val rootScreenName = json.optString("screen_name", "").trim().takeIf { it.isNotBlank() && it != "null" }
+                val userObj = json.optJSONObject("user")
+                val userScreenName = userObj?.optString("screen_name", "")?.trim()?.takeIf { it.isNotBlank() && it != "null" }
+                val screenName = rootScreenName ?: userScreenName
+
+                val rootIdStr = json.optString("id_str", "").trim().takeIf { it.isNotBlank() && it != "null" && it.all { ch -> ch.isDigit() } }
+                val userIdStr = userObj?.optString("id_str", "")?.trim()?.takeIf { it.isNotBlank() && it != "null" && it.all { ch -> ch.isDigit() } }
+                val rootIdNum = if (json.has("id")) json.optLong("id", 0L).takeIf { it > 0L }?.toString() else null
+                val userId = rootIdStr ?: userIdStr ?: rootIdNum
+
+                when {
+                    !screenName.isNullOrBlank() && !userId.isNullOrBlank() -> "@$screenName ($userId)"
+                    !screenName.isNullOrBlank() -> "@$screenName"
+                    !userId.isNullOrBlank() -> "User ID: $userId"
+                    else -> null
+                }
+            }.getOrNull()
+        }
+
+        internal fun isXExplicitAuthRejection(body: String): Boolean {
+            val jsonRejection = runCatching {
+                val json = JSONObject(body)
+                val errors = json.optJSONArray("errors")
+                if (errors != null) {
+                    for (i in 0 until errors.length()) {
+                        val err = errors.optJSONObject(i) ?: continue
+                        val code = err.optInt("code", 0)
+                        val msg = err.optString("message", "")
+                        if (code in listOf(32, 89, 99, 215) ||
+                            msg.contains("Could not authenticate", ignoreCase = true) ||
+                            msg.contains("Invalid or expired token", ignoreCase = true) ||
+                            msg.contains("Bad Authentication data", ignoreCase = true) ||
+                            msg.contains("token_expired", ignoreCase = true)
+                        ) {
+                            return@runCatching true
+                        }
+                    }
+                }
+                val singleError = json.optString("error", "")
+                if (singleError.contains("Could not authenticate", ignoreCase = true) ||
+                    singleError.contains("Invalid or expired token", ignoreCase = true) ||
+                    singleError.contains("Bad Authentication data", ignoreCase = true)
+                ) {
+                    return@runCatching true
+                }
+                false
+            }.getOrDefault(false)
+
+            if (jsonRejection) return true
+
+            return body.contains("Could not authenticate", ignoreCase = true) ||
+                    body.contains("Invalid or expired token", ignoreCase = true) ||
+                    body.contains("login_required", ignoreCase = true)
         }
     }
 }

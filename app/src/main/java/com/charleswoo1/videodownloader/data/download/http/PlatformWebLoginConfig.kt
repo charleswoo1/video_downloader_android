@@ -69,9 +69,27 @@ object PlatformWebLoginCatalog {
         postLoginProbe = null
     )
 
+    val X = PlatformWebLoginConfig(
+        platform = Platform.X,
+        loginUrl = "https://x.com/i/flow/login",
+        cookieProbeUrls = listOf("https://x.com/"),
+        requiredCookieNames = setOf("auth_token", "ct0"),
+        optionalCookieNames = setOf("twid", "kdt"),
+        allowThirdPartyCookies = true,
+        intermediatePatterns = listOf(
+            "/i/flow/login",
+            "/i/flow/",
+            "/login",
+            "/account/access",
+            "/account/login_verification"
+        ),
+        postLoginProbe = null
+    )
+
     fun configFor(platform: Platform): PlatformWebLoginConfig? = when (platform) {
         Platform.INSTAGRAM -> INSTAGRAM
         Platform.THREADS -> THREADS
-        else -> null // X is deferred to Phase 3
+        Platform.X -> X
+        else -> null
     }
 }

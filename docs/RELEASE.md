@@ -28,19 +28,33 @@ major * 10000 + minor * 100 + patch
 
 建立正式 tag / GitHub Release 前，全部條件必須成立：
 
-1. Release branch 與預定 release commit 已完成 review。
+1. Release branch 與預定 release 內容已完成 review。
 2. `./gradlew test` PASS。
 3. `./gradlew lintDebug` PASS。
-4. Debug CI PASS。
-5. Release Candidate signed APK build PASS。
-6. Owner-device regression PASS。
-7. Instagram / Threads / X 登入與下載 regression PASS。
-8. README / CHANGELOG / SECURITY / THIRD_PARTY_NOTICES 已同步。
-9. APK SHA-256 已產生並核對。
-10. Repository owner 明確批准建立 tag 與 GitHub Release。
-11. **Project-level license 已由 repository owner 明確決定，且第三方授權義務已確認。**
+4. Release branch 的 Manual Debug CI PASS。
+5. Release preparation PR 已 merge 到 `main`，且 `main` 指向預定的 release commit。
+6. 從 `main` 手動執行 **Android Release Candidate** workflow，signed APK build PASS。
+7. Owner-device final regression PASS。
+8. Instagram / Threads / X 登入與下載 regression PASS。
+9. README / CHANGELOG / SECURITY / THIRD_PARTY_NOTICES / LICENSE 已同步。
+10. APK SHA-256 已產生並核對。
+11. Repository owner 明確批准建立 tag 與 GitHub Release。
+12. 第三方授權義務已確認並持續由 `THIRD_PARTY_NOTICES.md` 記錄。
 
-第 11 項未完成時，不建立公開 production Release。
+### Required release sequence
+
+`release-candidate.yml` 使用 `workflow_dispatch`，因此正式 RC 流程以 default branch `main` 為執行入口。為避免「RC workflow 尚未存在於 default branch，卻要求在 merge 前先執行 RC」的循環依賴，v1.0.0 固定採以下順序：
+
+1. Review `release/v1.0.0-prep`。
+2. 在 release branch 完成 Manual Debug CI。
+3. 將 release preparation PR merge 到 `main`。
+4. 確認 `main` 沒有額外未 review 的變更。
+5. 從 `main` 手動執行 **Android Release Candidate** workflow。
+6. 下載 signed RC APK 與 `SHA256SUMS.txt`，執行 owner-device final regression。
+7. 確認 RC 後 `main` 未再變更。
+8. 對該相同 commit 建立 `v1.0.0` tag 與 GitHub Release。
+
+本專案的 project-level license 已決定為 **GNU GPL v3.0 (GPL-3.0)**，完整條款位於 repository 根目錄 `LICENSE`。正式 binary release 仍必須遵守所有 bundled third-party components 的授權與 corresponding-source 義務。
 
 ## Release signing architecture
 
@@ -295,16 +309,16 @@ Remove-Item Env:\ANDROID_SIGNING_KEY_PASSWORD
 
 ## Final publish
 
-Owner 明確批准後：
+Signed RC 與 owner-device final regression 通過，且 repository owner 明確批准後：
 
-1. 將 release prep PR squash merge 到 `main`。
-2. 確認 `main` 指向已驗證的 release commit。
-3. 建立 annotated tag：`v1.0.0`。
-4. 以同一 commit 建立 GitHub Release。
-5. 上傳：
+1. 確認 `main` HEAD 與已驗證 RC 的 commit SHA 完全一致；若 RC 後 `main` 有任何新 commit，必須重新執行 RC 與 final regression。
+2. 建立 annotated tag：`v1.0.0`，tag 必須指向上述已驗證 commit。
+3. 以同一 tag / commit 建立 GitHub Release。
+4. 上傳：
    - `SocialVideoDownloader-Android-v1.0.0.apk`
    - `SHA256SUMS.txt`
-6. Release notes 以 [CHANGELOG.md](../CHANGELOG.md) 的 v1.0.0 內容為基礎。
+5. Release notes 以 [CHANGELOG.md](../CHANGELOG.md) 的 v1.0.0 內容為基礎。
+6. Release 頁面明確指出 source code 對應 `v1.0.0` tag，並連結 `LICENSE` 與 `THIRD_PARTY_NOTICES.md`。
 7. Release 發佈後再次下載 APK，核對 SHA-256。
 
 ## Post-release

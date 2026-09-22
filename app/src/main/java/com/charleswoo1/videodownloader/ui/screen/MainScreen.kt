@@ -738,7 +738,8 @@ fun PlatformSessionsDialog(
                     details = xSession?.details,
                     onImport = { onOpenImport(Platform.X) },
                     onValidate = { viewModel.validateSession(Platform.X) },
-                    onClear = { viewModel.clearSession(Platform.X) }
+                    onClear = { viewModel.clearSession(Platform.X) },
+                    onWebLogin = { onStartWebLogin(Platform.X) }
                 )
             }
         },

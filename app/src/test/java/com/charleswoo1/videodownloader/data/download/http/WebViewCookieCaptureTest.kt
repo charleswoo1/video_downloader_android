@@ -266,5 +266,119 @@ class WebViewCookieCaptureTest {
         assertFalse(WebViewCookieCapture.isIntermediateUrl("https://www.threads.com/@user/post/123", threadsConfig))
         assertFalse(WebViewCookieCapture.isIntermediateUrl(null, threadsConfig))
         assertFalse(WebViewCookieCapture.isIntermediateUrl("", threadsConfig))
+
+        val xConfig = PlatformWebLoginCatalog.X
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("https://x.com/jack/status/20", xConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl(null, xConfig))
+        assertFalse(WebViewCookieCapture.isIntermediateUrl("", xConfig))
+    }
+
+    @Test
+    fun isCandidateOrigin_x_strictOriginChecks() {
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://x.com/", Platform.X))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://mobile.x.com/", Platform.X))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://twitter.com/", Platform.X))
+        assertTrue(WebViewCookieCapture.isCandidateOrigin("https://mobile.twitter.com/", Platform.X))
+
+        assertFalse("Prefix spoofing must be rejected", WebViewCookieCapture.isCandidateOrigin("https://evilx.com/", Platform.X))
+        assertFalse("Subdomain spoofing must be rejected", WebViewCookieCapture.isCandidateOrigin("https://x.com.evil.example/", Platform.X))
+        assertFalse("Twitter subdomain spoofing must be rejected", WebViewCookieCapture.isCandidateOrigin("https://twitter.com.evil.example/", Platform.X))
+    }
+
+    @Test
+    fun extractCandidate_x_noAuthToken_returnsMissingRequired() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "ct0=csrf_value_123; twid=u%3D12345; kdt=kdt_val"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig)
+
+        assertTrue(result is CookieCandidateResult.MissingRequired)
+        val missing = (result as CookieCandidateResult.MissingRequired).missingNames
+        assertEquals(setOf("auth_token"), missing)
+    }
+
+    @Test
+    fun extractCandidate_x_noCt0_returnsMissingRequired() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "auth_token=auth_value_123; twid=u%3D12345; kdt=kdt_val"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig)
+
+        assertTrue(result is CookieCandidateResult.MissingRequired)
+        val missing = (result as CookieCandidateResult.MissingRequired).missingNames
+        assertEquals(setOf("ct0"), missing)
+    }
+
+    @Test
+    fun extractCandidate_x_onlyRequired_returnsCandidate() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "auth_token=auth_tok_123; ct0=csrf_tok_456"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(2, candidate.cookieCount)
+        val pairs = candidate.filteredCookieHeader.split("; ").map { it.split("=") }.associate { it[0] to it[1] }
+        assertEquals("auth_tok_123", pairs["auth_token"])
+        assertEquals("csrf_tok_456", pairs["ct0"])
+    }
+
+    @Test
+    fun extractCandidate_x_allowlistPreservedAndDropsTrackingCookies() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "guest_id=v1%3A123; auth_token=auth_valid; guest_id_ads=v1%3A456; ct0=csrf_valid; " +
+                "guest_id_marketing=v1%3A789; personalization_id=\"v1_abc\"; twid=u%3D11111; kdt=kdt_valid"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(4, candidate.cookieCount)
+
+        val pairs = candidate.filteredCookieHeader.split("; ").map { it.split("=") }.associate { it[0] to it[1] }
+        assertEquals("auth_valid", pairs["auth_token"])
+        assertEquals("csrf_valid", pairs["ct0"])
+        assertEquals("u%3D11111", pairs["twid"])
+        assertEquals("kdt_valid", pairs["kdt"])
+
+        assertFalse("guest_id must be stripped", pairs.containsKey("guest_id"))
+        assertFalse("guest_id_ads must be stripped", pairs.containsKey("guest_id_ads"))
+        assertFalse("guest_id_marketing must be stripped", pairs.containsKey("guest_id_marketing"))
+        assertFalse("personalization_id must be stripped", pairs.containsKey("personalization_id"))
+    }
+
+    @Test
+    fun extractCandidate_x_duplicateCookieNames_latestWins() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "auth_token=first_auth; ct0=csrf1; auth_token=second_auth"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig)
+
+        assertTrue(result is CookieCandidateResult.Candidate)
+        val candidate = result as CookieCandidateResult.Candidate
+        assertEquals(2, candidate.cookieCount)
+
+        val pairs = candidate.filteredCookieHeader.split("; ").map { it.split("=") }.associate { it[0] to it[1] }
+        assertEquals("second_auth", pairs["auth_token"])
+        assertEquals("csrf1", pairs["ct0"])
+    }
+
+    @Test
+    fun candidateToString_x_doesNotLeakSecrets() {
+        val xConfig = PlatformWebLoginCatalog.X
+        val raw = "auth_token=super_secret_auth_token; ct0=super_secret_ct0_csrf"
+        val result = WebViewCookieCapture.extractCandidate(raw, xConfig) as CookieCandidateResult.Candidate
+
+        val stringRepr = result.toString()
+        assertFalse(stringRepr.contains("super_secret"))
+        assertFalse(stringRepr.contains("auth_token="))
+        assertFalse(stringRepr.contains("ct0="))
+        assertEquals("Candidate(cookieCount=2)", stringRepr)
+    }
+
+    @Test
+    fun isIntermediateUrl_x_matchingPatterns_returnsTrue() {
+        val xConfig = PlatformWebLoginCatalog.X
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://x.com/i/flow/login", xConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://x.com/i/flow/password_reset", xConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://x.com/login", xConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://x.com/account/access", xConfig))
+        assertTrue(WebViewCookieCapture.isIntermediateUrl("https://x.com/account/login_verification", xConfig))
     }
 }

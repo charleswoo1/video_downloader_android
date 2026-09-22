@@ -62,8 +62,32 @@ class PlatformWebLoginConfigTest {
     }
 
     @Test
-    fun unsupportedPlatformsInPhase2_returnNull() {
-        assertNull("X login is not enabled in Phase 2", PlatformWebLoginCatalog.configFor(Platform.X))
+    fun xConfig_resolvesCorrectUrlsAndCookies() {
+        val config = PlatformWebLoginCatalog.configFor(Platform.X)
+        assertNotNull(config)
+        assertEquals(Platform.X, config!!.platform)
+        assertEquals("https://x.com/i/flow/login", config.loginUrl)
+        assertEquals(listOf("https://x.com/"), config.cookieProbeUrls)
+
+        assertEquals(setOf("auth_token", "ct0"), config.requiredCookieNames)
+        assertEquals(setOf("twid", "kdt"), config.optionalCookieNames)
+        assertTrue(config.allowThirdPartyCookies)
+        assertNull("Phase 3 postLoginProbe must be null", config.postLoginProbe)
+    }
+
+    @Test
+    fun xConfig_hasExpectedIntermediatePatterns() {
+        val config = PlatformWebLoginCatalog.X
+        assertTrue(config.intermediatePatterns.contains("/i/flow/login"))
+        assertTrue(config.intermediatePatterns.contains("/i/flow/"))
+        assertTrue(config.intermediatePatterns.contains("/login"))
+        assertTrue(config.intermediatePatterns.contains("/account/access"))
+        assertTrue(config.intermediatePatterns.contains("/account/login_verification"))
+    }
+
+    @Test
+    fun unsupportedPlatformsInPhase3_returnNull() {
+        assertNotNull("X login is enabled in Phase 3", PlatformWebLoginCatalog.configFor(Platform.X))
         assertNull("TikTok is not a web login platform", PlatformWebLoginCatalog.configFor(Platform.TIKTOK))
         assertNull("YouTube is not a web login platform", PlatformWebLoginCatalog.configFor(Platform.YOUTUBE))
         assertNull("Facebook is not a web login platform", PlatformWebLoginCatalog.configFor(Platform.FACEBOOK))

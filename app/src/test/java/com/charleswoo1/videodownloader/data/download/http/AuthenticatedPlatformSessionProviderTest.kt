@@ -1066,4 +1066,69 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(provider.hasAuthenticatedSession(Platform.THREADS))
         assertEquals(2, provider.cookiesFor(Platform.THREADS).size)
     }
+
+    @Test
+    fun importCapturedSession_validXCandidate_becomesConfigured() {
+        val capturedHeader = "auth_token=captured_auth_123; ct0=captured_csrf_456; twid=u%3D123; kdt=captured_kdt"
+        val result = provider.importCapturedSession(Platform.X, capturedHeader)
+
+        assertTrue(result.isSuccess)
+        val info = result.getOrThrow()
+        assertEquals(SessionState.CONFIGURED, info.state)
+        assertEquals(4, info.cookieCount)
+        assertFalse("CONFIGURED must not be active", provider.hasAuthenticatedSession(Platform.X))
+
+        val stored = store.getCookies(Platform.X)
+        assertEquals(4, stored.size)
+        assertTrue(stored.any { it.name == "auth_token" && it.value == "captured_auth_123" })
+        assertTrue(stored.any { it.name == "ct0" && it.value == "captured_csrf_456" })
+        assertEquals("x.com", stored[0].domain)
+    }
+
+    @Test
+    fun importCapturedSession_xMissingAuthToken_fails() {
+        val capturedHeader = "ct0=captured_csrf_456; twid=u%3D123"
+        val result = provider.importCapturedSession(Platform.X, capturedHeader)
+
+        assertTrue(result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.X).state)
+    }
+
+    @Test
+    fun importCapturedSession_xMissingCt0_fails() {
+        val capturedHeader = "auth_token=captured_auth_123; twid=u%3D123"
+        val result = provider.importCapturedSession(Platform.X, capturedHeader)
+
+        assertTrue(result.isFailure)
+        assertEquals(SessionState.NOT_CONFIGURED, provider.sessionStatus(Platform.X).state)
+    }
+
+    @Test
+    fun importCapturedSession_xThenValidateSession_becomesActive() {
+        val capturedHeader = "auth_token=x_valid_auth; ct0=x_valid_csrf"
+        val importRes = provider.importCapturedSession(Platform.X, capturedHeader)
+        assertTrue(importRes.isSuccess)
+
+        val successSession = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val json = """{"screen_name":"testuser","id_str":"123456"}"""
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, successSession)
+        }
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(provider.hasAuthenticatedSession(Platform.X))
+        assertEquals(2, provider.cookiesFor(Platform.X).size)
+    }
 }

@@ -29,8 +29,10 @@ sealed interface AnalysisState {
 
 class MainViewModel(
     application: Application,
-    private val uiPreferences: UiPreferences = UiPreferences(application)
+    private val uiPreferences: UiPreferences
 ) : AndroidViewModel(application) {
+
+    constructor(application: Application) : this(application, UiPreferences(application))
 
     private val _showDebugUi = MutableStateFlow(uiPreferences.showDebugUi)
     val showDebugUi: StateFlow<Boolean> = _showDebugUi.asStateFlow()

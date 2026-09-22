@@ -164,6 +164,16 @@ class UiPreferencesAndSettingsTest {
         assertTrue("Preferences should persist true", preferences.showDebugUi)
     }
 
+    // Regression: AndroidViewModelFactory reflection compatibility
+    @Test
+    fun mainViewModel_hasApplicationConstructorForAndroidViewModelFactory() {
+        val constructor = MainViewModel::class.java.getConstructor(Application::class.java)
+        org.junit.Assert.assertNotNull(
+            "MainViewModel must provide a reflection-visible constructor with a single Application parameter",
+            constructor
+        )
+    }
+
     // 5. 所有 Session ACTIVE -> login reminder condition false
     @Test
     fun loginReminder_allActive_returnsFalse() {

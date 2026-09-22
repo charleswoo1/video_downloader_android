@@ -1293,10 +1293,14 @@ class AuthenticatedPlatformSessionProviderTest {
         val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
         provider.importCapturedSession(Platform.X, capturedHeader)
 
+        val requestedUrls = mutableListOf<String>()
+
         val session = PlatformHttpSession(customClientBuilder = {
             addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
                 okhttp3.Response.Builder()
-                    .request(chain.request())
+                    .request(req)
                     .protocol(okhttp3.Protocol.HTTP_1_1)
                     .code(403)
                     .message("Forbidden")
@@ -1313,6 +1317,231 @@ class AuthenticatedPlatformSessionProviderTest {
         val info = valRes.getOrThrow()
         assertEquals(SessionState.EXPIRED, info.state)
         assertTrue(info.details?.contains("403") == true)
+        assertEquals("Explicit auth rejection must stop immediately without calling fallback endpoints", 1, requestedUrls.size)
+    }
+
+    // Case A: first 403 non-auth, second 200 + identity -> ACTIVE
+    @Test
+    fun validateSession_caseA_first403AmbiguousSecond200WithIdentity_becomesActive() = kotlinx.coroutines.runBlocking {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                requestedUrls.add(url)
+
+                if (url.contains("verify_credentials")) {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(403)
+                        .message("Forbidden")
+                        .body("<html>Cloudflare challenge</html>".toResponseBody("text/html".toMediaType()))
+                        .build()
+                } else {
+                    val json = """{"screen_name":"fallback_user","language":"zh-tw"}"""
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(json.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            }
+        })
+
+        val valRes = provider.validateSession(Platform.X, session)
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue("Details must contain username", info.details?.contains("@fallback_user") == true)
+        assertEquals("Both endpoints must be called", 2, requestedUrls.size)
+        assertEquals("https://api.x.com/1.1/account/verify_credentials.json", requestedUrls[0])
+        assertEquals("https://x.com/i/api/1.1/account/settings.json", requestedUrls[1])
+    }
+
+    // Case B: first 403 non-auth, second 404, third 200 + identity -> ACTIVE
+    @Test
+    fun validateSession_caseB_first403Second404Third200WithIdentity_becomesActive() = kotlinx.coroutines.runBlocking {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
+
+                when (requestedUrls.size) {
+                    1 -> {
+                        okhttp3.Response.Builder()
+                            .request(req)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(403)
+                            .message("Forbidden")
+                            .body("<html>Cloudflare challenge</html>".toResponseBody("text/html".toMediaType()))
+                            .build()
+                    }
+                    2 -> {
+                        okhttp3.Response.Builder()
+                            .request(req)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(404)
+                            .message("Not Found")
+                            .body("Not Found".toResponseBody("text/plain".toMediaType()))
+                            .build()
+                    }
+                    else -> {
+                        val json = """{"screen_name":"third_endpoint_user","id_str":"123456"}"""
+                        okhttp3.Response.Builder()
+                            .request(req)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .body(json.toResponseBody("application/json".toMediaType()))
+                            .build()
+                    }
+                }
+            }
+        })
+
+        val valRes = provider.validateSession(Platform.X, session)
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue("Details must contain username", info.details?.contains("@third_endpoint_user") == true)
+        assertEquals("All 3 endpoints must be called", 3, requestedUrls.size)
+        assertEquals("https://api.x.com/1.1/account/verify_credentials.json", requestedUrls[0])
+        assertEquals("https://x.com/i/api/1.1/account/settings.json", requestedUrls[1])
+        assertEquals("https://api.x.com/1.1/account/settings.json", requestedUrls[2])
+    }
+
+    // Case C: first 403 non-auth, second 404, third 403 non-auth -> CONFIGURED, cookies preserved
+    @Test
+    fun validateSession_caseC_first403Second404Third403_remainsConfiguredAndPreservesCookies() = kotlinx.coroutines.runBlocking {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf; twid=u%3D123"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+        assertEquals(3, store.getCookies(Platform.X).size)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
+
+                when (requestedUrls.size) {
+                    2 -> {
+                        okhttp3.Response.Builder()
+                            .request(req)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(404)
+                            .message("Not Found")
+                            .body("Not Found".toResponseBody("text/plain".toMediaType()))
+                            .build()
+                    }
+                    else -> {
+                        okhttp3.Response.Builder()
+                            .request(req)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(403)
+                            .message("Forbidden")
+                            .body("<html>WAF Challenge</html>".toResponseBody("text/html".toMediaType()))
+                            .build()
+                    }
+                }
+            }
+        })
+
+        val valRes = provider.validateSession(Platform.X, session)
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals("State must remain CONFIGURED", SessionState.CONFIGURED, info.state)
+        assertFalse("Must NOT become EXPIRED", info.state == SessionState.EXPIRED)
+        assertEquals("Cookies must NOT be cleared", 3, store.getCookies(Platform.X).size)
+        assertEquals("All 3 endpoints must be called", 3, requestedUrls.size)
+        assertEquals("https://api.x.com/1.1/account/verify_credentials.json", requestedUrls[0])
+        assertEquals("https://x.com/i/api/1.1/account/settings.json", requestedUrls[1])
+        assertEquals("https://api.x.com/1.1/account/settings.json", requestedUrls[2])
+    }
+
+    // Case E: first 200 without identity, second 200 + identity -> ACTIVE
+    @Test
+    fun validateSession_caseE_first200WithoutIdentitySecond200WithIdentity_becomesActive() = kotlinx.coroutines.runBlocking {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                requestedUrls.add(url)
+
+                if (url.contains("verify_credentials")) {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("""{"status":"ok"}""".toResponseBody("application/json".toMediaType()))
+                        .build()
+                } else {
+                    val json = """{"screen_name":"endpoint2_user","id_str":"555"}"""
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(json.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            }
+        })
+
+        val valRes = provider.validateSession(Platform.X, session)
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(info.details?.contains("@endpoint2_user") == true)
+        assertEquals("Both endpoints must be called", 2, requestedUrls.size)
+    }
+
+    // Case F: all endpoints 200 without identity -> CONFIGURED
+    @Test
+    fun validateSession_caseF_allEndpoints200WithoutIdentity_remainsConfigured() = kotlinx.coroutines.runBlocking {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""{"status":"ok","unknown_field":true}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = provider.validateSession(Platform.X, session)
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("未檢測到有效帳號標記") == true)
+        assertEquals("All 3 endpoints must be called", 3, requestedUrls.size)
     }
 
     @Test

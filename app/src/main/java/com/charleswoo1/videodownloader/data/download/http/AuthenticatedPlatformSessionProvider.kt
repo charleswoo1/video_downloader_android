@@ -353,9 +353,7 @@ class AuthenticatedPlatformSessionProvider(
                     )
 
                     val previousState = sessionStatus(platform).state
-                    var all404 = true
-                    var lastMalformed200 = false
-                    var lastErrorDetail: String? = null
+                    val attempts = mutableListOf<String>()
 
                     for (endpoint in X_VALIDATOR_ENDPOINTS) {
                         val respResult = httpSession.fetch(
@@ -368,37 +366,27 @@ class AuthenticatedPlatformSessionProvider(
 
                         val resp = respResult.getOrNull()
                         if (resp == null) {
-                            val err = respResult.exceptionOrNull()
-                            val msg = err?.message ?: "連線逾時"
-                            val retainedState = retainTransientState(previousState)
-                            val diag = "validator=x endpoint=${endpoint.name} http_status=0 identity_present=false classification=$retainedState details=network_failure"
-                            Log.d(TAG, diag)
-                            credentialStore.updateStatus(platform, retainedState, "網路連線失敗 ($msg)，保留目前狀態")
-                            _statusFlows[platform]?.value = sessionStatus(platform)
-                            return@withContext Result.success(sessionStatus(platform))
+                            attempts.add("${endpoint.name}:0:network_failure")
+                            continue
                         }
 
                         val code = resp.code
-                        if (code != 404) {
-                            all404 = false
-                        }
-
                         when (code) {
                             200 -> {
                                 val identityProof = extractXIdentityProof(resp.body)
                                 if (!identityProof.isNullOrBlank()) {
-                                    val diag = "validator=x endpoint=${endpoint.name} http_status=200 identity_present=true classification=ACTIVE"
+                                    attempts.add("${endpoint.name}:200:identity")
+                                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=ACTIVE"
                                     Log.d(TAG, diag)
                                     markActive(platform, "驗證成功 (已連線: $identityProof)")
                                     return@withContext Result.success(sessionStatus(platform))
                                 } else {
-                                    val diag = "validator=x endpoint=${endpoint.name} http_status=200 identity_present=false classification=CONFIGURED"
-                                    Log.d(TAG, diag)
-                                    lastMalformed200 = true
+                                    attempts.add("${endpoint.name}:200:insufficient_identity")
                                 }
                             }
                             401 -> {
-                                val diag = "validator=x endpoint=${endpoint.name} http_status=401 identity_present=false classification=EXPIRED"
+                                attempts.add("${endpoint.name}:401:auth_rejected")
+                                val diag = "validator=x attempts=${attempts.joinToString(",")} classification=EXPIRED"
                                 Log.d(TAG, diag)
                                 markExpired(platform, "登入狀態已失效 (HTTP 401)")
                                 return@withContext Result.success(sessionStatus(platform))
@@ -406,61 +394,54 @@ class AuthenticatedPlatformSessionProvider(
                             403 -> {
                                 val isExplicitAuthRejection = isXExplicitAuthRejection(resp.body)
                                 if (isExplicitAuthRejection) {
-                                    val diag = "validator=x endpoint=${endpoint.name} http_status=403 identity_present=false classification=EXPIRED"
+                                    attempts.add("${endpoint.name}:403:auth_rejected")
+                                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=EXPIRED"
                                     Log.d(TAG, diag)
                                     markExpired(platform, "登入狀態已失效 (HTTP 403)")
                                     return@withContext Result.success(sessionStatus(platform))
                                 } else {
-                                    val diag = "validator=x endpoint=${endpoint.name} http_status=403 identity_present=false classification=CONFIGURED details=challenge_or_restriction"
-                                    Log.d(TAG, diag)
-                                    credentialStore.updateStatus(platform, SessionState.CONFIGURED, "需要安全驗證或受到限制 (HTTP 403)，保留待驗證")
-                                    _statusFlows[platform]?.value = sessionStatus(platform)
-                                    return@withContext Result.success(sessionStatus(platform))
+                                    attempts.add("${endpoint.name}:403:ambiguous")
                                 }
                             }
                             404 -> {
-                                val diag = "validator=x endpoint=${endpoint.name} http_status=404 identity_present=false classification=FALLBACK"
-                                Log.d(TAG, diag)
+                                attempts.add("${endpoint.name}:404")
                             }
                             429 -> {
-                                val retainedState = retainTransientState(previousState)
-                                val diag = "validator=x endpoint=${endpoint.name} http_status=429 identity_present=false classification=$retainedState"
-                                Log.d(TAG, diag)
-                                credentialStore.updateStatus(platform, retainedState, "請求過於頻繁 (HTTP 429)，保留目前狀態")
-                                _statusFlows[platform]?.value = sessionStatus(platform)
-                                return@withContext Result.success(sessionStatus(platform))
+                                attempts.add("${endpoint.name}:429:rate_limited")
                             }
                             in 500..599 -> {
-                                val retainedState = retainTransientState(previousState)
-                                val diag = "validator=x endpoint=${endpoint.name} http_status=$code identity_present=false classification=$retainedState"
-                                Log.d(TAG, diag)
-                                credentialStore.updateStatus(platform, retainedState, "伺服器暫時無法驗證 (HTTP $code)，保留目前狀態")
-                                _statusFlows[platform]?.value = sessionStatus(platform)
-                                return@withContext Result.success(sessionStatus(platform))
+                                attempts.add("${endpoint.name}:$code:server_error")
                             }
                             else -> {
-                                val diag = "validator=x endpoint=${endpoint.name} http_status=$code identity_present=false classification=FALLBACK"
-                                Log.d(TAG, diag)
-                                lastErrorDetail = "伺服器回應狀態異常 (HTTP $code)"
+                                attempts.add("${endpoint.name}:$code:unexpected")
                             }
                         }
                     }
 
-                    if (all404) {
-                        val diag = "validator=x endpoints_exhausted=true last_http_status=404 identity_present=false classification=CONFIGURED details=validator_endpoints_unavailable"
-                        Log.d(TAG, diag)
-                        credentialStore.updateStatus(platform, SessionState.CONFIGURED, "驗證端點皆無法使用 (HTTP 404)，保留待驗證")
-                        _statusFlows[platform]?.value = sessionStatus(platform)
-                        return@withContext Result.success(sessionStatus(platform))
+                    val finalState = retainTransientState(previousState)
+                    val diag = "validator=x attempts=${attempts.joinToString(",")} classification=$finalState"
+                    Log.d(TAG, diag)
+
+                    val finalDetail = when {
+                        attempts.all { it.endsWith(":404") } ->
+                            "驗證端點皆無法使用 (HTTP 404)，保留待驗證"
+                        attempts.all { it.contains(":0:network_failure") } ->
+                            "網路連線失敗，保留目前狀態"
+                        attempts.any { it.contains(":429:rate_limited") } ->
+                            "請求過於頻繁 (HTTP 429)，保留目前狀態"
+                        attempts.all { it.contains(":server_error") } -> {
+                            val first5xx = attempts.firstOrNull { it.contains(":server_error") }?.split(":")?.getOrNull(1) ?: "5xx"
+                            "伺服器暫時無法驗證 (HTTP $first5xx)，保留目前狀態"
+                        }
+                        attempts.all { it.contains(":200:insufficient_identity") || it.endsWith(":404") } && attempts.any { it.contains(":200:insufficient_identity") } ->
+                            "未檢測到有效帳號標記，保留待驗證"
+                        attempts.any { it.contains(":403:ambiguous") } ->
+                            "需要安全驗證或受到限制 (HTTP 403)，保留待驗證"
+                        else ->
+                            "無法完成 X 登入驗證，已嘗試 ${attempts.size} 個驗證方式，保留待驗證"
                     }
 
-                    if (lastMalformed200) {
-                        credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效帳號標記，保留待驗證")
-                        _statusFlows[platform]?.value = sessionStatus(platform)
-                        return@withContext Result.success(sessionStatus(platform))
-                    }
-
-                    credentialStore.updateStatus(platform, sessionStatus(platform).state, lastErrorDetail ?: "驗證未完成，保留目前狀態")
+                    credentialStore.updateStatus(platform, finalState, finalDetail)
                     _statusFlows[platform]?.value = sessionStatus(platform)
                     Result.success(sessionStatus(platform))
                 }

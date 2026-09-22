@@ -702,7 +702,12 @@ fun PlatformSessionsDialog(
             Text("Platform Sessions (平台登入設定)", fontWeight = FontWeight.Bold)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 Text(
                     "登入狀態儲存於本機硬體安全環境 (Keystore)，絕不上傳至任何外部伺服器。用於下載受限或年齡限制內容。",
                     style = MaterialTheme.typography.bodySmall,

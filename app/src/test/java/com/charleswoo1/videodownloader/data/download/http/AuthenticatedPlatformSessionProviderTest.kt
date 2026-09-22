@@ -1419,4 +1419,100 @@ class AuthenticatedPlatformSessionProviderTest {
         assertEquals("200 without identity proof must remain CONFIGURED", SessionState.CONFIGURED, info.state)
         assertTrue(info.details?.contains("未檢測到有效帳號標記") == true)
     }
+
+    @Test
+    fun validateSession_http503Transient_retainsStateAndPreservesCookies() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf; twid=u%3D123"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+        assertEquals(SessionState.CONFIGURED, provider.sessionStatus(Platform.X).state)
+        assertEquals(3, store.getCookies(Platform.X).size)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor { chain ->
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Service Unavailable")
+                        .body("Service Unavailable".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+            }
+        )
+
+        // 1. From CONFIGURED state: 503 must retain CONFIGURED, not EXPIRED, and cookies must not be cleared
+        val res1 = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+        assertTrue(res1.isSuccess)
+        val info1 = res1.getOrThrow()
+        assertEquals("503 from CONFIGURED must retain CONFIGURED", SessionState.CONFIGURED, info1.state)
+        assertTrue(info1.details?.contains("503") == true)
+        assertEquals("Cookies must not be cleared on 503", 3, store.getCookies(Platform.X).size)
+
+        // 2. From ACTIVE state: simulate prior active session, 503 must retain ACTIVE
+        provider.markActive(Platform.X, "已連線")
+        assertEquals(SessionState.ACTIVE, provider.sessionStatus(Platform.X).state)
+
+        val res2 = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+        assertTrue(res2.isSuccess)
+        val info2 = res2.getOrThrow()
+        assertEquals("503 from ACTIVE must retain ACTIVE", SessionState.ACTIVE, info2.state)
+        assertTrue(info2.details?.contains("503") == true)
+        assertEquals("Cookies must remain intact", 3, store.getCookies(Platform.X).size)
+    }
+
+    @Test
+    fun validateSession_secretLeakageRegression_secretsNeverExposedInDetailsOrStatus() {
+        val secretAuth = "SUPER_SECRET_AUTH_TOKEN_123"
+        val secretCt0 = "SUPER_SECRET_CT0_456"
+        val rawCookies = "auth_token=$secretAuth; ct0=$secretCt0; twid=u%3D99999"
+        provider.importCapturedSession(Platform.X, rawCookies)
+
+        val testCases = listOf(
+            200 to """{"screen_name":"safe_user","id_str":"123"}""",
+            401 to """{"errors":[{"code":89,"message":"Invalid or expired token."}]}""",
+            403 to "<html>Cloudflare challenge</html>",
+            404 to "Not Found",
+            503 to "Service Unavailable"
+        )
+
+        for ((code, responseBody) in testCases) {
+            val session = PlatformHttpSession(
+                retryPolicy = RetryPolicy.NO_RETRY,
+                customClientBuilder = {
+                    addInterceptor { chain ->
+                        okhttp3.Response.Builder()
+                            .request(chain.request())
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(code)
+                            .message("HTTP $code")
+                            .body(responseBody.toResponseBody("application/json".toMediaType()))
+                            .build()
+                    }
+                }
+            )
+
+            val res = kotlinx.coroutines.runBlocking {
+                provider.validateSession(Platform.X, session)
+            }
+            assertTrue(res.isSuccess)
+            val info = res.getOrThrow()
+            val details = info.details.orEmpty()
+
+            assertFalse("details must not leak auth_token (code $code)", details.contains(secretAuth))
+            assertFalse("details must not leak ct0 (code $code)", details.contains(secretCt0))
+            assertFalse("details must not leak full Cookie header (code $code)", details.contains("Cookie:"))
+            assertFalse("details must not leak Authorization credential (code $code)", details.contains(AuthenticatedPlatformSessionProvider.X_BEARER_TOKEN))
+
+            val stringRepr = info.toString()
+            assertFalse("info.toString() must not leak auth_token (code $code)", stringRepr.contains(secretAuth))
+            assertFalse("info.toString() must not leak ct0 (code $code)", stringRepr.contains(secretCt0))
+            assertFalse("info.toString() must not leak bearer token (code $code)", stringRepr.contains(AuthenticatedPlatformSessionProvider.X_BEARER_TOKEN))
+        }
+    }
 }

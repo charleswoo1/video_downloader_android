@@ -333,33 +333,135 @@ class AuthenticatedPlatformSessionProvider(
                         return@withContext Result.failure(IllegalStateException("缺少 auth_token 或 ct0"))
                     }
 
-                    val respResult = httpSession.fetch(
-                        url = "https://api.x.com/1.1/account/settings.json",
-                        profile = RequestProfile.API,
-                        customHeaders = mapOf(
-                            "Authorization" to "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-                            "x-csrf-token" to ct0,
-                            "x-twitter-auth-type" to "OAuth2Session",
-                            "Cookie" to "auth_token=$authToken; ct0=$ct0"
-                        )
+                    val cookieHeader = buildString {
+                        append("auth_token=").append(authToken)
+                        append("; ct0=").append(ct0)
+                        for (c in cookies) {
+                            if (!c.name.equals("auth_token", ignoreCase = true) && !c.name.equals("ct0", ignoreCase = true)) {
+                                append("; ").append(c.name).append("=").append(c.value)
+                            }
+                        }
+                    }
+
+                    val headers = mapOf(
+                        "Authorization" to "Bearer $X_BEARER_TOKEN",
+                        "x-csrf-token" to ct0,
+                        "x-twitter-auth-type" to "OAuth2Session",
+                        "x-twitter-active-user" to "yes",
+                        "x-twitter-client-language" to "zh-tw",
+                        "Cookie" to cookieHeader
                     )
 
-                    val resp = respResult.getOrNull()
-                    if (resp != null) {
-                        if (resp.code == 200) {
-                            markActive(platform, "驗證成功 (已連線)")
-                        } else if (resp.code in listOf(401, 403)) {
-                            markExpired(platform, "登入狀態已失效 (HTTP ${resp.code})")
-                        } else {
-                            credentialStore.updateStatus(platform, sessionStatus(platform).state, "伺服器回應狀態異常 (HTTP ${resp.code})")
+                    val previousState = sessionStatus(platform).state
+                    var all404 = true
+                    var lastMalformed200 = false
+                    var lastErrorDetail: String? = null
+
+                    for (endpoint in X_VALIDATOR_ENDPOINTS) {
+                        val respResult = httpSession.fetch(
+                            url = endpoint.url,
+                            profile = RequestProfile.API,
+                            origin = "https://x.com",
+                            referer = "https://x.com/",
+                            customHeaders = headers
+                        )
+
+                        val resp = respResult.getOrNull()
+                        if (resp == null) {
+                            val err = respResult.exceptionOrNull()
+                            val msg = err?.message ?: "連線逾時"
+                            val retainedState = retainTransientState(previousState)
+                            val diag = "validator=x endpoint=${endpoint.name} http_status=0 identity_present=false classification=$retainedState details=network_failure"
+                            Log.d(TAG, diag)
+                            credentialStore.updateStatus(platform, retainedState, "網路連線失敗 ($msg)，保留目前狀態")
                             _statusFlows[platform]?.value = sessionStatus(platform)
+                            return@withContext Result.success(sessionStatus(platform))
                         }
-                    } else {
-                        val err = respResult.exceptionOrNull()
-                        val msg = err?.message ?: "連線逾時"
-                        credentialStore.updateStatus(platform, sessionStatus(platform).state, "網路連線失敗 ($msg)，保留待驗證")
-                        _statusFlows[platform]?.value = sessionStatus(platform)
+
+                        val code = resp.code
+                        if (code != 404) {
+                            all404 = false
+                        }
+
+                        when (code) {
+                            200 -> {
+                                val identityProof = extractXIdentityProof(resp.body)
+                                if (!identityProof.isNullOrBlank()) {
+                                    val diag = "validator=x endpoint=${endpoint.name} http_status=200 identity_present=true classification=ACTIVE"
+                                    Log.d(TAG, diag)
+                                    markActive(platform, "驗證成功 (已連線: $identityProof)")
+                                    return@withContext Result.success(sessionStatus(platform))
+                                } else {
+                                    val diag = "validator=x endpoint=${endpoint.name} http_status=200 identity_present=false classification=CONFIGURED"
+                                    Log.d(TAG, diag)
+                                    lastMalformed200 = true
+                                }
+                            }
+                            401 -> {
+                                val diag = "validator=x endpoint=${endpoint.name} http_status=401 identity_present=false classification=EXPIRED"
+                                Log.d(TAG, diag)
+                                markExpired(platform, "登入狀態已失效 (HTTP 401)")
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                            403 -> {
+                                val isExplicitAuthRejection = isXExplicitAuthRejection(resp.body)
+                                if (isExplicitAuthRejection) {
+                                    val diag = "validator=x endpoint=${endpoint.name} http_status=403 identity_present=false classification=EXPIRED"
+                                    Log.d(TAG, diag)
+                                    markExpired(platform, "登入狀態已失效 (HTTP 403)")
+                                    return@withContext Result.success(sessionStatus(platform))
+                                } else {
+                                    val diag = "validator=x endpoint=${endpoint.name} http_status=403 identity_present=false classification=CONFIGURED details=challenge_or_restriction"
+                                    Log.d(TAG, diag)
+                                    credentialStore.updateStatus(platform, SessionState.CONFIGURED, "需要安全驗證或受到限制 (HTTP 403)，保留待驗證")
+                                    _statusFlows[platform]?.value = sessionStatus(platform)
+                                    return@withContext Result.success(sessionStatus(platform))
+                                }
+                            }
+                            404 -> {
+                                val diag = "validator=x endpoint=${endpoint.name} http_status=404 identity_present=false classification=FALLBACK"
+                                Log.d(TAG, diag)
+                            }
+                            429 -> {
+                                val retainedState = retainTransientState(previousState)
+                                val diag = "validator=x endpoint=${endpoint.name} http_status=429 identity_present=false classification=$retainedState"
+                                Log.d(TAG, diag)
+                                credentialStore.updateStatus(platform, retainedState, "請求過於頻繁 (HTTP 429)，保留目前狀態")
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                            in 500..599 -> {
+                                val retainedState = retainTransientState(previousState)
+                                val diag = "validator=x endpoint=${endpoint.name} http_status=$code identity_present=false classification=$retainedState"
+                                Log.d(TAG, diag)
+                                credentialStore.updateStatus(platform, retainedState, "伺服器暫時無法驗證 (HTTP $code)，保留目前狀態")
+                                _statusFlows[platform]?.value = sessionStatus(platform)
+                                return@withContext Result.success(sessionStatus(platform))
+                            }
+                            else -> {
+                                val diag = "validator=x endpoint=${endpoint.name} http_status=$code identity_present=false classification=FALLBACK"
+                                Log.d(TAG, diag)
+                                lastErrorDetail = "伺服器回應狀態異常 (HTTP $code)"
+                            }
+                        }
                     }
+
+                    if (all404) {
+                        val diag = "validator=x endpoints_exhausted=true last_http_status=404 identity_present=false classification=CONFIGURED details=validator_endpoints_unavailable"
+                        Log.d(TAG, diag)
+                        credentialStore.updateStatus(platform, SessionState.CONFIGURED, "驗證端點皆無法使用 (HTTP 404)，保留待驗證")
+                        _statusFlows[platform]?.value = sessionStatus(platform)
+                        return@withContext Result.success(sessionStatus(platform))
+                    }
+
+                    if (lastMalformed200) {
+                        credentialStore.updateStatus(platform, SessionState.CONFIGURED, "未檢測到有效帳號標記，保留待驗證")
+                        _statusFlows[platform]?.value = sessionStatus(platform)
+                        return@withContext Result.success(sessionStatus(platform))
+                    }
+
+                    credentialStore.updateStatus(platform, sessionStatus(platform).state, lastErrorDetail ?: "驗證未完成，保留目前狀態")
+                    _statusFlows[platform]?.value = sessionStatus(platform)
                     Result.success(sessionStatus(platform))
                 }
                 Platform.THREADS -> {
@@ -455,6 +557,65 @@ class AuthenticatedPlatformSessionProvider(
 
         private fun retainTransientState(previousState: SessionState): SessionState {
             return if (previousState == SessionState.ACTIVE) SessionState.ACTIVE else SessionState.CONFIGURED
+        }
+
+        data class XValidatorEndpoint(
+            val name: String,
+            val url: String
+        )
+
+        val X_VALIDATOR_ENDPOINTS = listOf(
+            XValidatorEndpoint("verify_credentials", "https://api.x.com/1.1/account/verify_credentials.json"),
+            XValidatorEndpoint("account_settings", "https://x.com/i/api/1.1/account/settings.json"),
+            XValidatorEndpoint("legacy_account_settings", "https://api.x.com/1.1/account/settings.json")
+        )
+
+        const val X_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+
+        private fun extractXIdentityProof(body: String): String? {
+            return runCatching {
+                val json = JSONObject(body)
+                val rootScreenName = json.optString("screen_name", "").trim().takeIf { it.isNotBlank() && it != "null" }
+                val userObj = json.optJSONObject("user")
+                val userScreenName = userObj?.optString("screen_name", "")?.trim()?.takeIf { it.isNotBlank() && it != "null" }
+                val screenName = rootScreenName ?: userScreenName
+
+                val rootIdStr = json.optString("id_str", "").trim().takeIf { it.isNotBlank() && it != "null" && it.all { ch -> ch.isDigit() } }
+                val userIdStr = userObj?.optString("id_str", "")?.trim()?.takeIf { it.isNotBlank() && it != "null" && it.all { ch -> ch.isDigit() } }
+                val rootIdNum = if (json.has("id")) json.optLong("id", 0L).takeIf { it > 0L }?.toString() else null
+                val userId = rootIdStr ?: userIdStr ?: rootIdNum
+
+                when {
+                    !screenName.isNullOrBlank() && !userId.isNullOrBlank() -> "@$screenName ($userId)"
+                    !screenName.isNullOrBlank() -> "@$screenName"
+                    !userId.isNullOrBlank() -> "User ID: $userId"
+                    else -> null
+                }
+            }.getOrNull()
+        }
+
+        private fun isXExplicitAuthRejection(body: String): Boolean {
+            return runCatching {
+                val json = JSONObject(body)
+                val errors = json.optJSONArray("errors")
+                if (errors != null) {
+                    for (i in 0 until errors.length()) {
+                        val err = errors.optJSONObject(i) ?: continue
+                        val code = err.optInt("code", 0)
+                        val msg = err.optString("message", "")
+                        if (code in listOf(32, 89, 99) ||
+                            msg.contains("Could not authenticate", ignoreCase = true) ||
+                            msg.contains("Invalid or expired token", ignoreCase = true) ||
+                            msg.contains("token_expired", ignoreCase = true)
+                        ) {
+                            return true
+                        }
+                    }
+                }
+                body.contains("Could not authenticate", ignoreCase = true) ||
+                        body.contains("Invalid or expired token", ignoreCase = true) ||
+                        body.contains("login_required", ignoreCase = true)
+            }.getOrDefault(false)
         }
     }
 }

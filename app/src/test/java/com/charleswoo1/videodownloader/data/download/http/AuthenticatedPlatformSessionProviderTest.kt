@@ -1131,4 +1131,292 @@ class AuthenticatedPlatformSessionProviderTest {
         assertTrue(provider.hasAuthenticatedSession(Platform.X))
         assertEquals(2, provider.cookiesFor(Platform.X).size)
     }
+
+    @Test
+    fun validateSession_firstEndpoint200WithIdentity_becomesActive() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf; twid=u%3D123"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+        val requestedHeaders = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
+                for (name in req.headers.names()) {
+                    requestedHeaders[name] = req.header(name) ?: ""
+                }
+                val json = """{"screen_name":"testuser","id_str":"987654321"}"""
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(json.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(info.details?.contains("@testuser (987654321)") == true)
+        assertEquals(1, requestedUrls.size)
+        assertEquals("https://api.x.com/1.1/account/verify_credentials.json", requestedUrls[0])
+
+        // Verify required headers
+        assertEquals("OAuth2Session", requestedHeaders["x-twitter-auth-type"])
+        assertEquals("x_test_csrf", requestedHeaders["x-csrf-token"])
+        assertEquals("yes", requestedHeaders["x-twitter-active-user"])
+        assertEquals("zh-tw", requestedHeaders["x-twitter-client-language"])
+        assertEquals("https://x.com", requestedHeaders["Origin"])
+        assertEquals("https://x.com/", requestedHeaders["Referer"])
+        assertTrue(requestedHeaders["Cookie"]?.contains("auth_token=x_test_auth") == true)
+        assertTrue(requestedHeaders["Cookie"]?.contains("ct0=x_test_csrf") == true)
+        assertTrue(requestedHeaders["Cookie"]?.contains("twid=u%3D123") == true)
+        assertTrue(requestedHeaders["Authorization"]?.startsWith("Bearer ") == true)
+    }
+
+    @Test
+    fun validateSession_first404Second200WithIdentity_becomesActive() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                requestedUrls.add(url)
+
+                if (url.contains("verify_credentials")) {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(404)
+                        .message("Not Found")
+                        .body("Endpoint not found".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                } else {
+                    val json = """{"screen_name":"fallback_user","language":"zh-tw"}"""
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(json.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.ACTIVE, info.state)
+        assertTrue(info.details?.contains("@fallback_user") == true)
+        assertEquals(2, requestedUrls.size)
+        assertEquals("https://api.x.com/1.1/account/verify_credentials.json", requestedUrls[0])
+        assertEquals("https://x.com/i/api/1.1/account/settings.json", requestedUrls[1])
+    }
+
+    @Test
+    fun validateSession_allEndpoints404_remainsConfigured() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val requestedUrls = mutableListOf<String>()
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                val req = chain.request()
+                requestedUrls.add(req.url.toString())
+                okhttp3.Response.Builder()
+                    .request(req)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(404)
+                    .message("Not Found")
+                    .body("Endpoint not found".toResponseBody("text/plain".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals("All 404 must remain CONFIGURED, not EXPIRED", SessionState.CONFIGURED, info.state)
+        assertTrue("Details must explain endpoints unavailable", info.details?.contains("404") == true)
+        assertEquals(3, requestedUrls.size)
+    }
+
+    @Test
+    fun validateSession_401ExplicitAuthRejection_becomesExpired() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(401)
+                    .message("Unauthorized")
+                    .body("""{"errors":[{"code":89,"message":"Invalid or expired token."}]}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.EXPIRED, info.state)
+        assertTrue(info.details?.contains("401") == true)
+    }
+
+    @Test
+    fun validateSession_403ExplicitAuthRejection_becomesExpired() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(403)
+                    .message("Forbidden")
+                    .body("""{"errors":[{"code":32,"message":"Could not authenticate you."}]}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.EXPIRED, info.state)
+        assertTrue(info.details?.contains("403") == true)
+    }
+
+    @Test
+    fun validateSession_403Challenge_remainsConfigured() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(403)
+                    .message("Forbidden")
+                    .body("<html><body>Cloudflare challenge</body></html>".toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals(SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("403") == true)
+    }
+
+    @Test
+    fun validateSession_transientNetworkFailure_retainsPreviousState() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(
+            retryPolicy = RetryPolicy.NO_RETRY,
+            customClientBuilder = {
+                addInterceptor {
+                    throw java.io.IOException("Connection timeout")
+                }
+            }
+        )
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals("Network failure must retain CONFIGURED", SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("網路連線失敗") == true)
+    }
+
+    @Test
+    fun validateSession_429RateLimited_retainsPreviousState() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(429)
+                    .message("Too Many Requests")
+                    .body("Rate limit exceeded".toResponseBody("text/plain".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals("429 must retain previous state", SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("429") == true)
+    }
+
+    @Test
+    fun validateSession_malformed200WithoutIdentity_remainsConfigured() {
+        val capturedHeader = "auth_token=x_test_auth; ct0=x_test_csrf"
+        provider.importCapturedSession(Platform.X, capturedHeader)
+
+        val session = PlatformHttpSession(customClientBuilder = {
+            addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body("""{"status":"ok","unknown_field":true}""".toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+        })
+
+        val valRes = kotlinx.coroutines.runBlocking {
+            provider.validateSession(Platform.X, session)
+        }
+
+        assertTrue(valRes.isSuccess)
+        val info = valRes.getOrThrow()
+        assertEquals("200 without identity proof must remain CONFIGURED", SessionState.CONFIGURED, info.state)
+        assertTrue(info.details?.contains("未檢測到有效帳號標記") == true)
+    }
 }

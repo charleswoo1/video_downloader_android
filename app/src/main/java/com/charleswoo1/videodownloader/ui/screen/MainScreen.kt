@@ -28,9 +28,11 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,6 +40,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -47,9 +50,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import com.charleswoo1.videodownloader.ui.LoginReminderHelper
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -90,8 +95,20 @@ fun MainScreen(
     val selectedQuality by viewModel.selectedQuality.collectAsState()
     val downloadState by viewModel.downloadState.collectAsState()
     val engineTrace by viewModel.engineTrace.collectAsState()
+    val showDebugUi by viewModel.showDebugUi.collectAsState()
+
+    val igSession by (viewModel.instagramSession?.collectAsState() ?: remember { mutableStateOf(null) })
+    val thSession by (viewModel.threadsSession?.collectAsState() ?: remember { mutableStateOf(null) })
+    val xSession by (viewModel.xSession?.collectAsState() ?: remember { mutableStateOf(null) })
+
+    val igState = igSession?.state ?: SessionState.NOT_CONFIGURED
+    val thState = thSession?.state ?: SessionState.NOT_CONFIGURED
+    val xState = xSession?.state ?: SessionState.NOT_CONFIGURED
+    val showLoginReminder = LoginReminderHelper.shouldShowReminder(igState, thState, xState)
+    val inactivePlatformCount = LoginReminderHelper.countInactivePlatforms(igState, thState, xState)
 
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showPlatformSessionsDialog by remember { mutableStateOf(false) }
     var importPlatform by remember { mutableStateOf<Platform?>(null) }
     val activeLoginPlatform by viewModel.activeLoginPlatform.collectAsState()
 
@@ -102,8 +119,8 @@ fun MainScreen(
                 actions = {
                     IconButton(onClick = { showSettingsDialog = true }) {
                         Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = "平台登入 Session 設定"
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = stringResource(R.string.action_settings)
                         )
                     }
                 },
@@ -123,6 +140,14 @@ fun MainScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Login Status Reminder (shown if any platform is not ACTIVE)
+            if (showLoginReminder) {
+                LoginStatusReminderCard(
+                    inactiveCount = inactivePlatformCount,
+                    onGoToSettings = { showSettingsDialog = true }
+                )
+            }
+
             // URL Input Section
             UrlInputSection(
                 url = urlInput,
@@ -216,52 +241,68 @@ fun MainScreen(
                 onCancel = { viewModel.cancelDownload(context) }
             )
 
-            if (engineTrace != null) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = engineTrace!!.toDisplaySummary(),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
+            // Debug / Diagnostics Section (Only rendered when showDebugUi is true)
+            if (showDebugUi) {
+                if (engineTrace != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer
                         )
-                        engineTrace?.diagnosticFingerprint?.takeIf { it.isNotBlank() }?.let { diag ->
-                            Spacer(modifier = Modifier.height(4.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
                             Text(
-                                text = diag,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                                text = engineTrace!!.toDisplaySummary(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
+                            engineTrace?.diagnosticFingerprint?.takeIf { it.isNotBlank() }?.let { diag ->
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = diag,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                                )
+                            }
                         }
                     }
                 }
+
+                val runtimeVersion by viewModel.runtimeVersion.collectAsState()
+                val runtimeDiagnostics by viewModel.runtimeDiagnostics.collectAsState()
+
+                RuntimeDiagnosticsSection(
+                    diagnostics = runtimeDiagnostics,
+                    runtimeVersion = runtimeVersion
+                )
             }
-
-            val runtimeVersion by viewModel.runtimeVersion.collectAsState()
-            val runtimeDiagnostics by viewModel.runtimeDiagnostics.collectAsState()
-
-            RuntimeDiagnosticsSection(
-                diagnostics = runtimeDiagnostics,
-                runtimeVersion = runtimeVersion
-            )
         }
     }
 
-    if (showSettingsDialog && activeLoginPlatform == null) {
-        PlatformSessionsDialog(
+    if (showSettingsDialog && !showPlatformSessionsDialog && activeLoginPlatform == null) {
+        AppSettingsDialog(
             viewModel = viewModel,
             onDismiss = { showSettingsDialog = false },
+            onManagePlatformSessions = {
+                showSettingsDialog = false
+                showPlatformSessionsDialog = true
+            }
+        )
+    }
+
+    if (showPlatformSessionsDialog && activeLoginPlatform == null) {
+        PlatformSessionsDialog(
+            viewModel = viewModel,
+            onDismiss = {
+                showPlatformSessionsDialog = false
+                showSettingsDialog = true
+            },
             onOpenImport = { targetPlatform ->
                 importPlatform = targetPlatform
             },
             onStartWebLogin = { targetPlatform ->
-                showSettingsDialog = false
                 viewModel.startWebLogin(targetPlatform)
             }
         )
@@ -682,6 +723,199 @@ fun DownloadProgressSection(
         DownloadState.Idle -> {
             // Idle, do nothing
         }
+    }
+}
+
+@Composable
+fun LoginStatusReminderCard(
+    inactiveCount: Int,
+    onGoToSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    text = stringResource(R.string.reminder_login_title),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Text(
+                text = LoginReminderHelper.getReminderMessage(inactiveCount),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Button(
+                    onClick = onGoToSettings,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text(stringResource(R.string.action_go_to_settings), style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppSettingsDialog(
+    viewModel: MainViewModel,
+    onDismiss: () -> Unit,
+    onManagePlatformSessions: () -> Unit
+) {
+    val igSession by (viewModel.instagramSession?.collectAsState() ?: remember { mutableStateOf(null) })
+    val thSession by (viewModel.threadsSession?.collectAsState() ?: remember { mutableStateOf(null) })
+    val xSession by (viewModel.xSession?.collectAsState() ?: remember { mutableStateOf(null) })
+    val showDebugUi by viewModel.showDebugUi.collectAsState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(stringResource(R.string.title_settings), fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // [平台登入] Section
+                Text(
+                    text = stringResource(R.string.section_platform_sessions),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PlatformStatusRow(
+                            title = "Instagram",
+                            status = igSession?.state ?: SessionState.NOT_CONFIGURED
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        PlatformStatusRow(
+                            title = "Threads",
+                            status = thSession?.state ?: SessionState.NOT_CONFIGURED
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        PlatformStatusRow(
+                            title = "X (Twitter)",
+                            status = xSession?.state ?: SessionState.NOT_CONFIGURED
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedButton(
+                            onClick = onManagePlatformSessions,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.action_manage_platform_sessions))
+                        }
+                    }
+                }
+
+                // [進階] Section
+                Text(
+                    text = stringResource(R.string.section_advanced),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.setting_debug_ui),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = stringResource(R.string.setting_debug_ui_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = showDebugUi,
+                            onCheckedChange = { viewModel.setShowDebugUi(it) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("關閉")
+            }
+        }
+    )
+}
+
+@Composable
+fun PlatformStatusRow(
+    title: String,
+    status: SessionState
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        val (badgeText, badgeColor) = when (status) {
+            SessionState.ACTIVE -> "已連線" to MaterialTheme.colorScheme.primary
+            SessionState.CONFIGURED -> "待驗證" to MaterialTheme.colorScheme.tertiary
+            SessionState.EXPIRED -> "已過期" to MaterialTheme.colorScheme.error
+            SessionState.NOT_CONFIGURED -> "未登入" to MaterialTheme.colorScheme.outline
+        }
+        Text(
+            text = badgeText,
+            color = badgeColor,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }
 

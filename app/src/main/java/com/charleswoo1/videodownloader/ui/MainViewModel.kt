@@ -13,6 +13,7 @@ import com.charleswoo1.videodownloader.domain.model.MediaInfo
 import com.charleswoo1.videodownloader.domain.model.QualityOption
 import com.charleswoo1.videodownloader.domain.url.SharedTextUrlExtractor
 import com.charleswoo1.videodownloader.service.DownloadService
+import com.charleswoo1.videodownloader.ui.preferences.UiPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,7 +27,18 @@ sealed interface AnalysisState {
     data class Error(val message: String) : AnalysisState
 }
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(
+    application: Application,
+    private val uiPreferences: UiPreferences = UiPreferences(application)
+) : AndroidViewModel(application) {
+
+    private val _showDebugUi = MutableStateFlow(uiPreferences.showDebugUi)
+    val showDebugUi: StateFlow<Boolean> = _showDebugUi.asStateFlow()
+
+    fun setShowDebugUi(enabled: Boolean) {
+        uiPreferences.showDebugUi = enabled
+        _showDebugUi.value = enabled
+    }
 
     private val downloadEngine = DownloadRepository.getEngine(application)
 
@@ -99,7 +111,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.collectDiagnostics(application)
+            try {
+                _runtimeDiagnostics.value = RuntimeDiagnosticsHelper.collectDiagnostics(application)
+            } catch (_: Throwable) {
+                // Diagnostics collection is best-effort and should not crash ViewModel in test/restricted environments
+            }
         }
     }
 

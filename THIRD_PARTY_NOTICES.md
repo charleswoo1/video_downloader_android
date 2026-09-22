@@ -127,10 +127,13 @@ This document provides notice of these dependencies, their upstream repositories
 
 ---
 
-> [!IMPORTANT]
-> This repository currently does not contain a top-level project `LICENSE` file. Before publishing a public production binary, the repository owner must explicitly choose the project-level license and confirm compliance with all bundled third-party license obligations, including GPL-licensed runtime components.
->
-> This notice file documents third-party software; it does not itself grant a license to this project's original source code.
->
-> GPL-licensed repositories used only for architectural research (InstaDownload, YTDLnis, Seal, NewPipeExtractor) remain reference-only; no source code from those repositories is intentionally copied or directly translated into this repository.
+---
 
+## Project License
+
+This project's original source code is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the repository's top-level [LICENSE](LICENSE) file for the complete license text.
+
+Third-party components remain subject to their respective licenses documented above. Public binary releases must continue to satisfy the applicable redistribution and corresponding-source obligations of bundled components. Each production release must point to the exact matching Git tag/source revision.
+
+> [!NOTE]
+> GPL-licensed repositories used only for architectural research (InstaDownload, YTDLnis, Seal, NewPipeExtractor) remain reference-only; no source code from those repositories is intentionally copied or directly translated into this repository.

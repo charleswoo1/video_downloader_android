@@ -416,6 +416,19 @@ Do not improvise around these boundaries.
 
 ---
 
+## Phase 3.2 Note — Authoritative Web Session Identity Validator
+
+In Phase 3.2, the X session validation probe was upgraded from legacy endpoints (`verify_credentials.json` / `account/settings.json`) to the authoritative web-session identity endpoint:
+
+- URL: `GET https://x.com/i/api/1.1/account/multi/list.json`
+- Supports both newer `{"users": [...]}` object shape and legacy `[{"user": ...}]` array shape (with string or numeric user id normalization).
+- Valid identity requires non-empty `screen_name` and credible numeric `user_id` or `id_str` -> `ACTIVE`.
+- Non-auth 401/403 (e.g. anti-bot/WAF challenges) and transient errors (404, 429, 5xx, network failure) preserve `previousState` rather than falsely expiring.
+- Explicit auth rejection evidence (`errors` with code 32/89/215, token expired, login required) transitions to `EXPIRED`.
+- `x-client-transaction-id` is NOT implemented in Phase 3.2.
+
+---
+
 ## Required completion report
 
 Return exactly this structure:

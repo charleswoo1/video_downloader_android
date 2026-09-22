@@ -2,7 +2,18 @@
 
 ## Supported versions
 
-本專案目前仍在早期開發階段，尚未發布第一個正式穩定版本。安全性修正以目前維護中的最新版本與 `main` 為主。
+本專案正在準備第一個正式版本 `v1.0.0`。
+
+在 `v1.0.0` 正式發布前，安全性修正以目前維護中的最新 `main` 與 release candidate 為主。
+
+正式發布後：
+
+| Version | Supported |
+| --- | --- |
+| 1.0.x | ✅ |
+| < 1.0.0 | ❌ |
+
+若後續發布新的 minor / major 穩定版本，支援範圍會再更新。
 
 ## Reporting a vulnerability
 

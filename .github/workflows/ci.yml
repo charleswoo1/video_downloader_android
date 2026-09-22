@@ -43,11 +43,11 @@ jobs:
       - name: Prepare Deterministic APK Artifact
         run: |
           mkdir -p build-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-v0.1.0-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk build-artifacts/SocialVideoDownloader-Android-v1.0.0-debug.apk
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: SocialVideoDownloader-Android-CI-v0.1.0-run-${{ github.run_number }}
-          path: build-artifacts/SocialVideoDownloader-Android-v0.1.0-debug.apk
+          name: SocialVideoDownloader-Android-CI-v1.0.0-run-${{ github.run_number }}
+          path: build-artifacts/SocialVideoDownloader-Android-v1.0.0-debug.apk
           retention-days: 2

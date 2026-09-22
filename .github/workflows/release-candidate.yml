@@ -1,6 +1,8 @@
 name: Android Release Candidate
 
 # Manual-only release candidate build.
+# Run this only AFTER the reviewed release-prep PR has been merged into the default branch (main).
+# workflow_dispatch is intentionally used from main so the validated RC commit is also the future tag target.
 # This workflow creates a signed APK + SHA256SUMS.txt artifact.
 # It NEVER creates a Git tag or GitHub Release.
 on:
@@ -17,6 +19,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate release candidate source
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Release Candidate builds must be dispatched from main. Current ref: $GITHUB_REF"
+            exit 1
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0

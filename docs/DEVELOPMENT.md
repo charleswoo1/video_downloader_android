@@ -102,15 +102,25 @@ CI Artifact 是測試產物，與正式 GitHub Release 不同。
 
 ## Release 準備
 
-正式版本發佈前至少確認：
+正式版本發佈前至少確認（完整流程見 [RELEASE.md](RELEASE.md)）：
 
 1. `versionName` / `versionCode` 正確。
 2. Unit tests、lint、assemble 全部通過。
-3. Release candidate 已完成實機驗證。
-4. README、SECURITY、THIRD_PARTY_NOTICES 與版本資訊一致。
-5. Release APK 命名與 checksum 流程已確認。
-6. License / third-party obligations 已完成確認。
-7. 建立 tag 與 GitHub Release 前取得 repository owner 明確授權。
+3. Manual Debug CI PASS。
+4. Signed Release Candidate workflow PASS。
+5. Release candidate 已完成實機驗證。
+6. README、CHANGELOG、SECURITY、THIRD_PARTY_NOTICES 與版本資訊一致。
+7. Release APK 命名與 checksum 已確認。
+8. Project-level license 與 third-party obligations 已完成確認。
+9. 建立 tag 與 GitHub Release 前取得 repository owner 明確授權。
+
+v1.0.0 採：
+
+- `versionName = "1.0.0"`
+- `versionCode = 10000`
+- APK：`SocialVideoDownloader-Android-v1.0.0.apk`
+- checksum：`SHA256SUMS.txt`
+- tag：`v1.0.0`
 
 ## 其他開發文件
 
@@ -118,6 +128,8 @@ CI Artifact 是測試產物，與正式 GitHub Release 不同。
 - [AGENTS.md](../AGENTS.md)：AI coding agent 工作規則
 - [SECURITY.md](../SECURITY.md)：安全政策
 - [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)：第三方軟體與授權
+- [RELEASE.md](RELEASE.md)：正式版本簽章、RC 與發佈流程
+- [CHANGELOG.md](../CHANGELOG.md)：版本變更紀錄
 - [docs/handoffs/](handoffs/)：歷史 handoff / implementation contracts
 - [docs/references/](references/)：上游與實作參考
 - [docs/research/](research/)：研究記錄
